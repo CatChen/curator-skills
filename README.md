@@ -1,0 +1,28 @@
+# Curator Skills
+
+> Life is short. Spend your time on things you'll love.
+
+Curator Skills is a planned collection of personal AI curator skills to help you discover what is worth your time, based on what you have actually experienced, what you enjoy, and what matters to you.
+
+Most recommendation systems have incentives to increase engagement, consumption, or purchases. Your curator should serve you instead: it might suggest a game you already own, a particularly relevant book, skipping a popular title, stopping an unrewarding experience, or consuming nothing new. Time already spent, popularity, ratings, and discounts alone are not reasons to continue or buy.
+
+## Planned skills
+
+| Skill | Intended purpose | Status |
+| --- | --- | --- |
+| Game Curator (`game-curator`) | Decide what games to play, purchase, continue, or skip using personal gaming history and preferences. Steam is the initial intended source. | Planned; not implemented or installable. |
+| Book Curator (`book-curator`) | Decide what books to read, revisit, purchase, continue, or skip using personal reading history and preferences. Kindle and Goodreads are initial intended sources. | Planned; not implemented or installable. |
+
+Source availability and reliability still need to be verified. There are no installation instructions yet; they will be published when skills are implemented.
+
+## How they are intended to work
+
+With your permission, a skill will use relevant information you provide or make available, such as history, reviews, and conversation feedback. It will distinguish observations from inferred preferences, explain its reasoning and uncertainty, and learn from your corrections. A long playtime or an unfinished book can have many explanations; neither proves enjoyment or dislike. Useful advice should still be possible with partial information.
+
+Skills are planned as independently installable packages following the [Agent Skills specification](https://agentskills.io/specification). See the [architecture](docs/architecture.md) and [philosophy](docs/philosophy.md) for the design.
+
+## Privacy and contributions
+
+Personal data should stay under your control. Collection is intended to be read-only and limited to what your task needs; this project does not introduce telemetry or a hosted data store by default. Your chosen agent runtime and connected services may process data under their own terms. Read the [privacy principles](docs/privacy.md) for details.
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and the [agent instructions](AGENTS.md). This repository is licensed under the [MIT License](LICENSE).

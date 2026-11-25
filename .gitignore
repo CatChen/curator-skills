@@ -1,0 +1,39 @@
+# Personal data belongs outside the repository. These conventional local paths
+# are ignored as a safeguard, not a substitute for reviewing staged changes.
+/data/
+**/personal-data/
+**/exports/
+**/profiles/
+**/user-data/
+**/local-data/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+token.json
+tokens.json
+secrets.json
+
+# Generated artifacts and common development caches
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+coverage/
+.coverage
+.DS_Store
+.idea/
+.vscode/
