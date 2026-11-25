@@ -10,10 +10,10 @@ Most recommendation systems have incentives to increase engagement, consumption,
 
 | Skill | Intended purpose | Status |
 | --- | --- | --- |
-| Game Curator (`game-curator`) | Decide what games to play, purchase, continue, or skip using personal gaming history and preferences. | Available for conversational use; experimental partial Steam collectors are not live-verified. |
+| Game Curator (`game-curator`) | Decide what games to play, purchase, continue, or skip using personal gaming history and preferences. | Available for conversational use; experimental partial Steam collectors have limited live verification. |
 | Book Curator (`book-curator`) | Decide what books to read, revisit, purchase, continue, or skip using personal reading history and preferences. Kindle and Goodreads are initial intended sources. | Planned; not implemented or installable. |
 
-Steam account-specific availability and collector reliability still need live verification. Book Curator is not yet installable.
+Steam collector reliability and completeness need further live verification. Book Curator is not yet installable.
 
 ## How they work
 
@@ -27,7 +27,7 @@ For Codex, from the repository root run `mkdir -p ~/.agents/skills && cp -R skil
 
 Try “My favorite games are Portal 2, Fez, and Outer Wilds. What should I play next?”, “Review my wishlist,” or “Should I continue this game?” No import is required. For browser discovery ask: “Diagnose Game Curator's Steam data acquisition capabilities in this session.”
 
-The skill includes experimental, read-only browser-console collectors for Steam library, wishlist, reviews, and Replay and optional Python import/validation tools. They capture partial page data and have not been tested against authenticated live Steam pages. Wishlist cache extraction and optional metadata lookup follow a historical exporter; library scrolling is experimental, while automatic review pagination and structured Replay metrics are not implemented. Browser access does not guarantee script execution. See [collector instructions and manual import](skills/game-curator/references/data.md), [diagnostics](skills/game-curator/references/acquisition.md), and [manual test procedures](docs/game-curator-testing.md). Run synthetic tests from the repository root with `python3 -m unittest discover -s tests/game-curator -v`; the optional development-only wishlist simulation uses `node tests/game-curator/test_wishlist.js`.
+The skill includes experimental browser-runtime collectors for Steam library, wishlist, reviews, and Replay and optional Python import/validation tools. Collectors use read-only DOM evaluation and host browser controls; they return partial data and do not need browser-console access. Initial Chrome tests exercised all four; an unauthenticated IAB test exercised public reviews only. Structured Replay metrics, complete coverage and authenticated IAB access remain unverified. See [collector instructions and manual import](skills/game-curator/references/data.md), [diagnostics](skills/game-curator/references/acquisition.md), and [manual test procedures](docs/game-curator-testing.md). Run synthetic tests from the repository root with `python3 -m unittest discover -s tests/game-curator -v`; the optional development-only browser simulation uses `node tests/game-curator/test_browser.mjs`.
 
 ## Privacy and contributions
 
