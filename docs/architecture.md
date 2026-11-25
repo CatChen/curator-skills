@@ -30,3 +30,5 @@ At the time of a task, inspect the tools and permissions actually available. Do 
 6. A user-provided export or upload, with guidance where needed.
 
 These are preferences, not a reason to bypass security or access controls. Fall back when a method is unavailable, report incomplete data, and produce useful advice from partial evidence without inventing missing values. Collection should be read-only unless a future feature explicitly requires and receives authorization for writes. See [privacy](privacy.md).
+
+An adapter or collector failure does not establish that its browser is unavailable. Diagnose the intended operation through supported direct control of the same session; preserve partial results, adapt or temporarily repair within permissions, and verify source identity, fields and coverage. Bound retries and respect access restrictions. Permanent changes to installed skills require authorization. The detailed [recovery procedure](../skills/game-curator/references/acquisition.md#recovery) distinguishes operation failures from session failures.

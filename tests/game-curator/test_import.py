@@ -64,6 +64,52 @@ class ImportTests(unittest.TestCase):
         self.assertTrue(validate.validate(valid)[0])
         self.assertTrue(validate.validate({'version':2})[0])
 
+    def test_structured_library_fields_are_preserved(self):
+        row = {'appid': 42, 'hours': 27.8, 'playtimeDisplay': '27.8 hours',
+               'lastPlayedDisplay': 'Jan 21, 2024', 'achievements': {'unlocked': 18, 'total': 36}}
+        result = normalize.normalize([capture('library', [row])])['captures'][0]['records'][0]
+        for field in ('hours', 'playtimeDisplay', 'lastPlayedDisplay', 'achievements'):
+            self.assertEqual(result[field], row[field])
+
+    def test_invalid_semantic_values_are_reported_without_data_loss(self):
+        row = {'appid': 42, 'hours': -1, 'achievements': {'unlocked': 4, 'total': 3}}
+        result = normalize.normalize([capture('library', [row])])['captures'][0]
+        self.assertEqual(result['records'][0]['hours'], -1)
+        self.assertTrue(any('playtime' in warning for warning in result['warnings']))
+        self.assertTrue(any('achievement' in warning for warning in result['warnings']))
+
+    def test_distinct_accounts_refused_and_latest_view_is_additive(self):
+        first = capture('library', [{'appid': 1, 'hours': 2}], account='local-account-a', batchId='one')
+        second = capture('library', [{'appid': 2, 'hours': 4}], account='local-account-a', batchId='two', capturedAt='2026-02-01T00:00:00Z')
+        archive = normalize.normalize([second, first])
+        self.assertEqual({x['record']['appid'] for x in archive['latestObservations']}, {1, 2})
+        self.assertEqual(len(archive['captures']), 2)
+        second['account'] = 'local-account-b'
+        with self.assertRaisesRegex(ValueError, 'cross-account'):
+            normalize.normalize([first, second])
+
+    def test_unknown_account_never_merged_into_latest_view(self):
+        archive = normalize.normalize([capture('wishlist', [{'appid': 3}])])
+        self.assertEqual(archive['latestObservations'], [])
+        self.assertTrue(any('account' in warning for warning in archive['captures'][0]['warnings']))
+
+    def test_historical_formats(self):
+        for version in (2, 3):
+            data = {'type':'library', 'schemaVersion':version, 'exportedAt':'2026-01-01T00:00:00Z',
+                    'games':[{'appid':10,'hours':3}], 'expectedCount':2}
+            result = normalize.normalize([data])['captures'][0]
+            self.assertEqual(result['records'][0]['hours'], 3)
+            self.assertEqual(result['originalExport'], data)
+            self.assertTrue(any('differs' in warning for warning in result['warnings']))
+        for version in (3, 4):
+            data = {'type':'wishlist', 'schemaVersion':version, 'exportedAt':'2026-01-01T00:00:00Z', 'games':[{'appid':11,'rank':1}]}
+            self.assertEqual(normalize.normalize([data])['captures'][0]['source'], 'wishlist')
+        for version in (1, 2):
+            data = {'format':'steam-review-export','version':version,'exportedAt':'2026-01-01T00:00:00Z', 'reviews':[{'appId':12,'gameName':'Synthetic','review':'Example'}]}
+            self.assertEqual(normalize.normalize([data])['captures'][0]['records'][0]['appid'], 12)
+        data = {'format':'steam-replay-export','version':1,'capturedAt':'2026-01-01T00:00:00Z','year':2025,'semanticBlocks':[{'text':'50%'}]}
+        self.assertEqual(normalize.normalize([data])['captures'][0]['records'][0]['semanticBlocks'][0]['text'], '50%')
+
 
 if __name__ == '__main__':
     unittest.main()

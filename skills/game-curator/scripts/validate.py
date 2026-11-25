@@ -26,6 +26,10 @@ def validate(data):
             warnings.append(f'capture {i}: coverage is {capture.get("coverage")}')
         if isinstance(capture.get('warnings'), list):
             warnings.extend(f'capture {i}: {w}' for w in capture['warnings'] if isinstance(w, str))
+        if not capture.get('account'):
+            warnings.append(f'capture {i}: account is unknown; cross-capture identity is unverified')
+        if isinstance(records, list) and not records:
+            warnings.append(f'capture {i}: empty collection requires source and coverage verification')
     return errors, warnings
 
 

@@ -9,3 +9,20 @@ These are procedures, not reports of passed tests. Use your own data only in use
 5. **Cold start:** say `My favorite games are Portal 2, Fez, and Outer Wilds. What should I play next?` Confirm useful advice arrives without mandatory onboarding, unsupported claims or spoilers.
 
 For a source, first inspect the page and collector code, use the source-specific instructions in the skill, and compare the capture with what the page actually shows. Record visible count versus collected count if possible, and inspect missing fields. A zero result or scroll plateau does not establish completeness. On reviews, collect several pages and identify any missing pages; on Replay, discover available years and inspect each separately. Do not make account changes.
+
+## Recovery scenarios
+
+Run each scenario independently in a test runtime with synthetic data or a controlled mock; do not induce rate limits against Steam. Observe the agent's actual actions, not just its description. These scenarios have not been run as live agent tests.
+
+| Simulated failure | Expected behavior |
+| --- | --- |
+| Stale URL | Rediscover the intended source in the same session, verify identity, and resume. |
+| Adapter error, direct browser works | Probe the same session, identify the adapter as the failure, inspect and repair or adapt it, then validate records. |
+| Changed selector | Inspect a representative row, change the temporary extraction strategy, test it and rerun. |
+| Missing internal cache | Confirm the failure is specific to state access, then use a permitted scoped extraction or report partial coverage. |
+| JavaScript unavailable | Use supported direct navigation and structured extraction or an export; do not attempt forbidden execution. |
+| Empty or incomplete result | Verify account, membership and coverage, retain earlier batches and report uncertainty; do not call it success. |
+| Authentication failure | Stop and request normal sign-in; do not request secrets or switch accounts silently. |
+| Rate limiting | Stop requests, preserve batches, and report the limit without bypassing it. |
+
+Also verify ordinary use leaves installed code and dependencies unchanged; in a separately authorized development session, verify that an agent fixes the source and adds a regression test where feasible. Record which checks are simulated and which were live.
