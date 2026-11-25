@@ -18,6 +18,10 @@ The following are conceptual stages, not a shared framework or mandated pipeline
 
 Use code for reliable repetitive extraction and calculations, and language models for semantic interpretation and personalized reasoning. Domain-specific formats and storage can evolve independently. Share implementation only when actual duplication justifies it; no universal schema is prescribed.
 
+## Optional Curator Home
+
+`~/.curator/` is a preferred convention for a real user-controlled persistent home, not a mandatory path or a guarantee that a cloud sandbox, Codex and Claude share storage. Skills may have sibling directories. Game Curator's instruction-driven convention uses `game-curator/profile.md` for a concise understanding, `feedback.md` for dated evidence, and optional `cache/steam/` JSON source captures. Profile/feedback persistence and raw caching require separate explicit user opt-ins and host filesystem permissions. An authorized location can be rediscovered and read when useful; an unknown custom path or consent cannot be assumed. The skill falls back to conversation or supplied data when storage is unavailable and does not add a database, sync service or telemetry. See [persistence](../skills/game-curator/references/persistence.md) for formats, refresh and conflict handling.
+
 ## Capabilities and fallbacks
 
 At the time of a task, inspect the tools and permissions actually available. Do not assume a particular client has a browser, or that browser navigation allows arbitrary JavaScript. Subject to relevance, freshness, access, and user permission, prefer:
