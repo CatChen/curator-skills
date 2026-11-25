@@ -2,9 +2,9 @@
 
 ## Status and organization
 
-This repository currently contains foundational documentation only. Game Curator and Book Curator are planned; no skills, collectors, schemas, installation instructions, or data processing are implemented. Steam is an intended initial game source; Kindle and Goodreads are intended initial book sources. Their individual data availability and reliability require investigation.
+Game Curator is implemented with conversational curation and experimental partial Steam page collectors that return versioned records. Initial authenticated Chrome and IAB tests exercised collection; coverage and compatibility remain subject to runtime permissions and Steam changes. There is no automated multi-capture archive or historical-format importer; see [data and tools](../skills/game-curator/references/data.md). Book Curator is planned; Kindle and Goodreads are intended sources whose availability and reliability require investigation.
 
-When implemented, each skill will live in `skills/<skill-name>/` and be independently installable and self-contained. Follow the [Agent Skills specification](https://agentskills.io/specification): a valid `SKILL.md` is the entry point, with optional `references/`, `scripts/`, and useful `assets/`. Keep core instructions concise and load supporting material as needed. Do not create empty skills simply to represent plans.
+Each skill lives in `skills/<skill-name>/` and is independently installable and self-contained. Follow the [Agent Skills specification](https://agentskills.io/specification): a valid `SKILL.md` is the entry point, with optional `references/`, `scripts/`, and useful `assets/`. Keep core instructions concise and load supporting material as needed. Do not create empty skills simply to represent plans.
 
 ## Responsibilities
 
@@ -18,6 +18,10 @@ The following are conceptual stages, not a shared framework or mandated pipeline
 
 Use code for reliable repetitive extraction and calculations, and language models for semantic interpretation and personalized reasoning. Domain-specific formats and storage can evolve independently. Share implementation only when actual duplication justifies it; no universal schema is prescribed.
 
+## Optional Curator Home
+
+`~/.curator/` is a preferred convention for a real user-controlled persistent home, not a mandatory path or a guarantee that a cloud sandbox, Codex and Claude share storage. Skills may have sibling directories. Game Curator's instruction-driven convention uses `game-curator/profile.md` for a concise understanding, `feedback.md` for dated evidence, and optional `cache/steam/` JSON source captures. Profile/feedback persistence and raw caching require separate explicit user opt-ins and host filesystem permissions. With authorization, a minimal `settings.json` records those choices for a fresh session to inspect before personal files; invalid or unavailable settings fail closed. An unknown custom path cannot be assumed. The skill falls back to conversation or supplied data when storage is unavailable and does not add a database, sync service or telemetry. See [persistence](../skills/game-curator/references/persistence.md) for formats, refresh and conflict handling.
+
 ## Capabilities and fallbacks
 
 At the time of a task, inspect the tools and permissions actually available. Do not assume a particular client has a browser, or that browser navigation allows arbitrary JavaScript. Subject to relevance, freshness, access, and user permission, prefer:
@@ -30,3 +34,5 @@ At the time of a task, inspect the tools and permissions actually available. Do 
 6. A user-provided export or upload, with guidance where needed.
 
 These are preferences, not a reason to bypass security or access controls. Fall back when a method is unavailable, report incomplete data, and produce useful advice from partial evidence without inventing missing values. Collection should be read-only unless a future feature explicitly requires and receives authorization for writes. See [privacy](privacy.md).
+
+An adapter or collector failure does not establish that its browser is unavailable. Diagnose the intended operation through supported direct control of the same session; preserve partial results, adapt or temporarily repair within permissions, and verify source identity, fields and coverage. Bound retries and respect access restrictions. Permanent changes to installed skills require authorization. The detailed [recovery procedure](../skills/game-curator/references/acquisition.md#recovery) distinguishes operation failures from session failures.

@@ -1,6 +1,7 @@
 # Personal data belongs outside the repository. These conventional local paths
 # are ignored as a safeguard, not a substitute for reviewing staged changes.
 /data/
+**/.curator/
 **/personal-data/
 **/exports/
 **/profiles/
