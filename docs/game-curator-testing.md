@@ -1,0 +1,11 @@
+# Game Curator manual testing
+
+These are procedures, not reports of passed tests. Use your own data only in user-controlled storage outside the repository. Do not include personal data or identifiers in public issue reports. Record runtime/version, browser, observed capabilities and state, acquisition method, collector result, counts, completeness, fallback and limitations for each test. Each collector is experimental and may need changes after live observation.
+
+1. **Codex + Chrome:** install the skill, request `Diagnose Game Curator's Steam data acquisition capabilities in this session`, and use an authenticated Steam session only if available. Test library, wishlist, reviews and Replay separately, subject to the actual tool permissions. Save only authorized exports; validate and record warnings and discrepancies. Test manual export fallback if page-context execution is unavailable.
+2. **Codex + IAB:** repeat the diagnostic and each source independently. Do not assume Chrome capabilities or authentication carry over. Sign in normally if needed. Record whether the IAB permits page-context execution, returning output or downloads; use DOM/manual fallback if not.
+3. **Claude:** upload the packaged skill, verify activation, run the diagnostic and each feasible acquisition path, then exercise manual export/import fallback. Record actual permissions and any blockers.
+4. **No browser:** supply an export or describe games and feedback in conversation. Ask for a personalized recommendation; confirm the answer distinguishes evidence and unknowns and does not claim an import occurred.
+5. **Cold start:** say `My favorite games are Portal 2, Fez, and Outer Wilds. What should I play next?` Confirm useful advice arrives without mandatory onboarding, unsupported claims or spoilers.
+
+For a source, first inspect the page and collector code, use the source-specific instructions in the skill, and compare the capture with what the page actually shows. Record visible count versus collected count if possible, and inspect missing fields. A zero result or scroll plateau does not establish completeness. On reviews, collect several pages and identify any missing pages; on Replay, discover available years and inspect each separately. Do not make account changes.

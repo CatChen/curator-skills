@@ -3,7 +3,7 @@
 ## Scope and organization
 
 - Follow the [Agent Skills specification](https://agentskills.io/specification). Put independently installable, self-contained skills under `skills/<skill-name>/`. Each implemented skill needs a valid `SKILL.md`; use focused `references/` and deterministic `scripts/` as needed, and `assets/` only when useful. Keep the entry point concise and load details on demand.
-- Game Curator and Book Curator are planned, not implemented. Do not create discoverable placeholder skills or claim planned behavior works. Verify source availability before promising it.
+- Game Curator is implemented with experimental Steam capture paths; Book Curator is planned. Do not create discoverable placeholder skills or claim unverified behavior works. Verify source availability before promising it.
 - Keep acquisition, normalization and validation, preference inference, recommendations, and feedback/profile updates distinct. Use deterministic code for reliable extraction, parsing, merging, deduplication, and calculations; use the model for semantic interpretation and personalized reasoning.
 - Let domains evolve independently. Extract shared code only after real duplication appears; do not invent a universal schema or framework. Avoid unnecessary dependencies, infrastructure, package managers, MCP servers, browser extensions, databases, web apps, and hosted services.
 

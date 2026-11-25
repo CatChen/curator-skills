@@ -2,9 +2,9 @@
 
 ## Status and organization
 
-This repository currently contains foundational documentation only. Game Curator and Book Curator are planned; no skills, collectors, schemas, installation instructions, or data processing are implemented. Steam is an intended initial game source; Kindle and Goodreads are intended initial book sources. Their individual data availability and reliability require investigation.
+Game Curator is implemented with conversational curation, experimental partial Steam page collectors, and a versioned import format. Authenticated Steam page compatibility is unverified; see its [data and tools](../skills/game-curator/references/data.md). Book Curator is planned; Kindle and Goodreads are intended sources whose availability and reliability require investigation.
 
-When implemented, each skill will live in `skills/<skill-name>/` and be independently installable and self-contained. Follow the [Agent Skills specification](https://agentskills.io/specification): a valid `SKILL.md` is the entry point, with optional `references/`, `scripts/`, and useful `assets/`. Keep core instructions concise and load supporting material as needed. Do not create empty skills simply to represent plans.
+Each skill lives in `skills/<skill-name>/` and is independently installable and self-contained. Follow the [Agent Skills specification](https://agentskills.io/specification): a valid `SKILL.md` is the entry point, with optional `references/`, `scripts/`, and useful `assets/`. Keep core instructions concise and load supporting material as needed. Do not create empty skills simply to represent plans.
 
 ## Responsibilities
 

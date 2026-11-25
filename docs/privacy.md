@@ -1,6 +1,6 @@
 # Privacy principles
 
-Curator Skills is a public repository for reusable instructions and code, not a place for anyone's personal library, reviews, account details, credentials, or preference profile. The project currently has no collectors or storage implementation.
+Curator Skills is a public repository for reusable instructions and code, not a place for anyone's personal library, reviews, account details, credentials, or preference profile. Game Curator includes experimental local capture and import tools; personal outputs should be saved outside the repository.
 
 When future skills use your data, they should collect only what is relevant to your request, keep it in storage you control, and avoid unnecessary transfers. Collection should be read-only unless a future feature explicitly requires and receives your authorization for a change. A skill should never ask for your password or session cookies. It should tell you when information is missing or incomplete and retain enough source and timing information to explain what it used.
 
