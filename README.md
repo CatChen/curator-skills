@@ -23,7 +23,30 @@ Skills are independently installable packages following the [Agent Skills specif
 
 ## Install and try Game Curator
 
-For Codex, from the repository root run `mkdir -p ~/.agents/skills && cp -R skills/game-curator ~/.agents/skills/`, then start a new session. For Claude, from the repository root run `(cd skills && zip -r /tmp/game-curator.zip game-curator)`. Upload the ZIP through Customize → Skills → + → Create skill → Upload a skill, subject to your account's capabilities. The ZIP must contain `game-curator/` at its root. Neither installation has been live-tested here.
+For a published version, the optional [skills CLI](https://github.com/vercel-labs/skills) requires Node.js 22.20 or later and npm for installation, not for ordinary conversational use. It is interactive by default. Choose the intended agent:
+
+```sh
+npx skills add CatChen/curator-skills --skill game-curator --global --agent codex
+npx skills add CatChen/curator-skills --skill game-curator --global --agent claude-code
+```
+
+The default repository branch does not include unmerged pull requests. To evaluate a particular revision, use a checkout pinned to its full commit and install from that local checkout using the CLI's documented local-path support, or use a pinned copy as described below. Review the [CLI commands and options](https://github.com/vercel-labs/skills/blob/main/docs/commands.md), [Codex skills](https://developers.openai.com/codex/skills), and [Claude Code skills](https://code.claude.com/docs/en/skills).
+
+For development, from the desired repository checkout, a maintainer can link the source to the user-level skill directory:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+ln -s "$(pwd)/skills/game-curator" "$HOME/.agents/skills/game-curator"
+# Alternatively, for Claude Code:
+mkdir -p "$HOME/.claude/skills"
+ln -s "$(pwd)/skills/game-curator" "$HOME/.claude/skills/game-curator"
+```
+
+Inspect an existing destination first, including a dangling symlink; do not replace another installation without understanding it. A link follows subsequent source changes. For an independent evaluation, use a clean checkout at the full commit or copy its complete `game-curator` directory to an empty destination, checking that `SKILL.md`, `references/` and `scripts/` are present and no stale files remain. Do not merge a copy into an older installation.
+
+The repository's `skills/game-curator` is source; a project-level `.agents/skills/game-curator` and user-level `~/.agents/skills/game-curator` are separate discovery locations. In a fresh Codex session outside this repository, check that `$game-curator` is available and selected, then verify the loaded path and its symlink target or revision and supporting files. Reading the checkout manually is not proof of installation. If absent, restart and check discovery and project-level masking. For Claude Code, start a fresh session and check `/game-curator` and its loaded path. Installation does not itself grant browser or filesystem access and should not alter `~/.curator`.
+
+For Claude Cowork, package separately from the repository root with `(cd skills && zip -r /tmp/game-curator.zip game-curator)` and upload through Customize → Skills → + → Create skill → Upload a skill, subject to account capabilities. The ZIP must contain `game-curator/` at its root; Cowork upload is separate from Claude Code installation. Verify actual discovery in the target runtime.
 
 Try “My favorite games are Portal 2, Fez, and Outer Wilds. What should I play next?”, “Review my wishlist,” or “Should I continue this game?” No import is required. For browser discovery ask: “Diagnose Game Curator's Steam data acquisition capabilities in this session.”
 
