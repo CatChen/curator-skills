@@ -37,9 +37,12 @@ def adapt_legacy(data):
         warnings.append(f'displayed expected count {expected} differs from {len(rows)} collected records')
     if data.get('possiblyIncomplete'):
         warnings.append('historical export reports possible incompleteness')
+    if data.get('playtimeMayIncludeIdling'):
+        warnings.append('reported playtime may include idling and may not reflect meaningful gameplay')
     return {'format':'game-curator-steam-export', 'version':1, 'source':source,
             'capturedAt':stamp, 'method':'historical-import', 'coverage':'unknown',
-            'warnings':warnings, 'records':rows, 'originalExport':data}
+            'warnings':warnings, 'records':rows, 'originalExport':data,
+            'account': data.get('account'), 'batchId': data.get('batchId')}
 
 
 def check_export(data):
@@ -75,13 +78,13 @@ def check_export(data):
     return errors
 
 
-def library_record(record):
+def library_record(record, legacy_v2=False):
     text = record.get('pageText') or ''
     if not isinstance(text, str):
         text = ''
     # Only a specifically labeled playtime value; never parse size or arbitrary numbers.
     play = re.search(r'\bTOTAL\s+PLAYED\s*:?\s*([\d,.]+)\s*(hours?|hrs?|minutes?|mins?)\b', text, re.I)
-    hours = record.get('hours')
+    hours = None if legacy_v2 else record.get('hours')
     if hours is None and play:
         try:
             value = float(play.group(1).replace(',', ''))
@@ -97,9 +100,29 @@ def library_record(record):
             'raw': record}
 
 
-def normalize(exports):
+def normalize(exports, account=None, batch_id=None):
     captures = []
+    historical_users = {item['user'] for item in exports
+                        if isinstance(item, dict) and item.get('type') in ('library', 'wishlist')
+                        and isinstance(item.get('user'), str) and item['user'].strip()}
+    if len(historical_users) > 1:
+        raise ValueError('conflicting historical account identifiers; import separately')
     exports = [adapt_legacy(item) for item in exports]
+    for name, value in (('account', account), ('batchId', batch_id)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f'{name} must be a nonempty string')
+    if batch_id is not None and account is None:
+        raise ValueError('batch association requires an explicit account alias')
+    if account is not None:
+        for item in exports:
+            if not isinstance(item, dict):
+                continue
+            if item.get('account') is not None and item['account'] != account:
+                raise ValueError('account association conflicts with an existing account alias')
+            if batch_id is not None and item.get('batchId') is not None and item['batchId'] != batch_id:
+                raise ValueError('batch association conflicts with an existing batch ID')
+        exports = [dict(item, account=account, **({'batchId': batch_id} if batch_id is not None else {}))
+                   if isinstance(item, dict) else item for item in exports]
     accounts = {item.get('account') for item in exports if isinstance(item, dict) and item.get('account')}
     if len(accounts) > 1:
         raise ValueError('cross-account import refused; normalize each account separately')
@@ -123,7 +146,16 @@ def normalize(exports):
                     warnings.append(f'conflicting duplicate record {key}; inspect rawRecords')
                 continue
             seen[key] = record
-            records.append(library_record(record) if data['source'] == 'library' else record)
+            legacy_v2 = (data['source'] == 'library' and isinstance(data.get('originalExport'), dict) and
+                         data['originalExport'].get('type') == 'library' and
+                         data['originalExport'].get('schemaVersion') == 2)
+            normalized_record = library_record(record, legacy_v2=legacy_v2) if data['source'] == 'library' else record
+            if legacy_v2 and record.get('hours') is not None:
+                if not isinstance(record.get('pageText'), str) or not record['pageText'].strip():
+                    warnings.append(f"appid {record['appid']}: legacy v2 playtime is unverified; page text unavailable")
+                elif record['hours'] != normalized_record['hours']:
+                    warnings.append(f"appid {record['appid']}: legacy v2 playtime conflicts with labeled page evidence; original retained in raw record")
+            records.append(normalized_record)
         if not records:
             warnings.append('no records collected; this does not prove the source is empty')
         if not data.get('account'):
@@ -157,8 +189,11 @@ def normalize(exports):
             continue
         for record in capture['records']:
             key = (capture['account'], capture['source'], record['appid'])
+            previous = latest.get(key)
+            history = previous['previousObservations'] + [{k: previous[k] for k in ('capturedAt', 'batchId', 'record')}] if previous else []
             latest[key] = {'account': capture['account'], 'source': capture['source'],
-                           'capturedAt': capture['capturedAt'], 'batchId': capture['batchId'], 'record': record}
+                           'capturedAt': capture['capturedAt'], 'batchId': capture['batchId'], 'record': record,
+                           'previousObservations': history}
     return {'format': 'game-curator-normalized', 'version': 1, 'captures': captures,
             'latestObservations': list(latest.values())}
 
@@ -167,10 +202,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('inputs', nargs='+')
     parser.add_argument('--output', required=True)
+    parser.add_argument('--account', help='Associate all inputs with this verified, user-chosen local alias')
+    parser.add_argument('--batch-id', help='Associate all inputs with this acquisition batch; requires --account')
     args = parser.parse_args()
     try:
         values = [json.loads(Path(path).read_text(encoding='utf-8')) for path in args.inputs]
-        result = normalize(values)
+        result = normalize(values, account=args.account, batch_id=args.batch_id)
         Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     except (OSError, ValueError, TypeError) as exc:
         print(f'Import failed: {exc}', file=sys.stderr)

@@ -1,6 +1,9 @@
 import copy
 import importlib.util
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -98,7 +101,7 @@ class ImportTests(unittest.TestCase):
             data = {'type':'library', 'schemaVersion':version, 'exportedAt':'2026-01-01T00:00:00Z',
                     'games':[{'appid':10,'hours':3}], 'expectedCount':2}
             result = normalize.normalize([data])['captures'][0]
-            self.assertEqual(result['records'][0]['hours'], 3)
+            self.assertEqual(result['records'][0]['hours'], None if version == 2 else 3)
             self.assertEqual(result['originalExport'], data)
             self.assertTrue(any('differs' in warning for warning in result['warnings']))
         for version in (3, 4):
@@ -109,6 +112,55 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(normalize.normalize([data])['captures'][0]['records'][0]['appid'], 12)
         data = {'format':'steam-replay-export','version':1,'capturedAt':'2026-01-01T00:00:00Z','year':2025,'semanticBlocks':[{'text':'50%'}]}
         self.assertEqual(normalize.normalize([data])['captures'][0]['records'][0]['semanticBlocks'][0]['text'], '50%')
+
+    def test_legacy_v2_reparses_and_preserves_evidence(self):
+        data = {'type':'library', 'schemaVersion':2, 'exportedAt':'2026-01-01T00:00:00Z',
+                'playtimeMayIncludeIdling':True, 'games':[
+                    {'appid':1, 'hours':500, 'pageText':'TOTAL PLAYED 45 minutes'},
+                    {'appid':2, 'hours':500, 'pageText':'DOWNLOAD 12 GB'},
+                    {'appid':3, 'hours':12},
+                    {'appid':4, 'hours':0, 'pageText':'TOTAL PLAYED 0 hours'}]}
+        capture_result = normalize.normalize([data])['captures'][0]
+        records = capture_result['records']
+        self.assertEqual([r['hours'] for r in records], [0.75, None, None, 0])
+        self.assertEqual(records[0]['raw']['hours'], 500)
+        self.assertEqual(capture_result['originalExport'], data)
+        self.assertEqual(sum('conflicts' in w for w in capture_result['warnings']), 2)
+        self.assertTrue(any('unverified' in w for w in capture_result['warnings']))
+        self.assertTrue(any('idling' in w for w in capture_result['warnings']))
+
+    def test_explicit_account_and_batch_association(self):
+        legacy = {'type':'library', 'schemaVersion':3, 'exportedAt':'2026-01-01T00:00:00Z',
+                  'games':[{'appid':1,'hours':8}], 'user':'synthetic-identity'}
+        newer = capture('library', [{'appid':1,'hours':None}], capturedAt='2026-02-01T00:00:00Z')
+        result = normalize.normalize([legacy, newer], account='personal', batch_id='capture-1')
+        self.assertEqual([c['account'] for c in result['captures']], ['personal','personal'])
+        view = result['latestObservations'][0]
+        self.assertEqual(view['batchId'], 'capture-1')
+        self.assertIsNone(view['record']['hours'])
+        self.assertEqual(view['previousObservations'][0]['record']['hours'], 8)
+        self.assertNotIn('account', legacy)
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            normalize.normalize([capture('wishlist', [], account='other')], account='personal')
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            normalize.normalize([capture('wishlist', [], account='personal', batchId='other')], account='personal', batch_id='one')
+        with self.assertRaisesRegex(ValueError, 'requires'):
+            normalize.normalize([legacy], batch_id='one')
+        different = dict(legacy, user='different-synthetic-identity')
+        with self.assertRaisesRegex(ValueError, 'conflicting historical'):
+            normalize.normalize([legacy, different], account='personal')
+
+    def test_cli_account_association(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.json'
+            output = Path(directory) / 'output.json'
+            source.write_text(json.dumps(capture('wishlist', [{'appid':1}])))
+            subprocess.run([sys.executable, str(SCRIPTS / 'normalize.py'), str(source),
+                            '--account', 'test-alias', '--batch-id', 'test-batch',
+                            '--output', str(output)], check=True, capture_output=True, text=True)
+            result = json.loads(output.read_text())
+            self.assertEqual(result['latestObservations'][0]['account'], 'test-alias')
+            self.assertEqual(result['latestObservations'][0]['batchId'], 'test-batch')
 
 
 if __name__ == '__main__':
