@@ -4,12 +4,18 @@
 //
 //   node save-capture.mjs <file | -> --account <alias> --access-scope signed-in|public|unknown
 //        [--dest <cache/steam dir>] [--settings <settings.json>] [--view unfiltered]
-//        [--existing-account <alias>] [--existing-view unfiltered] [--keep-separate] [--expect-sha256 <hex>] [--dry-run]
+//        [--existing-account <alias>] [--existing-view unfiltered] [--keep-separate] [--expect-sha256 <64 hex>] [--expect-bytes <n>] [--dry-run]
 // (--view / --existing-view / --existing-account are confirmations by the user or caller, not observations.)
 //
 // Input is the file Claude Code writes when a javascript_tool result is too large (a JSON array of
-// {type,text}), a plain JSON envelope file, or "-" for stdin for a file the user supplies. The model must not
-// retype or reconstruct data; a result returned inline has no supported route to disk (report that blocker).
+// {type,text}: the runtime's own transfer), a plain JSON envelope file (for example a browser download), or "-"
+// for stdin for a file the user supplies. The model must not retype or reconstruct data; a result returned
+// inline has no supported route to disk (report that blocker).
+//
+// Transfer evidence: the runtime's tool-result file counts as verified provenance. Any other file is promoted to
+// wishlist.json only when an independent digest of its exact bytes (--expect-sha256, hashed over the raw bytes
+// before decoding) matches; otherwise it is kept as a separate snapshot. --expect-bytes is supporting evidence only.
+// The envelope's own records checksum is always verified, but it covers only the records, not the whole file.
 //
 // Cache policy (persistence.md "Freshness, refresh and safe replacement"). Nothing is merged and nothing is
 // deleted. A capture becomes wishlist.json (created or replacing) only when its account and scope are established
@@ -45,6 +51,8 @@ export function parseToolResult(raw) {
   const end = value.search(/\n\n\(captured at origin /);
   return JSON.parse(end >= 0 ? value.slice(0, end) : value);
 }
+
+export function isToolResult(raw) { try { return Array.isArray(JSON.parse(raw)); } catch { return false; } }
 
 // Restore the collector's key order (the harness alphabetizes keys) without dropping anything: unknown fields
 // are kept so validate() can reject them instead of silently stripping evidence.
@@ -140,10 +148,11 @@ export function fieldLosses(existing, next) {
 }
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'separate', reason, notes}.
-export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = []} = {}) {
+export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
   const notes = [];
   if (keepSeparate) return {action: 'separate', reason: 'user asked to keep this capture separate', notes};
   if (incomplete.length) return {action: 'separate', reason: `incomplete capture: ${incomplete.join('; ')}`, notes};
+  if (!transferVerified) return {action: 'separate', reason: 'transfer not verified: the file is not the runtime\'s tool-result file and no matching --expect-sha256 was given', notes};
   // Main creation and promotion both need an established identity, scope and view; otherwise keep it separate.
   if (!established(next)) return {action: 'separate', reason: 'account identity or access scope is not established (signed-in or public with a verified account)', notes};
   if (!unfiltered(viewOf(next))) return {action: 'separate', reason: 'capture is not verified as default sort, empty search and unfiltered; a filtered list can omit wishlist members', notes};
@@ -242,24 +251,35 @@ function isMain() {
 }
 
 if (isMain()) {
-  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view', '--expect-sha256'];
-  const opt = n => { const i = args.indexOf(n); return i < 0 ? undefined : args[i + 1]; };
+  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view', '--expect-sha256', '--expect-bytes'];
+  const opt = n => { // a flag that needs a value must have one: never silently skip a given safeguard
+    const i = args.indexOf(n);
+    if (i < 0) return undefined;
+    if (i + 1 >= args.length || args[i + 1].startsWith('--')) throw new Error(`${n} needs a value`);
+    return args[i + 1];
+  };
   const file = args.find((a, i) => (!a.startsWith('--') || a === '-') && !valued.includes(args[i - 1]));
   if (!file) { console.error('usage: save-capture.mjs <file | -> --account <alias> --access-scope <scope> [options]'); process.exit(2); }
   try {
     const dryRun = args.includes('--dry-run');
     const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
     checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
-    const raw = file === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(file, 'utf8');
-    const expectSha = opt('--expect-sha256'); // bytes the page reported for a downloaded file; guards the transfer
-    if (expectSha !== undefined && sha256(raw) !== expectSha.toLowerCase().replace(/[\s-]/g, '')) throw new Error('Transferred file does not match --expect-sha256 (the file is incomplete, changed or not the one the page produced)');
+    const rawBytes = file === '-' ? fs.readFileSync(0) : fs.readFileSync(file); // Buffer: hash the exact received bytes, before decoding
+    const expectSha = opt('--expect-sha256'), expectBytes = opt('--expect-bytes');
+    if (expectSha !== undefined && !/^[0-9a-fA-F]{64}$/.test(expectSha)) throw new Error('--expect-sha256 must be exactly 64 hexadecimal characters');
+    if (expectBytes !== undefined && !/^\d+$/.test(expectBytes)) throw new Error('--expect-bytes must be a non-negative integer');
+    if (expectSha !== undefined && sha256(rawBytes) !== expectSha.toLowerCase()) throw new Error('Received file does not match --expect-sha256 (incomplete, changed, or not the expected file)');
+    if (expectBytes !== undefined && rawBytes.length !== Number(expectBytes)) throw new Error(`Received file is ${rawBytes.length} bytes, expected ${expectBytes}`);
+    const raw = rawBytes.toString('utf8'), provenance = isToolResult(raw) ? 'tool-result' : 'file';
+    const transferVerified = provenance === 'tool-result' || expectSha !== undefined;
     const env = canonicalize(parseToolResult(raw));
     const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
     const {errors, incomplete} = validate(env, {account, accessScope});
     if (errors.length) { console.error('Rejected (not a valid wishlist envelope):\n- ' + errors.join('\n- ')); process.exit(1); }
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
-    const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope};
+    const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope,
+      transfer: {provenance, receivedBytes: rawBytes.length, receivedSha256: sha256(rawBytes), sha256Matched: expectSha !== undefined, byteCountMatched: expectBytes !== undefined}};
     if (account) { env.account = account; attestations.account = account; }
     env.accessScope = accessScope; attestations.accessScope = accessScope;
     if (opt('--view') === 'unfiltered') { // the caller confirmed the page showed the default sort with no filters
@@ -268,7 +288,7 @@ if (isMain()) {
       attestations.filters = 'none';
     }
     env.diagnostics = {...env.diagnostics, attestations};
-    const result = save(canonicalize(env), dest, {dryRun, incomplete, existingAccount: opt('--existing-account'),
+    const result = save(canonicalize(env), dest, {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
       recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))});
     console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun}, null, 2));

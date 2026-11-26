@@ -4,12 +4,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {parseToolResult, canonicalize, validate, decide, fieldLosses, checkCacheAuthorized, save, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {parseToolResult, canonicalize, validate, decide as decideRaw, fieldLosses, checkCacheAuthorized, save as saveRaw, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 import {spawnSync} from 'node:child_process';
 import {makeWishlistPage} from './fake-wishlist-dom.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+// Policy tests assume verified transfer unless a case says otherwise (the default is fail-closed).
+const decide = (o, n, c = {}) => decideRaw(o, n, {transferVerified: true, ...c});
+const save = (e, d, c = {}) => saveRaw(e, d, {transferVerified: true, ...c});
 const row = (i, {labels = ['RELEASE DATE:', 'ENGLISH REVIEWS:', 'USER TAGS:', 'MY CATEGORIES:'], base = 1000} = {}) => ({appid: base + i, rank: i, name: `Game ${i}`,
   pageText: `Game ${i}\n${labels.map(l => `${l}\nx`).join('\n')}\n$9.99`, membershipSource: 'wishlist-row'});
 function make(n, {at = '2026-11-26T02:37:30.226Z', account, accessScope = 'signed-in', view = {sort: 'Your Rank', search: 'empty', filters: 'none'}, records, diag = {}} = {}) {
@@ -70,6 +73,8 @@ const U = {sort: 'Your Rank', search: 'empty', filters: 'none'};
 const old = make(4, {account: 'me', at: '2026-11-25T00:00:00Z'});
 const next = make(3, {account: 'me', at: '2026-11-26T03:00:00Z'});
 assert.equal(decide(null, next).action, 'create');
+assert.match(decideRaw(null, next).reason, /transfer not verified/); // fail closed unless the caller establishes verified transfer
+assert.equal(decideRaw(null, next, {transferVerified: true}).action, 'create');
 assert.equal(decide(old, next).action, 'replace'); // a legitimately smaller unfiltered wishlist replaces
 assert.match(decide(old, next).notes.join(), /1 removed/);
 const reason = (o, n, ctx) => decide(o, n, ctx).reason;
@@ -250,14 +255,34 @@ fs.rmSync(tmp, {recursive: true});
   const eout = JSON.parse(r.stdout); assert.equal(eout.action, 'separate');
   assert.equal(JSON.parse(fs.readFileSync(eout.target, 'utf8')).records.length, 0);
   assert.notEqual(run(empty, '--account', 'me', '--access-scope', 'signed-in').status, 0); // signed-in claim has no owner evidence
-  // downloaded-file transfer: the page's reported SHA-256 of the file guards the transfer
-  const fileSha = crypto.createHash('sha256').update(fs.readFileSync(good)).digest('hex');
+  // A plain file (such as a browser download) is promoted only with independent transfer evidence of its exact bytes.
   fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
-  assert.equal(run(good, '--account', 'me', '--access-scope', 'signed-in', '--expect-sha256', fileSha, '--dry-run').status, 0);
-  const grouped = fileSha.match(/.{8}/g).join(' ');
-  assert.equal(run(good, '--account', 'me', '--access-scope', 'signed-in', '--expect-sha256', grouped, '--dry-run').status, 0); // as the page reports it
-  const wrong = run(good, '--account', 'me', '--access-scope', 'signed-in', '--expect-sha256', '0'.repeat(64), '--dry-run');
-  assert.notEqual(wrong.status, 0); assert.match(wrong.stderr, /does not match --expect-sha256/);
+  const plainFile = path.join(home2, 'plain.json');
+  fs.writeFileSync(plainFile, JSON.stringify(make(5, {view: {...U, filters: 'unknown'}})));
+  const flags = ['--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered', '--dry-run'];
+  let q = run(plainFile, ...flags); assert.equal(q.status, 0, q.stderr);
+  assert.equal(JSON.parse(q.stdout).action, 'separate'); assert.match(JSON.parse(q.stdout).reason, /transfer not verified/);
+  const rawSha = crypto.createHash('sha256').update(fs.readFileSync(plainFile)).digest('hex');
+  q = run(plainFile, ...flags, '--expect-sha256', rawSha); assert.equal(q.status, 0, q.stderr); assert.doesNotMatch(JSON.parse(q.stdout).reason, /transfer not verified/); // evidence given: other policy rules decide
+  q = run(plainFile, ...flags, '--expect-sha256', rawSha, '--expect-bytes', String(fs.statSync(plainFile).size)); assert.equal(q.status, 0, q.stderr);
+  for (const [label, extra, re] of [['mismatching digest', ['--expect-sha256', '0'.repeat(64)], /does not match --expect-sha256/],
+    ['missing value', ['--expect-sha256'], /needs a value/], ['flag followed by flag', ['--expect-sha256', '--dry-run'], /needs a value|64 hexadecimal/],
+    ['grouped digest', ['--expect-sha256', rawSha.match(/.{8}/g).join(' ')], /64 hexadecimal/], ['short digest', ['--expect-sha256', rawSha.slice(0, 40)], /64 hexadecimal/],
+    ['non-hex digest', ['--expect-sha256', 'z'.repeat(64)], /64 hexadecimal/], ['bad byte count', ['--expect-bytes', 'abc'], /non-negative integer/],
+    ['wrong byte count', ['--expect-bytes', '1'], /expected 1/], ['missing byte value', ['--expect-bytes'], /needs a value/]]) {
+    const r2 = run(plainFile, ...flags, ...extra);
+    assert.notEqual(r2.status, 0, `${label} must be rejected, not skipped`); assert.match(r2.stderr, re, label);
+  }
+  // Hashing covers the raw received bytes, before decoding: a file containing an invalid UTF-8 byte.
+  const rawBuf = Buffer.concat([Buffer.from(JSON.stringify(make(5, {view: {...U, filters: 'unknown'}})).replace('Game 1', 'Game \u0001')), Buffer.alloc(0)]);
+  const withBadByte = Buffer.concat([rawBuf.subarray(0, rawBuf.length - 1), Buffer.from([0x20, 0xff, 0x20]), rawBuf.subarray(rawBuf.length - 1)]); // whitespace-adjacent invalid byte inside the JSON
+  const badFile = path.join(home2, 'badbyte.json'); fs.writeFileSync(badFile, withBadByte);
+  const exactSha = crypto.createHash('sha256').update(withBadByte).digest('hex'), decodedSha = crypto.createHash('sha256').update(withBadByte.toString('utf8')).digest('hex');
+  assert.notEqual(exactSha, decodedSha, 'fixture must distinguish raw-byte from decoded-string hashing');
+  const parsedBad = run(badFile, ...flags, '--expect-sha256', decodedSha); assert.notEqual(parsedBad.status, 0); assert.match(parsedBad.stderr, /does not match --expect-sha256/);
+  const rawOk = run(badFile, ...flags, '--expect-sha256', exactSha); assert.notEqual(rawOk.stdout.includes('does not match'), true); assert.doesNotMatch(rawOk.stderr, /does not match/); // exact-byte digest passes the transfer check
+  // the runtime's own tool-result file is verified provenance without a digest
+  q = run(good, ...flags); assert.equal(q.status, 0, q.stderr); assert.doesNotMatch(JSON.parse(q.stdout).reason, /transfer not verified/);
   // revoked consent stops the CLI
   fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":false}}');
   assert.notEqual(run(good, '--account', 'me', '--access-scope', 'signed-in', '--dry-run').status, 0);

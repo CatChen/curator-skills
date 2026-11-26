@@ -11,10 +11,13 @@
 // javascript_tool is cut off at 45 s per call, so a long run returns {inProgress:true,...} and resumes with
 // the one-line call `await window.__gcWishlistRun({})`. Options (object literal on the last line):
 //   callBudgetMs (35000, per call)  maxMs (150000)  maxSteps (1000)  fresh (discard saved state)
-//   deliver: 'return' (default) returns the envelope as the tool result; 'download' makes the page save it as a
-//   local file (a Blob download, no network) and returns only a small summary with the file's SHA-256. Use it where the
-//   tool truncates large results, as Claude in Chrome does (see references/claude-code.md).
-// maxMs, maxSteps and deliver are remembered across resume calls; the rest apply to the call they are passed to.
+//   deliver: 'return' (default) returns the envelope as the tool result. 'download' makes the page start a local
+//   file download (a Blob, no network) and returns only a small summary that reports INITIATION, not receipt: the
+//   browser may block, hold or relocate the file, so confirm it on disk. Use it only where the host permits downloads
+//   and the user has authorized it (see references/claude-in-chrome.md). The finished envelope is then kept in
+//   collector-owned page state for retainMs (default 10 minutes) so an authorized retry needs no rescrape:
+//   window.__gcWishlistRedeliver() starts the download again, window.__gcWishlistRelease() discards it.
+// maxMs, maxSteps, deliver and retainMs are remembered across resume calls; the rest apply to the call they are passed to.
 await (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   function snapshotWishlist() {
@@ -75,7 +78,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, retainMs: opts.retainMs});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -92,7 +95,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps', 'deliver']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    for (const k of ['maxMs', 'maxSteps', 'deliver', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
@@ -160,7 +163,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, deliver: S.opts.deliver, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: S.opts.deliver, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
@@ -194,16 +197,24 @@ await (window.__gcWishlistRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
-    if (c.deliver === 'download') { // the page saves the envelope as a local file and returns only a small, checkable summary
-      const text = JSON.stringify(envelope, null, 2) + '\n', fileBytes = new TextEncoder().encode(text);
+    if (c.deliver === 'download') { // initiation only; the envelope is retained (bounded) until the caller releases it or it expires
+      const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
       const file = `gc-wishlist-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
-      const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
-      a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      const retainMs = Math.min(Math.max(Number(c.retainMs) || 600000, 1000), 3600000);
+      const start = () => {
+        const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+        a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      };
+      const release = () => { clearTimeout(window.__gcWishlistExpiry); delete window.__gcWishlistRedeliver; delete window.__gcWishlistRelease; delete window.__gcWishlistExpiry; return 'released'; };
+      window.__gcWishlistRedeliver = () => { start(); return {downloadInitiated: true, retry: true, file, bytes}; };
+      window.__gcWishlistRelease = release;
+      window.__gcWishlistExpiry = setTimeout(release, retainMs);
+      start();
       const d = envelope.diagnostics;
-      return {delivered: 'download', file, bytes: fileBytes.length, fileSha256: (await sha256Hex(fileBytes)).match(/.{8}/g).join(' '), // grouped: Claude in Chrome blocks a bare 64-hex string as "base64 data"
-        records: c.records.length, expected: d.expectedCount,
-        complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view};
+      return {downloadInitiated: true, file, bytes, retainedForMs: retainMs, records: c.records.length, expected: d.expectedCount,
+        complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view,
+        note: 'Initiation only. Confirm the file exists with the reported byte count before using it.'};
     }
     return envelope;
   }

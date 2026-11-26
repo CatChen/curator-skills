@@ -167,8 +167,8 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   const f = j(await makeWishlistPage({n: 12, search: 'zzz'}).run());
   assert.equal(f.diagnostics.view.search, 'active');
 }
-// 10. deliver:'download' (Claude in Chrome truncates tool results at ~1 KB): the page saves the envelope as a local file and
-// returns only a small summary whose checksum covers the exact file bytes.
+// 10. deliver:'download' (for tools that truncate results at ~1 KB): the page STARTS a local download and reports initiation only,
+// returns a small summary, and keeps the finished envelope in bounded collector-owned state for an authorized retry.
 {
   const plain = j(await makeWishlistPage({n: 80}).run());
   const p = makeWishlistPage({n: 80});
@@ -176,21 +176,35 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   let calls = 1;
   while (r.inProgress && calls < 60) { r = j(await p.run({callBudgetMs: 60})); calls++; } // deliver is remembered across resume
   assert.ok(calls > 1);
-  assert.equal(r.delivered, 'download');
-  assert.ok(JSON.stringify(r).length < 800, `summary must survive a ~1 KB truncation, was ${JSON.stringify(r).length}`);
+  assert.equal(r.downloadInitiated, true);
+  assert.equal(r.delivered, undefined, 'a download must be reported as initiated, never as delivered');
+  assert.match(r.note, /Initiation only/);
+  assert.equal(JSON.stringify(r).match(/[0-9a-f]{40,}/), null, 'no digest in the summary: a filtered value is not worked around');
+  assert.ok(JSON.stringify(r).length < 900, `summary must fit a ~1 KB truncation, was ${JSON.stringify(r).length}`);
   assert.equal(p.state.downloads.length, 1);
   const text = await p.state.downloads[0].blob.text();
   assert.equal(p.state.downloads[0].name, r.file); assert.match(r.file, /^gc-wishlist-\d{8}T\d{6}Z\.json$/);
-  assert.match(r.fileSha256, /^([0-9a-f]{8} ){7}[0-9a-f]{8}$/); // grouped so a ~1 KB, base64-filtering tool returns it intact
-  assert.equal(crypto.createHash('sha256').update(text).digest('hex'), r.fileSha256.replace(/ /g, ''));
   assert.equal(Buffer.byteLength(text), r.bytes);
-  const file = JSON.parse(text);
-  assert.equal(file.diagnostics.recordsSha256, plain.diagnostics.recordsSha256); // same records as the return path
+  assert.equal(JSON.parse(text).diagnostics.recordsSha256, plain.diagnostics.recordsSha256); // same records as the return path
   assert.equal(r.complete, true); assert.equal(r.records, 80);
+  // retained for a retry without rescraping; the retry sends identical bytes; release removes the state
+  assert.equal(typeof p.ctx.window.__gcWishlistRedeliver, 'function');
+  const retry = j(p.ctx.window.__gcWishlistRedeliver());
+  assert.equal(retry.retry, true); assert.equal(p.state.downloads.length, 2);
+  assert.equal(await p.state.downloads[1].blob.text(), text);
+  assert.equal(p.ctx.window.__gcWishlistRelease(), 'released');
+  assert.equal(p.ctx.window.__gcWishlistRedeliver, undefined); assert.equal(p.ctx.window.__gcWishlistExpiry, undefined);
+  // retention is bounded: it expires on its own
+  const q = makeWishlistPage({n: 12});
+  const sum = j(await q.run({deliver: 'download', retainMs: 1000}));
+  assert.equal(sum.retainedForMs, 1000); assert.equal(typeof q.ctx.window.__gcWishlistRedeliver, 'function');
+  await new Promise(res => setTimeout(res, 1300));
+  assert.equal(q.ctx.window.__gcWishlistRedeliver, undefined, 'retained envelope must expire');
   // incomplete runs are delivered too (and say so) so partial evidence is not lost
-  const q = makeWishlistPage({n: 30, neverLoad: new Set([7])});
-  const partial = j(await q.run({deliver: 'download'}));
+  const z = makeWishlistPage({n: 30, neverLoad: new Set([7])});
+  const partial = j(await z.run({deliver: 'download'}));
   assert.equal(partial.complete, false); assert.equal(partial.stopReason, 'rows-missing');
-  assert.equal(JSON.parse(await q.state.downloads[0].blob.text()).records.length, 29);
+  assert.equal(JSON.parse(await z.state.downloads[0].blob.text()).records.length, 29);
+  z.ctx.window.__gcWishlistRelease();
 }
 console.log('Claude Code page script behavior checks passed');
