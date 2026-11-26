@@ -14,6 +14,7 @@
     wishlist.json
     reviews.json
     replay/2025.json
+    .staging/        (private, transient: results the Claude Code skill hook staged for the saver)
 ```
 
 When persistence would help, offer a **one-time explicit opt-in** for reading and writing the preference profile and feedback at a named location. Describe their contents, that they are outside the skill/repository, and that relevant existing files will be read and maintained. Offer **raw Steam cache read/write as a separate optional scope**; explain its contents. Explain that the agreed scope choices will be recorded in `settings.json` at that location and consulted in later sessions. Neither scope is required for a recommendation. Respect opt-outs and the host's separate filesystem permissions and approval requirements. A directory's existence is not authorization to read, write or disclose its contents.

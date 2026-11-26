@@ -17,6 +17,8 @@
 //   and the user has authorized it (see references/claude-in-chrome.md). The finished envelope is then kept in
 //   collector-owned page state for retainMs (default 10 minutes) so an authorized retry needs no rescrape:
 //   window.__gcRedeliver() starts the download again, window.__gcRelease() discards it.
+//   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging
+//   the inline result privately (see references/claude-code.md). Put it on every call of a run, resume calls included.
 // maxMs, maxSteps, deliver and retainMs are remembered across resume calls; the rest apply to the call they are passed to.
 await (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();

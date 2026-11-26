@@ -16,6 +16,8 @@
 //   deliver: 'return' (default) or 'download' (see page-common.mjs / references/claude-in-chrome.md): the page starts a
 //   local file download and returns a small summary of INITIATION only; retainMs (default 10 min) bounds how long the
 //   finished envelope is kept for an authorized retry via window.__gcRedeliver() / window.__gcRelease().
+//   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging
+//   the inline result privately (see references/claude-code.md). Put it on every call of a run, resume calls included.
 // maxMs, maxSteps, deliver and retainMs are remembered across resume calls.
 await (window.__gcLibraryRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();

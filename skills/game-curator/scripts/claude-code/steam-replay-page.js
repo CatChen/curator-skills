@@ -28,7 +28,8 @@
 //   maxYears (20, at most 30)  fresh (discard saved state)  cancel (remove the saved state and stop)  callBudgetMs (20000)
 //   settleMs (1200) / settleCapMs (10000): how long the report's text and game references must stay unchanged before it is taken, and the most time
 //   spent waiting for that (test seams; leave them alone)
-//   deliver 'return' | 'download' and retainMs: see page-common.mjs
+//   deliver 'return' | 'download' | 'hook' and retainMs: see page-common.mjs ('hook' returns the envelope exactly like 'return' and only
+//   states that this call opts into the skill's PostToolUse hook staging it privately; the page itself does nothing different)
 await (window.__gcReplayRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   function snapshotReplay() {
@@ -148,7 +149,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       if (![S.repeats, S.attempts, S.calls].every(n => isInt(n, 10000)) || typeof S.owner !== 'boolean') return 'bad counters or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
       if (!has(S.opts, ['maxYears', 'deliver', 'retainMs']) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
-        || !(S.opts.deliver === undefined || ['return', 'download'].includes(S.opts.deliver)) || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
+        || !(S.opts.deliver === undefined || ['return', 'download', 'hook'].includes(S.opts.deliver)) || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'annual-report' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.years || !list.every(isYear) || new Set(list).size !== list.length) return 'bad year list';
       if (!(S.requested === null || isYear(S.requested))) return 'bad requested year';
