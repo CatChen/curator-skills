@@ -72,6 +72,10 @@ const review=await collectReviews(tabWith([
 ]));
 assert.equal(review.records.length,2);
 assert.equal(review.diagnostics.pagesVisited,2);
+// The Codex reviews collector hands the shared, self-contained page snapshot to the host's read-only evaluate.
+let reviewEvaluated=null;
+await collectReviews({playwright:{evaluate:async fn=>{reviewEvaluated=fn;return {url:'https://steamcommunity.com/id/example/recommended/',path:'/id/example/recommended/',expected:1,rows:[{appid:1,reviewUrl:'r1'}],links:[]}}},goto:async()=>{}});
+assert.equal(typeof reviewEvaluated,'function'); assert.match(reviewEvaluated.toString(),/\.review_box/);
 const reviewWithNames=await collectReviews(tabWith([
   {url:'https://steamcommunity.com/id/example/recommended/',path:'/id/example/recommended/',expected:1,rows:[{appid:1,reviewUrl:'r1'}],links:[]}
 ]), {library:{source:'library',records:[{appid:1,name:'Synthetic'}]},verifiedSameAccount:true});

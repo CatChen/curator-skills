@@ -112,6 +112,48 @@ const SOURCES = {
       return losses;
     },
   },
+  reviews: {
+    file: 'reviews', recordOrder: ['appid', 'reviewUrl', 'recommended', 'review', 'playtimeDisplay', 'postedDate', 'name', 'nameSource'], rankBased: false, requiredDiagnostics: ['pagesVisited', 'pagesPending'],
+    // The records checksum covers observed fields only: names are never observed on this page and may be added later by enrichment.
+    observedRecords: recs => recs.map(r => { const {name, nameSource, ...observed} = r; return observed; }),
+    validateRecord(r, i, errors, env) {
+      const m = typeof r.reviewUrl === 'string' && r.reviewUrl.match(/^https:\/\/steamcommunity\.com\/((?:id|profiles)\/[^/]+)\/recommended\/(\d+)\/?$/);
+      if (!m) errors.push(`record ${i} has an invalid reviewUrl`);
+      else {
+        if (Number(m[2]) !== r.appid) errors.push(`record ${i} reviewUrl does not match its appid`);
+        // Every review must belong to the list that was collected: the account path in its URL equals the list path the collector recorded.
+        const listPath = env?.diagnostics?.urlPath;
+        if (typeof listPath === 'string' && /^\/(?:id|profiles)\/[^/]+\/recommended$/.test(listPath) && `/${m[1]}/recommended` !== listPath) errors.push(`record ${i} reviewUrl belongs to a different account path than the collected list`);
+      }
+      if (!(r.recommended === null || typeof r.recommended === 'boolean')) errors.push(`record ${i} has an invalid recommended value`);
+      for (const k of ['review', 'playtimeDisplay', 'postedDate']) if (!(r[k] === null || (typeof r[k] === 'string' && r[k].trim()))) errors.push(`record ${i} has an invalid ${k}`);
+      // A name is never observed here; it is allowed only as a marked enrichment from a verified library capture.
+      if ('name' in r || 'nameSource' in r) {
+        if (typeof r.name !== 'string' || !r.name.trim()) errors.push(`record ${i} has an invalid name`);
+        if (r.nameSource !== 'verified-library-capture') errors.push(`record ${i} has a name without nameSource "verified-library-capture"`);
+      }
+    },
+    validateDiagnostics(d, recs, errors) {
+      const count = n => Number.isSafeInteger(n) && n >= 0;
+      for (const k of ['pagesVisited', 'pagesPending', 'pageAttempts']) if (!count(d[k])) errors.push(`diagnostics.${k} must be a non-negative integer`);
+      if (count(d.pagesVisited) && count(d.pageAttempts) && recs.length && (d.pagesVisited < 1 || d.pageAttempts < d.pagesVisited)) errors.push('pagination diagnostics are inconsistent with the records');
+      if (typeof d.urlPath !== 'string' || !/^\/(?:id|profiles)\/[^/]+\/recommended$/.test(d.urlPath)) errors.push('diagnostics.urlPath is not a reviews list path');
+    },
+    ownerEvidence: d => d?.ownerControls === true, ownerLabel: 'owner-only evidence (review controls)',
+    viewOk: e => e?.diagnostics?.view?.kind === 'recommended-list',
+    viewConflict: e => { const v = e?.diagnostics?.view; return !!v && v.kind != null && v.kind !== 'recommended-list'; },
+    viewAttestable: false, viewSummaryKeys: ['kind', 'language'],
+    viewMessage: 'the full "My reviews" list (the recommended-list view, every page)',
+    fieldLosses(existing, next) {
+      const newer = new Map(next.records.map(r => [r.appid, r])), losses = {};
+      for (const old of existing.records) {
+        const now = newer.get(old.appid);
+        if (!now) continue;
+        for (const k of ['review', 'recommended', 'playtimeDisplay', 'postedDate', 'name']) if (old[k] != null && now[k] == null) losses[k] = (losses[k] ?? 0) + 1;
+      }
+      return losses;
+    },
+  },
 };
 export const SOURCE_NAMES = Object.keys(SOURCES);
 const cfgOf = e => SOURCES[e?.source] ?? SOURCES.wishlist;
@@ -169,7 +211,7 @@ export function canonicalize(env) {
 
 // Contract validation. `errors` mean the input is not a valid v1 envelope for its source (nothing is saved).
 // `incomplete` reasons mean it is valid but not a full capture: it is preserved as a partial snapshot, never promoted.
-export function validate(env, {account, accessScope} = {}) {
+export function validate(env, {account, accessScope, incoming = false} = {}) {
   const errors = [], incomplete = [];
   const known = new Set(ENVELOPE_ORDER);
   if (!isPlainObject(env)) return {errors: ['not an object'], incomplete};
@@ -191,7 +233,7 @@ export function validate(env, {account, accessScope} = {}) {
     for (const k of Object.keys(r)) if (!allowed.has(k)) errors.push(`record ${i} has unexpected field ${k}`);
     if (!Number.isSafeInteger(r.appid) || r.appid <= 0) errors.push(`record ${i} has an invalid appid`);
     if (ids.has(r.appid)) errors.push(`duplicate appid ${r.appid}`); ids.add(r.appid);
-    rules.validateRecord(r, i, errors);
+    rules.validateRecord(r, i, errors, env);
     if (rules.rankBased) { if (ranks.has(r.rank)) errors.push(`duplicate rank ${r.rank}`); ranks.add(r.rank); }
   });
   if (rules.rankBased && !recs.every((r, i) => r?.rank === i + 1)) incomplete.push('ranks are not contiguous 1..n');
@@ -203,11 +245,21 @@ export function validate(env, {account, accessScope} = {}) {
       if (!Number.isSafeInteger(d.placeholderNameRows)) errors.push('missing diagnostics.placeholderNameRows');
       else if (d.placeholderNameRows > 0) incomplete.push(`${d.placeholderNameRows} placeholder-name rows`);
     }
-    if (typeof d.recordsSha256 !== 'string' || sha256(JSON.stringify(recs)) !== d.recordsSha256) errors.push('records checksum mismatch (page vs transferred)');
+    if (typeof d.recordsSha256 !== 'string' || sha256(JSON.stringify(rules.observedRecords ? rules.observedRecords(recs) : recs)) !== d.recordsSha256) errors.push('records checksum mismatch (page vs transferred)');
+    if (Number.isSafeInteger(d.pagesPending) && d.pagesPending > 0) incomplete.push(`${d.pagesPending} review pages were not visited`);
     if (d.expectedCount !== null && d.expectedCount !== recs.length) incomplete.push(`displayed ${d.expectedCount} items but ${recs.length} records`);
     if (d.expectedCount === null) incomplete.push('the displayed count was not available, so coverage cannot be verified');
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
     if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
+    rules.validateDiagnostics?.(d, recs, errors);
+    // A transfer from a page is observation only: it may not carry attestations (those are added here, by the caller's verified inputs)
+    // and, for reviews, may not carry names (a name only ever comes from the enrichment step that verifies it).
+    if (incoming && 'attestations' in d) errors.push('a page transfer must not carry diagnostics.attestations');
+    if (env.source === 'reviews') {
+      const named = recs.filter(r => r && ('name' in r || 'nameSource' in r)).length, e = d.attestations?.enrichment;
+      if (incoming && named) errors.push('a page transfer must not carry game names; names are added only by the verified enrichment step');
+      else if (named && !(isPlainObject(e) && e.namedRecords === named && typeof e.librarySha256 === 'string' && /^[0-9a-f]{64}$/.test(e.librarySha256) && e.names === 'verified-library-capture')) errors.push('names are present without a matching verified enrichment attestation bound to a library snapshot');
+    }
   }
   if (!recs.length) { // an empty page is preserved as an uncertain observation, never as a verified empty source
     if (d?.stopReason === 'empty-observed' && d?.expectedCount === 0) incomplete.push('empty source observed but owner, account and view were not independently verified');
@@ -226,7 +278,7 @@ function validExisting(e, source) {
   if (!Array.isArray(e.warnings) || !e.diagnostics || typeof e.diagnostics !== 'object' || Array.isArray(e.diagnostics) || !Array.isArray(e.records)) return false;
   const ids = new Set(), ranks = new Set(); // legacy-tolerant: no new diagnostics required, but no contradictions
   for (const r of e.records) {
-    if (!r || !Number.isSafeInteger(r.appid) || r.appid <= 0 || !(typeof r.name === 'string' || (source === 'library' && r.name === null)) || typeof r.pageText !== 'string') return false;
+    if (!r || !Number.isSafeInteger(r.appid) || r.appid <= 0 || !(typeof r.name === 'string' || (source === 'library' && r.name === null) || (source === 'reviews' && r.name === undefined)) || (source !== 'reviews' && typeof r.pageText !== 'string')) return false;
     if (ids.has(r.appid)) return false; ids.add(r.appid);
     if (r.rank !== undefined) { if (!Number.isSafeInteger(r.rank) || r.rank <= 0 || ranks.has(r.rank)) return false; ranks.add(r.rank); }
   }
@@ -236,6 +288,37 @@ const established = e => !!e.account && ['signed-in', 'public'].includes(e.acces
 
 // Per retained AppID, a field that existed and is now absent counts as a loss. Returns {group: count}.
 export function fieldLosses(existing, next) { return cfgOf(next).fieldLosses(existing, next); }
+
+// Add game names to a reviews envelope from a library capture that is verified to be the same account. The review page never shows
+// a name, so this is the only source; every name added is marked nameSource "verified-library-capture" and the library capture's
+// time and size are recorded. A review whose game is absent from the library simply stays without a name. Returns {env, enrichment}.
+export function enrichReviewNames(env, library, {libraryAccount, librarySha256} = {}) {
+  if (env?.source !== 'reviews') throw new Error('name enrichment applies only to a reviews capture');
+  if (!validExisting(library, 'library')) throw new Error('the names source is not a valid library capture');
+  const account = library.account ?? libraryAccount;
+  if (!env.account || !account || account !== env.account) throw new Error('names can only be added from a library capture verified as the same account (both captures must carry the same account alias; use --library-account only for a library file the user confirmed)');
+  if (!['signed-in', 'public'].includes(library.accessScope)) throw new Error('the library capture has no established access scope');
+  const names = new Map(library.records.filter(r => typeof r.name === 'string' && r.name.trim()).map(r => [r.appid, r.name]));
+  let named = 0;
+  const records = env.records.map(r => { if (!names.has(r.appid)) return r; named++; return {...r, name: names.get(r.appid), nameSource: 'verified-library-capture'}; });
+  if (typeof librarySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(librarySha256)) throw new Error('enrichment must be bound to the exact library snapshot: the SHA-256 of its bytes is required (a local digest identifies the file; it does not authenticate its source)');
+  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length, librarySha256, libraryAccount: account};
+  const warnings = records.length - named ? [...env.warnings, 'Some review names are missing from the verified library capture.'] : env.warnings;
+  return {env: {...env, records, warnings}, enrichment};
+}
+
+// Re-derive the attribution: every name in an enriched reviews capture must equal the name the bound library snapshot gives that AppID,
+// carry the verified marker, and no record may be named that the library cannot name. Returns a list of problems (empty means verified).
+export function verifyNameAttribution(env, library) {
+  const names = new Map(library.records.filter(r => typeof r.name === 'string' && r.name.trim()).map(r => [r.appid, r.name])), bad = [];
+  for (const r of env.records) {
+    const named = 'name' in r || 'nameSource' in r;
+    if (!named) continue;
+    if (r.nameSource !== 'verified-library-capture') bad.push(`AppID ${r.appid} has a name without the verified marker`);
+    else if (names.get(r.appid) !== r.name) bad.push(`AppID ${r.appid} has a name that the library snapshot does not give it`);
+  }
+  return bad;
+}
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'separate', reason, notes}.
 export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
@@ -340,7 +423,7 @@ function isMain() {
 }
 
 if (isMain()) {
-  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view', '--source-sha256', '--expect-bytes', '--provenance', '--page-summary'];
+  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view', '--source-sha256', '--expect-bytes', '--provenance', '--page-summary', '--names-from', '--library-account'];
   const opt = n => { // a flag that needs a value must have one: never silently skip a given safeguard
     const i = args.indexOf(n);
     if (i < 0) return undefined;
@@ -363,7 +446,7 @@ if (isMain()) {
     const raw = rawBytes.toString('utf8');
     if (provenanceArg === 'tool-result' && !isToolResult(raw)) throw new Error('--provenance tool-result was declared but the file does not have the runtime tool-result structure');
     if (provenanceArg === 'download' && isToolResult(raw)) throw new Error('--provenance download was declared but the file is a tool-result file');
-    const env = canonicalize(parseToolResult(raw));
+    let env = canonicalize(parseToolResult(raw));
     let summaryChecks = null;
     if (summaryArg !== undefined) {
       let summary; try { summary = JSON.parse(summaryArg); } catch { throw new Error('--page-summary is not valid JSON'); }
@@ -376,7 +459,7 @@ if (isMain()) {
     const transferVerified = (provenanceArg === 'tool-result') || (provenanceArg === 'download' && summaryChecks !== null);
     const level = provenanceArg === 'tool-result' ? 'runtime-tool-result' : transferVerified ? (sourceSha !== undefined ? 'download-summary-and-source-digest' : 'download-summary-verified') : 'unverified';
     const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
-    const {errors, incomplete} = validate(env, {account, accessScope});
+    const {errors, incomplete} = validate(env, {account, accessScope, incoming: true});
     if (errors.length) { console.error('Rejected (not a valid Steam export envelope for its source):\n- ' + errors.join('\n- ')); process.exit(1); }
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
@@ -391,7 +474,20 @@ if (isMain()) {
       if (v?.sort !== DEFAULT_SORT || v?.search !== 'empty') { console.error(`--view unfiltered refused: the page recorded sort=${v?.sort} search=${v?.search}`); process.exit(1); }
       attestations.filters = 'none';
     }
+    let toSave = env;
+    const namesFrom = opt('--names-from'), libraryAccount = opt('--library-account');
+    if (libraryAccount !== undefined && namesFrom === undefined) throw new Error('--library-account applies only with --names-from');
+    if (namesFrom !== undefined) { // read-only use of the user's library cache, inside the same consent scope; the file is never modified
+      if (libraryAccount !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(libraryAccount)) throw new Error('unsafe --library-account alias');
+      let libBytes, library; try { libBytes = fs.readFileSync(namesFrom); library = JSON.parse(libBytes.toString('utf8')); } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
+      const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes)});
+      const bad = verifyNameAttribution(result.env, library);
+      if (bad.length) throw new Error(`name attribution failed verification:\n- ${bad.join('\n- ')}`);
+      toSave = result.env; attestations.enrichment = result.enrichment;
+    }
+    env = toSave;
     env.diagnostics = {...env.diagnostics, attestations};
+    { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
     const result = save(canonicalize(env), dest, {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
       recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))});
