@@ -33,6 +33,20 @@ test('numbered pages advance and failure retains captured batches',async()=>{
   i=0; tab.playwright.locator=()=>({click:async()=>{throw new Error('private details');}});
   const partial=await collectCategory(tab,'books'); assert.equal(partial.records.length,1); assert.equal(partial.coverage,'partial'); assert.ok(!partial.warnings.join().includes('private details'));
 });
+test('waits for coherent settled pages and stops on challenge without clicking',async()=>{
+  const first=page(1,1,2,[row('1')]); const mismatch=page(2,2,2,[]); const second=page(2,2,2,[row('2')]);
+  let scans=[first,first,first,mismatch,second,second], clicks=0;
+  const tab={playwright:{evaluate:async()=>scans.shift() ?? second,locator:()=>({click:async()=>{clicks++;}})}};
+  const result=await collectCategory(tab,'books',{settleDelayMs:0}); assert.equal(result.coverage,'complete-observed'); assert.equal(clicks,1);
+  scans=[first,first,{category:null,challenge:true}]; clicks=0;
+  const challenged=await collectCategory(tab,'books',{settleDelayMs:0}); assert.equal(challenged.coverage,'partial'); assert.equal(challenged.records.length,1); assert.equal(clicks,0); assert.ok(challenged.warnings.some(w=>w.includes('verification')));
+});
+test('repeated page and missing pre-click range never trigger a blind click',async()=>{
+  const first=page(1,1,2,[row('1')]); let scans=[first,first,{...first,range:null}],clicks=0;
+  const tab={playwright:{evaluate:async()=>scans.shift() ?? first,locator:()=>({click:async()=>{clicks++;}})}};
+  const stopped=await collectCategory(tab,'books',{settleDelayMs:0}); assert.equal(stopped.coverage,'partial'); assert.equal(clicks,0);
+  scans=[first,first,first]; const repeated=await collectCategory(tab,'books',{settleAttempts:3,settleDelayMs:0}); assert.equal(repeated.coverage,'partial'); assert.equal(repeated.records.length,1); assert.equal(clicks,1);
+});
 test('cache requires consent and never replaces an existing richer file',async()=>{
   let dir=await mkdtemp(join(tmpdir(),'book-cache-test-')); try {
     let path=join(dir,'cache.json'); const capture=assessPages([page(1,1,1,[row('1')])],'books');

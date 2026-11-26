@@ -4,6 +4,8 @@ export function scanPage() {
   const text = e => e?.textContent?.trim() || null;
   const path = location.pathname;
   const category = location.hostname === 'www.amazon.com' && /\/hz\/mycd\/digital-console\/contentlist\/booksAll\//.test(path) ? 'books' : location.hostname === 'www.amazon.com' && /\/hz\/mycd\/digital-console\/contentlist\/pdocs\//.test(path) ? 'docs' : null;
+  const challenge = !!document.querySelector('#tmms-challenge, #continueCheck, #auth-captcha-guess') || /\/checkpoint\/|\/ap\/signin/.test(path);
+  if (challenge || !category) return {category:null, challenge, path, range:null, rows:[], pageNumbers:[]};
   const countText = text(document.querySelector('#CONTENT_COUNT'));
   const match = countText?.match(/Showing\s+([\d,]+)\s+to\s+([\d,]+)\s+of\s+([\d,]+)\s+items/i);
   const range = match ? match.slice(1).map(x => Number(x.replaceAll(',', ''))) : null;
@@ -47,45 +49,55 @@ export function assessPages(pages, category, failure = null) {
   if (failure) warnings.push(`Collection stopped: ${failure}`);
   if (duplicateCount) warnings.push('Duplicate source identifiers retained');
   if (missingIds) warnings.push('Rows with missing identifiers retained');
+  const enumerationMatched = warnings.length === 0 && total !== null && expected === total + 1 && records.length === total && seen.size === total;
   if (records.some(r => !r.title || !r.author || !r.dateLabel)) warnings.push('Some records have missing title, author or date');
-  const complete = !failure && warnings.length === 0 && total !== null && expected === total + 1 && records.length === total && seen.size === total;
+  const complete = enumerationMatched && !records.some(r => !r.title || !r.author || !r.dateLabel);
   if (!complete) warnings.push('Coverage is partial or unverified');
   return {format:'book-curator-amazon-content',version:1,source:'amazon-content-management',category,
     capturedAt:new Date().toISOString(),method:'read-only-dom-pagination',account:null,accessScope:'unknown',
     coverage:complete ? 'complete-observed' : 'partial',warnings,
-    diagnostics:{displayedTotal:total,ranges,recordCount:records.length,uniqueCount:seen.size,duplicateCount,missingIds},records};
+    diagnostics:{displayedTotal:total,ranges,recordCount:records.length,uniqueCount:seen.size,duplicateCount,missingIds,missingMetadata:records.filter(r => !r.title || !r.author || !r.dateLabel).length, enumerationMatched},records};
 }
 
 export async function collectCategory(tab, category, options = {}) {
   if (!['books','docs'].includes(category)) throw new Error('Unsupported category');
   const pages = []; let failure = null;
   const maxPages = options.maxPages ?? 100;
+  const attempts = options.settleAttempts ?? 20;
+  const delay = options.settleDelayMs ?? 250;
+  const signature = p => JSON.stringify([p.range, p.rows.map(r => [r.sourceType, r.sourceId])]);
+  const coherent = p => Array.isArray(p.range) && p.range.length === 3 && p.range.every(Number.isSafeInteger) && p.range[0] >= 1 && p.range[1] >= p.range[0] && p.range[1] <= p.range[2] && p.rows.length === p.range[1] - p.range[0] + 1;
+  async function settled(expectedStart) {
+    let last = null;
+    for (let n = 0; n < attempts; n++) {
+      const p = await tab.playwright.evaluate(scanPage);
+      if (p.challenge) return {failure:'human verification or sign-in required'};
+      if (p.category !== category) return {failure:'unexpected source or category'};
+      if (coherent(p) && p.range[0] === expectedStart) {
+        const sig = signature(p);
+        if (sig === last) return {page:p};
+        last = sig;
+      } else last = null;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    return {failure:'page did not settle at expected range'};
+  }
   try {
+    let expected = 1;
     for (let n = 0; n < maxPages; n++) {
-      let page = await tab.playwright.evaluate(scanPage);
-      if (page.category !== category || !page.range) { failure = 'unexpected source, category, or missing count'; break; }
-      if (pages.length && page.range[0] !== pages.at(-1).range[1] + 1) { failure = 'page did not advance contiguously'; break; }
+      const result = await settled(expected);
+      if (result.failure) { failure = result.failure; break; }
+      const page = result.page;
       pages.push(page);
       if (page.range[1] >= page.range[2]) break;
-      const pageSize = page.range[1] - page.range[0] + 1;
-      const nextNumber = Math.floor((page.range[0] - 1) / pageSize) + 2;
-      if (!page.pageNumbers.includes(nextNumber)) { failure = 'next numbered page not available'; break; }
-      let advanced = false;
-      for (let clickAttempt = 0; clickAttempt < 2 && !advanced && !failure; clickAttempt++) {
-        // Retry only if the old range is still visible; never click a stale page control.
-        const before = await tab.playwright.evaluate(scanPage);
-        if (before.category !== category) { failure = 'category or source changed'; break; }
-        if (before.range && before.range[0] !== page.range[0]) { advanced = true; break; }
-        await tab.playwright.locator(`#page-${nextNumber}`).click({timeout:5000});
-        for (let attempt = 0; attempt < 20; attempt++) {
-          await new Promise(resolve => setTimeout(resolve, 250));
-          const next = await tab.playwright.evaluate(scanPage);
-          if (next.category !== category) { failure = 'category or source changed'; break; }
-          if (next.range && next.range[0] !== page.range[0]) { advanced = true; break; }
-        }
-      }
-      if (failure) break;
-      if (!advanced) { failure = 'page advance timed out'; break; }
+      const nextNumber = Math.floor((page.range[0] - 1) / (page.range[1] - page.range[0] + 1)) + 2;
+      // Re-read immediately before the click, checking both coherent range and control.
+      const before = await tab.playwright.evaluate(scanPage);
+      if (before.challenge) { failure = 'human verification or sign-in required'; break; }
+      if (before.category !== category) { failure = 'unexpected source or category'; break; }
+      if (!coherent(before) || signature(before) !== signature(page) || !before.pageNumbers.includes(nextNumber)) { failure = 'current page or next numbered control changed'; break; }
+      await tab.playwright.locator(`#page-${nextNumber}`).click({timeout:5000});
+      expected = page.range[1] + 1;
       if (n === maxPages - 1) failure = 'page limit reached';
     }
   } catch (error) { failure = `browser operation failed (${error?.name || 'Error'})`; }
