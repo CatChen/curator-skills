@@ -116,9 +116,15 @@ const SOURCES = {
     file: 'reviews', recordOrder: ['appid', 'reviewUrl', 'recommended', 'review', 'playtimeDisplay', 'postedDate', 'name', 'nameSource'], rankBased: false, requiredDiagnostics: ['pagesVisited', 'pagesPending'],
     // The records checksum covers observed fields only: names are never observed on this page and may be added later by enrichment.
     observedRecords: recs => recs.map(r => { const {name, nameSource, ...observed} = r; return observed; }),
-    validateRecord(r, i, errors) {
-      const m = typeof r.reviewUrl === 'string' && r.reviewUrl.match(/^https:\/\/steamcommunity\.com\/(?:id|profiles)\/[^/]+\/recommended\/(\d+)\/?$/);
-      if (!m) errors.push(`record ${i} has an invalid reviewUrl`); else if (Number(m[1]) !== r.appid) errors.push(`record ${i} reviewUrl does not match its appid`);
+    validateRecord(r, i, errors, env) {
+      const m = typeof r.reviewUrl === 'string' && r.reviewUrl.match(/^https:\/\/steamcommunity\.com\/((?:id|profiles)\/[^/]+)\/recommended\/(\d+)\/?$/);
+      if (!m) errors.push(`record ${i} has an invalid reviewUrl`);
+      else {
+        if (Number(m[2]) !== r.appid) errors.push(`record ${i} reviewUrl does not match its appid`);
+        // Every review must belong to the list that was collected: the account path in its URL equals the list path the collector recorded.
+        const listPath = env?.diagnostics?.urlPath;
+        if (typeof listPath === 'string' && /^\/(?:id|profiles)\/[^/]+\/recommended$/.test(listPath) && `/${m[1]}/recommended` !== listPath) errors.push(`record ${i} reviewUrl belongs to a different account path than the collected list`);
+      }
       if (!(r.recommended === null || typeof r.recommended === 'boolean')) errors.push(`record ${i} has an invalid recommended value`);
       for (const k of ['review', 'playtimeDisplay', 'postedDate']) if (!(r[k] === null || (typeof r[k] === 'string' && r[k].trim()))) errors.push(`record ${i} has an invalid ${k}`);
       // A name is never observed here; it is allowed only as a marked enrichment from a verified library capture.
@@ -126,6 +132,12 @@ const SOURCES = {
         if (typeof r.name !== 'string' || !r.name.trim()) errors.push(`record ${i} has an invalid name`);
         if (r.nameSource !== 'verified-library-capture') errors.push(`record ${i} has a name without nameSource "verified-library-capture"`);
       }
+    },
+    validateDiagnostics(d, recs, errors) {
+      const count = n => Number.isSafeInteger(n) && n >= 0;
+      for (const k of ['pagesVisited', 'pagesPending', 'pageAttempts']) if (!count(d[k])) errors.push(`diagnostics.${k} must be a non-negative integer`);
+      if (count(d.pagesVisited) && count(d.pageAttempts) && recs.length && (d.pagesVisited < 1 || d.pageAttempts < d.pagesVisited)) errors.push('pagination diagnostics are inconsistent with the records');
+      if (typeof d.urlPath !== 'string' || !/^\/(?:id|profiles)\/[^/]+\/recommended$/.test(d.urlPath)) errors.push('diagnostics.urlPath is not a reviews list path');
     },
     ownerEvidence: d => d?.ownerControls === true, ownerLabel: 'owner-only evidence (review controls)',
     viewOk: e => e?.diagnostics?.view?.kind === 'recommended-list',
@@ -199,7 +211,7 @@ export function canonicalize(env) {
 
 // Contract validation. `errors` mean the input is not a valid v1 envelope for its source (nothing is saved).
 // `incomplete` reasons mean it is valid but not a full capture: it is preserved as a partial snapshot, never promoted.
-export function validate(env, {account, accessScope} = {}) {
+export function validate(env, {account, accessScope, incoming = false} = {}) {
   const errors = [], incomplete = [];
   const known = new Set(ENVELOPE_ORDER);
   if (!isPlainObject(env)) return {errors: ['not an object'], incomplete};
@@ -221,7 +233,7 @@ export function validate(env, {account, accessScope} = {}) {
     for (const k of Object.keys(r)) if (!allowed.has(k)) errors.push(`record ${i} has unexpected field ${k}`);
     if (!Number.isSafeInteger(r.appid) || r.appid <= 0) errors.push(`record ${i} has an invalid appid`);
     if (ids.has(r.appid)) errors.push(`duplicate appid ${r.appid}`); ids.add(r.appid);
-    rules.validateRecord(r, i, errors);
+    rules.validateRecord(r, i, errors, env);
     if (rules.rankBased) { if (ranks.has(r.rank)) errors.push(`duplicate rank ${r.rank}`); ranks.add(r.rank); }
   });
   if (rules.rankBased && !recs.every((r, i) => r?.rank === i + 1)) incomplete.push('ranks are not contiguous 1..n');
@@ -239,6 +251,15 @@ export function validate(env, {account, accessScope} = {}) {
     if (d.expectedCount === null) incomplete.push('the displayed count was not available, so coverage cannot be verified');
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
     if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
+    rules.validateDiagnostics?.(d, recs, errors);
+    // A transfer from a page is observation only: it may not carry attestations (those are added here, by the caller's verified inputs)
+    // and, for reviews, may not carry names (a name only ever comes from the enrichment step that verifies it).
+    if (incoming && 'attestations' in d) errors.push('a page transfer must not carry diagnostics.attestations');
+    if (env.source === 'reviews') {
+      const named = recs.filter(r => r && ('name' in r || 'nameSource' in r)).length, e = d.attestations?.enrichment;
+      if (incoming && named) errors.push('a page transfer must not carry game names; names are added only by the verified enrichment step');
+      else if (named && !(isPlainObject(e) && e.namedRecords === named && typeof e.librarySha256 === 'string' && /^[0-9a-f]{64}$/.test(e.librarySha256) && e.names === 'verified-library-capture')) errors.push('names are present without a matching verified enrichment attestation bound to a library snapshot');
+    }
   }
   if (!recs.length) { // an empty page is preserved as an uncertain observation, never as a verified empty source
     if (d?.stopReason === 'empty-observed' && d?.expectedCount === 0) incomplete.push('empty source observed but owner, account and view were not independently verified');
@@ -271,7 +292,7 @@ export function fieldLosses(existing, next) { return cfgOf(next).fieldLosses(exi
 // Add game names to a reviews envelope from a library capture that is verified to be the same account. The review page never shows
 // a name, so this is the only source; every name added is marked nameSource "verified-library-capture" and the library capture's
 // time and size are recorded. A review whose game is absent from the library simply stays without a name. Returns {env, enrichment}.
-export function enrichReviewNames(env, library, {libraryAccount} = {}) {
+export function enrichReviewNames(env, library, {libraryAccount, librarySha256} = {}) {
   if (env?.source !== 'reviews') throw new Error('name enrichment applies only to a reviews capture');
   if (!validExisting(library, 'library')) throw new Error('the names source is not a valid library capture');
   const account = library.account ?? libraryAccount;
@@ -280,9 +301,23 @@ export function enrichReviewNames(env, library, {libraryAccount} = {}) {
   const names = new Map(library.records.filter(r => typeof r.name === 'string' && r.name.trim()).map(r => [r.appid, r.name]));
   let named = 0;
   const records = env.records.map(r => { if (!names.has(r.appid)) return r; named++; return {...r, name: names.get(r.appid), nameSource: 'verified-library-capture'}; });
-  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length};
+  if (typeof librarySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(librarySha256)) throw new Error('enrichment must be bound to the exact library snapshot: the SHA-256 of its bytes is required (a local digest identifies the file; it does not authenticate its source)');
+  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length, librarySha256, libraryAccount: account};
   const warnings = records.length - named ? [...env.warnings, 'Some review names are missing from the verified library capture.'] : env.warnings;
   return {env: {...env, records, warnings}, enrichment};
+}
+
+// Re-derive the attribution: every name in an enriched reviews capture must equal the name the bound library snapshot gives that AppID,
+// carry the verified marker, and no record may be named that the library cannot name. Returns a list of problems (empty means verified).
+export function verifyNameAttribution(env, library) {
+  const names = new Map(library.records.filter(r => typeof r.name === 'string' && r.name.trim()).map(r => [r.appid, r.name])), bad = [];
+  for (const r of env.records) {
+    const named = 'name' in r || 'nameSource' in r;
+    if (!named) continue;
+    if (r.nameSource !== 'verified-library-capture') bad.push(`AppID ${r.appid} has a name without the verified marker`);
+    else if (names.get(r.appid) !== r.name) bad.push(`AppID ${r.appid} has a name that the library snapshot does not give it`);
+  }
+  return bad;
 }
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'separate', reason, notes}.
@@ -424,7 +459,7 @@ if (isMain()) {
     const transferVerified = (provenanceArg === 'tool-result') || (provenanceArg === 'download' && summaryChecks !== null);
     const level = provenanceArg === 'tool-result' ? 'runtime-tool-result' : transferVerified ? (sourceSha !== undefined ? 'download-summary-and-source-digest' : 'download-summary-verified') : 'unverified';
     const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
-    const {errors, incomplete} = validate(env, {account, accessScope});
+    const {errors, incomplete} = validate(env, {account, accessScope, incoming: true});
     if (errors.length) { console.error('Rejected (not a valid Steam export envelope for its source):\n- ' + errors.join('\n- ')); process.exit(1); }
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
@@ -444,12 +479,15 @@ if (isMain()) {
     if (libraryAccount !== undefined && namesFrom === undefined) throw new Error('--library-account applies only with --names-from');
     if (namesFrom !== undefined) { // read-only use of the user's library cache, inside the same consent scope; the file is never modified
       if (libraryAccount !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(libraryAccount)) throw new Error('unsafe --library-account alias');
-      let library; try { library = JSON.parse(fs.readFileSync(namesFrom, 'utf8')); } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
-      const result = enrichReviewNames(env, library, {libraryAccount});
+      let libBytes, library; try { libBytes = fs.readFileSync(namesFrom); library = JSON.parse(libBytes.toString('utf8')); } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
+      const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes)});
+      const bad = verifyNameAttribution(result.env, library);
+      if (bad.length) throw new Error(`name attribution failed verification:\n- ${bad.join('\n- ')}`);
       toSave = result.env; attestations.enrichment = result.enrichment;
     }
     env = toSave;
     env.diagnostics = {...env.diagnostics, attestations};
+    { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
     const result = save(canonicalize(env), dest, {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
       recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))});

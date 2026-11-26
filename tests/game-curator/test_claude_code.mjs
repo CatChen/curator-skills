@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {parseToolResult, canonicalize, validate, decide as decideRaw, fieldLosses, checkCacheAuthorized, enrichReviewNames, save as saveRaw, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {parseToolResult, canonicalize, validate, decide as decideRaw, fieldLosses, checkCacheAuthorized, enrichReviewNames, verifyNameAttribution, save as saveRaw, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 import {spawnSync} from 'node:child_process';
 import {makeWishlistPage} from './fake-wishlist-dom.mjs';
 import {makeLibraryPage} from './fake-library-dom.mjs';
@@ -455,12 +455,14 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
 
 // ---- Reviews source: observed fields only, names only by verified enrichment ----
 {
+  const LIBSHA = crypto.createHash('sha256').update('library snapshot bytes').digest('hex');
+  const enrich = (e, l, o = {}) => enrichReviewNames(e, l, {librarySha256: LIBSHA, ...o}); // a local digest binds enrichment to the exact snapshot
   const rrow = (i, o = {}) => ({appid: 5000 + i, reviewUrl: `https://steamcommunity.com/id/test/recommended/${5000 + i}/`, recommended: i % 3 !== 0, review: `Review ${i}`, playtimeDisplay: `${i}.5 hrs on record`, postedDate: `Posted May ${i}.`, ...o});
   const rev = (n, {at = '2026-11-26T09:00:00.000Z', account, accessScope = 'signed-in', view = {kind: 'recommended-list', language: 'en'}, records, diag = {}} = {}) => {
     records ??= Array.from({length: n}, (_, i) => rrow(i + 1));
     const observed = records.map(({name, nameSource, ...r}) => r);
     const env = {format: 'game-curator-steam-export', version: 1, source: 'reviews', capturedAt: at, method: 'browser-dom-claude-code', coverage: 'partial', warnings: ['w'],
-      diagnostics: {expectedCount: records.length, uniqueCount: records.length, pagesVisited: 2, pagesPending: 0, pageAttempts: 2, complete: true, stopReason: 'complete', ownerControls: true, view, recordsSha256: sha(JSON.stringify(observed)), ...diag}, accessScope, records};
+      diagnostics: {expectedCount: records.length, uniqueCount: records.length, pagesVisited: 2, pagesPending: 0, pageAttempts: 2, complete: true, stopReason: 'complete', ownerControls: true, urlPath: '/id/test/recommended', view, recordsSha256: sha(JSON.stringify(observed)), ...diag}, accessScope, records};
     if (account) env.account = account;
     return env;
   };
@@ -487,31 +489,66 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   const libAccount = (account, accessScope = 'signed-in', extra = {}) => ({format: 'game-curator-steam-export', version: 1, source: 'library', capturedAt: '2026-11-25T00:00:00.000Z', method: 'browser-dom', coverage: 'partial', warnings: [], diagnostics: {}, ...(account ? {account} : {}), accessScope,
     records: [{appid: 5001, name: 'Game One', pageText: 'x', membershipSource: 'all-games-row'}, {appid: 5002, name: null, pageText: 'x', membershipSource: 'all-games-row'}], ...extra});
   const rv = rev(3, {account: 'me'});
-  const {env: enriched, enrichment} = enrichReviewNames(rv, libAccount('me'));
+  const {env: enriched, enrichment} = enrich(rv, libAccount('me'));
   assert.equal(enriched.records[0].name, 'Game One'); assert.equal(enriched.records[0].nameSource, 'verified-library-capture');
   assert.ok(!('name' in enriched.records[1]) && !('name' in enriched.records[2]), 'no library name means no name, never a guess');
-  assert.deepEqual(enrichment, {names: 'verified-library-capture', namedRecords: 1, recordsWithoutName: 2, libraryCapturedAt: '2026-11-25T00:00:00.000Z', libraryRecords: 2});
+  assert.deepEqual({...enrichment, librarySha256: undefined, libraryAccount: undefined}, {names: 'verified-library-capture', namedRecords: 1, recordsWithoutName: 2, libraryCapturedAt: '2026-11-25T00:00:00.000Z', libraryRecords: 2, librarySha256: undefined, libraryAccount: undefined});
   assert.ok(enriched.warnings.some(w => /names are missing/.test(w)));
-  assert.deepEqual(validate(canonicalize(enriched), {account: 'me', accessScope: 'signed-in'}), {errors: [], incomplete: []});
+  assert.deepEqual(enrichment, {...enrichment, librarySha256: LIBSHA, libraryAccount: 'me'});
+  { const saved = canonicalize({...enriched, diagnostics: {...enriched.diagnostics, attestations: {enrichment}}}); assert.deepEqual(validate(saved, {account: 'me', accessScope: 'signed-in'}), {errors: [], incomplete: []}); } // names are valid only with their bound attestation
   assert.equal(rv.records[0].name, undefined, 'the observed capture is not mutated');
-  assert.throws(() => enrichReviewNames(rv, libAccount('other')), /same account/);
-  assert.throws(() => enrichReviewNames(rv, libAccount(undefined)), /same account/);
-  assert.equal(enrichReviewNames(rv, libAccount(undefined), {libraryAccount: 'me'}).enrichment.namedRecords, 1); // a user-confirmed alias for an older library file
-  assert.throws(() => enrichReviewNames(rv, libAccount(undefined), {libraryAccount: 'other'}), /same account/);
-  assert.throws(() => enrichReviewNames({...rv, account: undefined}, libAccount('me')), /same account/);
-  assert.throws(() => enrichReviewNames(rv, libAccount('me', 'unknown')), /established access scope/);
-  assert.throws(() => enrichReviewNames(rv, {...libAccount('me'), source: 'wishlist'}), /not a valid library capture/);
-  assert.throws(() => enrichReviewNames(make(2, {account: 'me'}), libAccount('me')), /only to a reviews capture/);
+  assert.throws(() => enrich(rv, libAccount('other')), /same account/);
+  assert.throws(() => enrich(rv, libAccount(undefined)), /same account/);
+  assert.equal(enrich(rv, libAccount(undefined), {libraryAccount: 'me'}).enrichment.namedRecords, 1); // a user-confirmed alias for an older library file
+  assert.throws(() => enrich(rv, libAccount(undefined), {libraryAccount: 'other'}), /same account/);
+  assert.throws(() => enrich({...rv, account: undefined}, libAccount('me')), /same account/);
+  assert.throws(() => enrich(rv, libAccount('me', 'unknown')), /established access scope/);
+  assert.throws(() => enrich(rv, {...libAccount('me'), source: 'wishlist'}), /not a valid library capture/);
+  assert.throws(() => enrich(make(2, {account: 'me'}), libAccount('me')), /only to a reviews capture/);
+  // ---- negative tests for the review's trust rules ----
+  // Enrichment must be bound to the exact library snapshot (local digest).
+  assert.throws(() => enrichReviewNames(rv, libAccount('me')), /bound to the exact library snapshot/);
+  assert.throws(() => enrichReviewNames(rv, libAccount('me'), {librarySha256: 'abc'}), /bound to the exact library snapshot/);
+  // A page transfer may not carry names or attestations: only the verified enrichment step adds names.
+  { const e = rev(3); e.records[0].name = 'Planted'; e.records[0].nameSource = 'verified-library-capture';
+    const v = validate(e, {accessScope: 'signed-in', incoming: true}); assert.ok(v.errors.some(m => /must not carry game names/.test(m)), 'incoming names must be rejected');
+    assert.ok(validate(e, {accessScope: 'signed-in'}).errors.some(m => /without a matching verified enrichment attestation/.test(m))); } // and not accepted as a saved file either
+  { const e = rev(3); e.diagnostics.attestations = {enrichment: {names: 'verified-library-capture', namedRecords: 0, librarySha256: LIBSHA}};
+    assert.ok(validate(e, {accessScope: 'signed-in', incoming: true}).errors.some(m => /must not carry diagnostics.attestations/.test(m))); }
+  // A planted attestation cannot launder planted names: it must match the count and carry a snapshot digest.
+  for (const [label, attestation] of [['wrong count', {names: 'verified-library-capture', namedRecords: 2, librarySha256: LIBSHA}], ['no digest', {names: 'verified-library-capture', namedRecords: 1}],
+    ['malformed digest', {names: 'verified-library-capture', namedRecords: 1, librarySha256: 'zz'}], ['wrong mode', {names: 'other', namedRecords: 1, librarySha256: LIBSHA}]]) {
+    const e = rev(3); e.records[0].name = 'Planted'; e.records[0].nameSource = 'verified-library-capture'; e.diagnostics.attestations = {enrichment: attestation};
+    assert.ok(validate(e, {accessScope: 'signed-in'}).errors.some(m => /without a matching verified enrichment attestation/.test(m)), label);
+  }
+  // Attribution is re-derived against the bound library: wrong name, missing marker, and a name for a game the library cannot name are all caught.
+  { const library = libAccount('me'); const ok = enrich(rev(3, {account: 'me'}), library).env;
+    assert.deepEqual(verifyNameAttribution(ok, library), []);
+    const wrongName = {...ok, records: ok.records.map((r, i) => (i === 0 ? {...r, name: 'Another Game'} : r))}; assert.match(verifyNameAttribution(wrongName, library)[0], /does not give it/);
+    const noMarker = {...ok, records: ok.records.map((r, i) => (i === 0 ? {...r, nameSource: 'guess'} : r))}; assert.match(verifyNameAttribution(noMarker, library)[0], /without the verified marker/);
+    const unnamedInLib = {...ok, records: ok.records.map((r, i) => (i === 2 ? {...r, name: 'Invented', nameSource: 'verified-library-capture'} : r))}; assert.match(verifyNameAttribution(unnamedInLib, library)[0], /AppID 5003/); }
+  // A review URL must belong to the collected list's account path, not just carry the right appid.
+  { const e = rev(3); e.records[0].reviewUrl = 'https://steamcommunity.com/id/other/recommended/5001/'; e.diagnostics.recordsSha256 = sha(JSON.stringify(e.records.map(({name, nameSource, ...r}) => r)));
+    assert.ok(validate(e, {accessScope: 'signed-in'}).errors.some(m => /different account path than the collected list/.test(m))); }
+  { const e = rev(3); e.diagnostics.urlPath = '/id/test/other'; assert.ok(validate(e, {accessScope: 'signed-in'}).errors.some(m => /urlPath is not a reviews list path/.test(m))); }
+  { const e = rev(3); delete e.diagnostics.urlPath; assert.ok(validate(e, {accessScope: 'signed-in'}).errors.some(m => /urlPath is not a reviews list path/.test(m))); }
+  // Required pagination diagnostics are validated before anything can be promoted.
+  for (const [label, patch, re] of [['missing pagesVisited', {pagesVisited: undefined}, /pagesVisited must be a non-negative integer/], ['negative pagesPending', {pagesPending: -1}, /pagesPending must be a non-negative integer/],
+    ['fractional pageAttempts', {pageAttempts: 1.5}, /pageAttempts must be a non-negative integer/], ['string pagesVisited', {pagesVisited: '2'}, /pagesVisited must be a non-negative integer/],
+    ['zero pages with records', {pagesVisited: 0, pageAttempts: 0}, /inconsistent with the records/], ['attempts below visited', {pagesVisited: 3, pageAttempts: 2}, /inconsistent with the records/],
+    ['missing pageAttempts', {pageAttempts: undefined}, /pageAttempts must be a non-negative integer/]]) {
+    const e = rev(3); Object.assign(e.diagnostics, patch); assert.ok(validate(e, {accessScope: 'signed-in'}).errors.some(m => re.test(m)), label);
+  }
   // policy: view, field loss (a baseline that had names must not lose them), per-source files
   const rnext = rev(4, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), rold = rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'});
   assert.equal(decide(rold, rnext).action, 'replace'); assert.equal(decide(null, rnext).action, 'create'); // a removed review is a legitimate change
   assert.match(decideRaw(null, rev(4, {account: 'me', view: {kind: 'other'}}), {transferVerified: true}).reason, /not verified as the full "My reviews" list/);
   assert.match(reason({...rold, diagnostics: {...rold.diagnostics, view: undefined}}, rnext), /no view evidence/); // an older Codex baseline has no view evidence
   assert.match(reason({...rold, diagnostics: {...rold.diagnostics, view: {kind: 'other'}}}, rnext), /non-default view/);
-  const named = enrichReviewNames(rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'}), libAccount('me')).env;
+  const named = enrich(rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'}), libAccount('me')).env;
   assert.deepEqual(fieldLosses(named, rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'})), {name: 1}); // un-enriched replacement would lose a name
   assert.match(reason(named, rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'})), /lose fields/);
-  assert.equal(decide(named, enrichReviewNames(rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), libAccount('me')).env).action, 'replace');
+  assert.equal(decide(named, enrich(rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), libAccount('me')).env).action, 'replace');
   const rootR = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-rev-')), destR = path.join(rootR, 'game-curator', 'cache', 'steam'); fs.mkdirSync(destR, {recursive: true});
   fs.writeFileSync(path.join(rootR, 'game-curator', 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
   const r1 = save(rold, destR); assert.equal(r1.target, path.join(destR, 'reviews.json'));
@@ -527,7 +564,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
     fs.writeFileSync(path.join(home5, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
     const site = makeReviewsSite({total: 25});
     let r = JSON.parse(JSON.stringify(await site.runFile({deliver: 'download'})));
-    while (r.status === 'continue') { site.navigate(r.next); r = JSON.parse(JSON.stringify(await site.runLoader())); }
+    while (r.status === 'continue') { site.navigate(r.next); r = JSON.parse(JSON.stringify(await site.runFile({deliver: 'download'}))); } // every page re-runs the trusted file
     const dlText = await site.downloads[0].blob.text(), dlPath = path.join(home5, r.file); fs.writeFileSync(dlPath, dlText);
     const libFile = path.join(home5, 'library.json'); fs.writeFileSync(libFile, JSON.stringify(libAccount('me', 'signed-in', {records: Array.from({length: 25}, (_, i) => ({appid: 4000 + i, name: `Lib Game ${i}`, pageText: 'x', membershipSource: 'all-games-row'})).slice(0, 20)})));
     const run5 = (...a) => spawnSync(process.execPath, [cli, dlPath, '--dest', cache5, '--account', 'me', '--access-scope', 'signed-in', '--provenance', 'download', '--page-summary', JSON.stringify(r), ...a], {encoding: 'utf8'});
@@ -535,11 +572,18 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
     o = run5('--names-from', libFile); assert.equal(o.status, 0, o.stderr);
     const saved5 = JSON.parse(fs.readFileSync(path.join(cache5, 'reviews.json'), 'utf8'));
     assert.equal(saved5.records.length, 25); assert.equal(saved5.records.filter(x => x.nameSource === 'verified-library-capture').length, 20);
-    assert.equal(saved5.diagnostics.attestations.enrichment.namedRecords, 20); assert.equal(saved5.diagnostics.attestations.transfer.level, 'download-summary-verified');
+    assert.equal(saved5.diagnostics.attestations.enrichment.namedRecords, 20); assert.equal(saved5.diagnostics.attestations.enrichment.librarySha256, crypto.createHash('sha256').update(fs.readFileSync(libFile)).digest('hex'), 'enrichment is bound to the exact snapshot bytes'); assert.equal(saved5.diagnostics.attestations.transfer.level, 'download-summary-verified');
     assert.deepEqual(validate(canonicalize(saved5), {account: 'me', accessScope: 'signed-in'}), {errors: [], incomplete: []});
     o = run5('--library-account', 'me'); assert.notEqual(o.status, 0); assert.match(o.stderr, /applies only with --names-from/);
     fs.writeFileSync(libFile, JSON.stringify(libAccount('other'))); o = run5('--names-from', libFile, '--dry-run'); assert.notEqual(o.status, 0); assert.match(o.stderr, /same account/);
     assert.equal(run5('--view', 'unfiltered', '--dry-run').status === 0, false); // no attestation exists for reviews
+    // A page transfer that already carries names or attestations is rejected outright, before any enrichment or save.
+    { const planted = JSON.parse(dlText); planted.records[0].name = 'Planted'; planted.records[0].nameSource = 'verified-library-capture'; const pf = path.join(home5, 'planted.json'); fs.writeFileSync(pf, JSON.stringify(planted));
+      const o2 = spawnSync(process.execPath, [cli, pf, '--dest', cache5, '--account', 'me', '--access-scope', 'signed-in', '--provenance', 'download', '--dry-run'], {encoding: 'utf8'});
+      assert.notEqual(o2.status, 0); assert.match(o2.stderr, /must not carry game names/);
+      const forged = JSON.parse(dlText); forged.diagnostics.attestations = {enrichment: {names: 'verified-library-capture', namedRecords: 0, librarySha256: 'a'.repeat(64)}}; const ff = path.join(home5, 'forged.json'); fs.writeFileSync(ff, JSON.stringify(forged));
+      const o3 = spawnSync(process.execPath, [cli, ff, '--dest', cache5, '--account', 'me', '--access-scope', 'signed-in', '--provenance', 'download', '--dry-run'], {encoding: 'utf8'});
+      assert.notEqual(o3.status, 0); assert.match(o3.stderr, /must not carry diagnostics.attestations/); }
     site.ctx.window.__gcRelease?.();
     fs.rmSync(home5, {recursive: true});
   }

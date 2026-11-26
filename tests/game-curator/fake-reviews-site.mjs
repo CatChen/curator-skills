@@ -44,9 +44,9 @@ export function makeReviewsSite({total = 25, perPage = 10, path = '/id/test/reco
     render(redirected ?? target.href);
   };
   const source = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-reviews-page.js', import.meta.url), 'utf8');
-  // First run: the whole generated file. Later pages: the one-line loader the script documents.
+  // Every page re-runs the whole trusted generated file: a navigation destroys the page scope and nothing is evaluated from storage.
   site.runFile = (opts = {}) => vm.runInContext(`(async () => (${source.replace(/\}\)\(\{\}\)\s*$/, `})(${JSON.stringify(opts)})`).replace(/^(?:\/\/.*\n)*await /m, '')}))()`, ctx);
-  site.runLoader = (opts = {}) => vm.runInContext(`(async () => (window.__gcReviewsRun = eval(sessionStorage.getItem('gcReviewsFn')))(${JSON.stringify(opts)}))()`, ctx);
+  site.state = () => { const v = site.store.get('gcReviews'); return v === undefined ? null : JSON.parse(v); };
   Object.defineProperty(site, 'ctx', {get: () => ctx});
   site.navigate('/');
   return site;
