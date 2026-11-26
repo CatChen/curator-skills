@@ -1,5 +1,7 @@
 // Browser-runtime collectors. All page evaluation reads the DOM only.
 // The caller supplies a tab already opened on the verified account's source page.
+import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from './wishlist-rows.mjs';
+
 const LIMIT = 80;
 
 function envelope(source, records, warnings, diagnostics = {}) {
@@ -43,48 +45,34 @@ export function normalizeLibraryRecord(record) {
 
 export async function collectWishlist(tab, {maxScrolls=20} = {}) {
   if (!Number.isInteger(maxScrolls) || maxScrolls < 0 || maxScrolls > LIMIT) throw new Error('Invalid maxScrolls');
-  const records = new Map(), warnings = [], ranks = new Set();
+  const rowsByApp = new Map(), warnings = [], ranks = new Set();
   let expected = null, stagnant = 0, steps = 0;
-  async function batch() {
-    return read(tab, () => {
-      if (location.protocol !== 'https:' || location.hostname !== 'store.steampowered.com' || !location.pathname.startsWith('/wishlist')) throw Error('Open the verified Steam Store wishlist');
-      const text = document.body.innerText;
-      const count = text.match(/\b([\d,]+)\s+ITEMS\b/i);
-      const handles = [...document.querySelectorAll('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]')];
-      const rows = handles.map(h => {
-        const m = h.getAttribute('data-rfd-drag-handle-draggable-id').match(/^WishlistItem-(\d+)-(\d+)$/);
-        const row = h.closest('.Panel');
-        if (!m || !row) return null;
-        const links = [...row.querySelectorAll('a[href*="/app/"]')];
-        const link = links.find(a => a.innerText.trim() && /\/app\/(\d+)/.exec(a.href)?.[1] === m[1] && !/^[\p{Sc}]/u.test(a.innerText.trim()));
-        const raw = row.innerText.trim();
-        return {appid:Number(m[1]),rank:Number(m[2])+1,name:link?.innerText.trim()||raw.split('\n')[0]||null,
-          pageText:raw, membershipSource:'wishlist-row'};
-      }).filter(Boolean);
-      return {expected:count ? Number(count[1].replace(/,/g,'')) : null, rows};
-    });
-  }
+  const loaded = () => [...rowsByApp.values()].filter(r => r.complete).length;
   try {
     while (true) {
-      const data = await batch(); expected = data.expected ?? expected;
-      const before = records.size;
-      for (const row of data.rows) { records.set(row.appid, row); ranks.add(row.rank); }
-      stagnant = records.size === before ? stagnant+1 : 0;
-      const ranksCovered = expected !== null && records.size === expected && ranks.size === expected &&
+      const data = await read(tab, snapshotWishlist); expected = data.expected ?? expected;
+      const before = loaded() + rowsByApp.size;
+      for (const row of data.rows) { mergeWishlistRow(rowsByApp, row); }
+      ranks.clear(); for (const row of rowsByApp.values()) if (row.complete) ranks.add(row.rank);
+      // Progress counts new rows and placeholder rows that finished loading.
+      stagnant = loaded() + rowsByApp.size === before ? stagnant+1 : 0;
+      const ranksCovered = expected !== null && ranks.size === expected && loaded() === expected &&
         [...ranks].every(rank=>Number.isInteger(rank) && rank>=1 && rank<=expected);
       if (steps >= maxScrolls || ranksCovered || stagnant >= 3) break;
       await scroll(tab); await refresh(tab); steps++;
     }
   } catch (error) {
-    if (!records.size) throw error;
+    if (!rowsByApp.size) throw error;
     warnings.push(`Collection interrupted after ${steps} scrolls: ${String(error.message || error)}`);
   }
-  if (!records.size) warnings.push('No wishlist rows found; verify authentication, page identity and selectors.');
-  if (expected !== null && expected !== records.size) warnings.push(`Displayed ${expected} items; collected ${records.size} unique AppIDs.`);
+  const records = toWishlistRecords(rowsByApp), placeholders = rowsByApp.size - loaded();
+  if (!records.length) warnings.push('No wishlist rows found; verify authentication, page identity and selectors.');
+  if (expected !== null && expected !== records.length) warnings.push(`Displayed ${expected} items; collected ${records.length} unique AppIDs.`);
+  if (placeholders) warnings.push(`${placeholders} rows were still placeholders (lazy content not loaded) and were omitted rather than stored with unreliable fields.`);
   if (expected !== null && (ranks.size !== expected || ![...ranks].every(rank=>Number.isInteger(rank) && rank>=1 && rank<=expected))) warnings.push('Observed wishlist positions do not cover all displayed ranks.');
   warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account, filters and membership.');
-  return envelope('wishlist',[...records.values()].sort((a,b)=>a.rank-b.rank),warnings,
-    {expectedCount:expected, uniqueCount:records.size, ranksObserved:ranks.size, scrollSteps:steps, stagnantSteps:stagnant});
+  return envelope('wishlist',records,warnings,
+    {expectedCount:expected, uniqueCount:records.length, ranksObserved:ranks.size, placeholderNameRows:placeholders, scrollSteps:steps, stagnantSteps:stagnant});
 }
 
 export async function collectLibrary(tab, {maxScrolls=40} = {}) {
