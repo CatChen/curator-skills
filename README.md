@@ -11,9 +11,9 @@ Most recommendation systems have incentives to increase engagement, consumption,
 | Skill | Intended purpose | Status |
 | --- | --- | --- |
 | Game Curator (`game-curator`) | Decide what games to play, purchase, continue, or skip using personal gaming history and preferences. | Available for conversational use; experimental partial Steam collectors have limited live verification. |
-| Book Curator (`book-curator`) | Decide what books to read, revisit, purchase, continue, or skip using personal reading history and preferences. Kindle and Goodreads are initial intended sources. | Planned; not implemented or installable. |
+| Book Curator (`book-curator`) | Decide what books to read, revisit, purchase, continue, or skip using personal reading history and preferences. Kindle and Goodreads are initial intended sources. | Available for conversational use; Goodreads CSV import is synthetic-tested; live Kindle and Goodreads account access is unverified. |
 
-Steam collector reliability and completeness need further live verification. Book Curator is not yet installable.
+Steam collector reliability and completeness need further live verification. Book Curator does not require an import; no live Kindle or Goodreads collector is verified.
 
 ## How they work
 
@@ -51,6 +51,14 @@ For Claude Cowork, package separately from the repository root with `(cd skills 
 Try “My favorite games are Portal 2, Fez, and Outer Wilds. What should I play next?”, “Review my wishlist,” or “Should I continue this game?” No import is required. For browser discovery ask: “Diagnose Game Curator's Steam data acquisition capabilities in this session.”
 
 The skill includes experimental browser-runtime collectors for Steam library, wishlist, reviews, and Replay. They use read-only DOM evaluation and browser controls, return partial data, and do not need Python or browser-console access. Initial authenticated Chrome and IAB tests exercised all four; complete coverage and structured Replay metrics remain unverified. See [collector and data instructions](skills/game-curator/references/data.md), [diagnostics](skills/game-curator/references/acquisition.md), and [manual test procedures](docs/game-curator-testing.md). Run the optional development-only synthetic tests from the repository root with `node tests/game-curator/test_browser.mjs`.
+
+## Install and try Book Curator
+
+Install the independent skill from a published revision with `npx skills add CatChen/curator-skills --skill book-curator --global --agent codex`, or link `skills/book-curator` from a chosen checkout into `~/.agents/skills/book-curator`. The default branch does not include unmerged pull requests; verify the installed revision and discovery in a fresh session. The complete directory, including references and scripts, must be installed. Installation does not grant access to reading accounts or personal files.
+
+Try “I liked these books for their explanations, but I only have a few hours. What should I read next?” The skill can use conversation alone, or normalize a user-supplied Goodreads CSV with Python 3. The importer is tested with synthetic data; actual export coverage is unverified. Kindle and Goodreads in-app browser navigation reached sign-in pages, so authenticated fields and account acquisition remain untested. See [acquisition](skills/book-curator/references/acquisition.md), [identity and data](skills/book-curator/references/data.md), and [persistence](skills/book-curator/references/persistence.md). Run synthetic tests with `python3 -m unittest discover -s tests/book-curator`.
+
+Book Curator's optional profile and feedback, and separately authorized raw caches, use their own user-controlled home. Settings-based discovery is instruction-driven and fresh-session behavior has not been independently verified. Neither persistence nor an account is required.
 
 ## Privacy and contributions
 
