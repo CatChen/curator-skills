@@ -4,6 +4,7 @@ import argparse
 import csv
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 FIELDS = {
@@ -30,7 +31,7 @@ def normalize(stream, captured_at=None):
         raise ValueError('Expected Goodreads CSV headers including Book Id and Title')
     if len(headers) != len(set(headers)) or any(not h for h in headers):
         raise ValueError('Duplicate or empty CSV headers')
-    records, warnings = [], []
+    records, warnings, ids = [], [], {}
     for line, row in enumerate(reader, start=2):
         if None in row or any(v is None for v in row.values()):
             raise ValueError(f'CSV row {line} has a different number of fields than its header')
@@ -47,13 +48,51 @@ def normalize(stream, captured_at=None):
             warnings.append(f'Row {line}: invalid rating retained in original metadata')
         if not item['title']:
             warnings.append(f'Row {line}: missing title')
+        book_id = item['goodreads_book_id']
+        if not book_id:
+            warnings.append(f'Row {line}: missing Goodreads book ID')
+        elif book_id in ids:
+            previous = ids[book_id]
+            if any(previous.get(k) and item.get(k) and previous[k] != item[k] for k in ('title', 'author', 'isbn', 'isbn13')):
+                warnings.append(f'Row {line}: conflicting metadata for repeated Goodreads book ID')
+            else:
+                warnings.append(f'Row {line}: repeated Goodreads book ID; retained separately')
+        else:
+            ids[book_id] = item.copy()
         item['original'] = row
         records.append(item)
     return {'format': 'book-curator-goodreads-normalized', 'version': 1,
-            'source': 'goodreads-csv', 'capturedAt': captured_at or datetime.now(timezone.utc).isoformat(),
-            'exportedAt': None, 'account': None, 'accessScope': 'unknown', 'coverage': 'unknown',
+            'source': 'goodreads-csv', 'method': 'local-csv-normalization',
+            'processedAt': captured_at or datetime.now(timezone.utc).isoformat(),
+            'exportedAt': None, 'observedAt': None, 'account': None, 'accessScope': 'unknown', 'coverage': 'unknown',
             'warnings': ['Export completeness, account and export time are unverified.'] + warnings,
             'records': records}
+
+def write_private_output(path, result):
+    """Create mode-0600 output exclusively and verify bytes; remove only our inode on failure."""
+    payload = (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode('utf-8')
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    identity = os.fstat(fd)
+    try:
+        with os.fdopen(fd, 'w+b') as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+            output.seek(0)
+            if output.read() != payload:
+                raise OSError('Output read-back did not match')
+            current = os.stat(path, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                raise OSError('Output path changed during write')
+    except BaseException:
+        try:
+            current = os.stat(path, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+                os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -63,10 +102,7 @@ def main():
     try:
         with args.input.open(encoding='utf-8-sig', newline='') as source:
             result = normalize(source)
-        # Exclusive creation prevents accidental destruction of existing user data.
-        with args.output.open('x', encoding='utf-8') as destination:
-            json.dump(result, destination, ensure_ascii=False, indent=2)
-            destination.write('\n')
+        write_private_output(args.output, result)
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         parser.exit(1, f'Import failed: {exc}\n')
 

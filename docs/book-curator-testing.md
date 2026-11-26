@@ -1,0 +1,7 @@
+# Book Curator acceptance testing
+
+Synthetic tests: `python3 -m unittest discover -s tests/book-curator`. Do not use personal data as fixtures.
+
+For independent fresh-session acceptance, install the complete skill from a pinned revision in the target agent's user-level discovery directory, outside this checkout, and start a new session outside the repository. Confirm the discovered skill path and revision; manual reading is not discovery. Ask for a recommendation using only fictional reading experiences and confirm useful reasoning without import.
+
+In a user-controlled test location, explicitly authorize profile/feedback and recording settings while declining raw cache. Provide meaningful fictional feedback; verify the feedback and profile are saved and no cache is created. End the session. Start another independent session and verify it discovers the installed skill, reads the valid settings and authorized feedback, and applies that evidence to a relevant recommendation without re-onboarding. Verify the disabled cache scope is not read or written, and invalid settings fail closed. Then separately opt in to raw caching and verify that scope independently, with synthetic input only. Inspect and remove only test data created for this procedure. Report each observed step and any unavailable runtime or host permission; these instructions alone do not establish cross-session behavior.
