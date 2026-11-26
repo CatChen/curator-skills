@@ -2,6 +2,7 @@
 // The caller supplies a tab already opened on the verified account's source page.
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from './wishlist-rows.mjs';
 import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord} from './library-rows.mjs';
+import {snapshotReviews} from './review-rows.mjs';
 
 const LIMIT = 80;
 
@@ -101,22 +102,7 @@ export async function collectReviews(tab, {maxPages=20, library=null, verifiedSa
     let data;
     try {
       attempts++;
-      data = await read(tab, () => {
-        if (location.protocol !== 'https:' || location.hostname !== 'steamcommunity.com' || !/\/recommended\/?$/.test(location.pathname)) throw Error('Open the verified Steam Community reviews page');
-        const count = document.body.innerText.match(/Showing\s+\d+\s*-\s*\d+\s+of\s+([\d,]+)\s+entries/i);
-        const rows = [...document.querySelectorAll('.review_box')].map(row => {
-          const a = row.querySelector('.title a[href*="/recommended/"]'), id = a?.href.match(/\/recommended\/(\d+)\/?/);
-          const polarity = a?.innerText.trim();
-          return {appid:id ? Number(id[1]) : null, reviewUrl:a?.href.split('?')[0]||null,
-            recommended:polarity === 'Recommended' ? true : polarity === 'Not Recommended' ? false : null,
-            review:row.querySelector('.content')?.innerText.trim()||null,
-            playtimeDisplay:row.querySelector('.hours')?.innerText.trim()||null,
-            postedDate:row.querySelector('.posted')?.innerText.trim()||null};
-        }).filter(x=>x.appid && x.reviewUrl);
-        const links = [...document.querySelectorAll('.workshopBrowsePagingControls a.pagelink[href]')].map(a=>a.href).filter(h=>{try{let u=new URL(h);return u.origin===location.origin && u.pathname===location.pathname && /^\d+$/.test(u.searchParams.get('p')||'')}catch{return false}});
-        const current = new URL(location.href); current.search = `?p=${current.searchParams.get('p') || '1'}`;
-        return {url:current.href, path:location.pathname, expected:count?Number(count[1].replace(/,/g,'')):null, rows, links};
-      });
+      data = await read(tab, snapshotReviews);
       if (basePath !== null && data.path !== basePath) throw Error('Review account or source changed');
       const current = new URL(data.url); current.search = `?p=${current.searchParams.get('p') || '1'}`; current.hash = '';
       const pageKey = current.href;
