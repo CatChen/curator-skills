@@ -250,6 +250,14 @@ fs.rmSync(tmp, {recursive: true});
   const eout = JSON.parse(r.stdout); assert.equal(eout.action, 'separate');
   assert.equal(JSON.parse(fs.readFileSync(eout.target, 'utf8')).records.length, 0);
   assert.notEqual(run(empty, '--account', 'me', '--access-scope', 'signed-in').status, 0); // signed-in claim has no owner evidence
+  // downloaded-file transfer: the page's reported SHA-256 of the file guards the transfer
+  const fileSha = crypto.createHash('sha256').update(fs.readFileSync(good)).digest('hex');
+  fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+  assert.equal(run(good, '--account', 'me', '--access-scope', 'signed-in', '--expect-sha256', fileSha, '--dry-run').status, 0);
+  const grouped = fileSha.match(/.{8}/g).join(' ');
+  assert.equal(run(good, '--account', 'me', '--access-scope', 'signed-in', '--expect-sha256', grouped, '--dry-run').status, 0); // as the page reports it
+  const wrong = run(good, '--account', 'me', '--access-scope', 'signed-in', '--expect-sha256', '0'.repeat(64), '--dry-run');
+  assert.notEqual(wrong.status, 0); assert.match(wrong.stderr, /does not match --expect-sha256/);
   // revoked consent stops the CLI
   fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":false}}');
   assert.notEqual(run(good, '--account', 'me', '--access-scope', 'signed-in', '--dry-run').status, 0);
@@ -293,5 +301,9 @@ fs.rmSync(tmp, {recursive: true});
 // The committed page script must be the generated output of the template plus the shared row code, and stay read-only.
 const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-wishlist-page.js', import.meta.url), 'utf8');
 assert.equal(generated, buildPageScript(), 'steam-wishlist-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs');
-assert.ok(!/\bfetch\s*\(|XMLHttpRequest|localStorage|document\.cookie|\.click\(|dispatchEvent|\.submit\(/.test(generated), 'page script must stay read-only');
+const dl0 = generated.indexOf("if (c.deliver === 'download')"), dl1 = generated.indexOf('return envelope;', dl0);
+assert.ok(dl0 > 0 && dl1 > dl0, 'download delivery block not found');
+const outsideDownload = generated.slice(0, dl0) + generated.slice(dl1);
+assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie|\.click\(|dispatchEvent|\.submit\(/.test(outsideDownload), 'page script must stay read-only on the page');
+assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie/.test(generated.slice(dl0, dl1)), 'the download block must be local only (Blob + anchor), with no network or storage');
 console.log('Claude Code collector checks passed');

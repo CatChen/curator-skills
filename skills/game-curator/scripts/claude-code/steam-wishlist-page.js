@@ -3,15 +3,19 @@
 //
 // Run the WHOLE generated file as the `text` of mcp__Claude_Browser__javascript_tool (action javascript_exec)
 // on the verified signed-in https://store.steampowered.com/wishlist/... tab. It is one async expression that
-// registers itself as window.__gcWishlistRun and runs once. Read-only: it reads the DOM and scrolls the
+// registers itself as window.__gcWishlistRun and runs once. The leading `await` matters: Claude in Chrome's tool
+// does not await a trailing promise (it returns {}), while REPL top-level await works in both browsers' tools. Read-only: it reads the DOM and scrolls the
 // wishlist's own scroll container; no requests, no clicks, no internal page state. Its only page state is
 // window.__gcWishlist (its own rows) and window.__gcWishlistRun, both removed when the run ends or fails.
 //
 // javascript_tool is cut off at 45 s per call, so a long run returns {inProgress:true,...} and resumes with
 // the one-line call `await window.__gcWishlistRun({})`. Options (object literal on the last line):
 //   callBudgetMs (35000, per call)  maxMs (150000)  maxSteps (1000)  fresh (discard saved state)
-// maxMs and maxSteps are remembered across resume calls; the rest apply to the call they are passed to.
-(window.__gcWishlistRun = async (opts = {}) => {
+//   deliver: 'return' (default) returns the envelope as the tool result; 'download' makes the page save it as a
+//   local file (a Blob download, no network) and returns only a small summary with the file's SHA-256. Use it where the
+//   tool truncates large results, as Claude in Chrome does (see references/claude-code.md).
+// maxMs, maxSteps and deliver are remembered across resume calls; the rest apply to the call they are passed to.
+await (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   function snapshotWishlist() {
     if (location.protocol !== 'https:' || location.hostname !== 'store.steampowered.com' || !location.pathname.startsWith('/wishlist')) throw Error('Open the verified Steam Store wishlist');
@@ -71,7 +75,7 @@
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: []});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -88,7 +92,7 @@
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    for (const k of ['maxMs', 'maxSteps', 'deliver']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
@@ -156,7 +160,7 @@
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: S.opts.deliver, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
@@ -176,8 +180,8 @@
     warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account and membership.');
     warnings.push('Consistency was checked for observed rows and the displayed count, sort and search only; changes confined to unobserved ranks cannot be detected.');
     warnings.push('Wishlist filters were not verified (only sort and search state were recorded); confirm them before treating this as the full wishlist.');
-    const bytes = new TextEncoder().encode(JSON.stringify(c.records));
-    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const sha256Hex = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const sha = await sha256Hex(new TextEncoder().encode(JSON.stringify(c.records)));
     const envelope = {
       format: 'game-curator-steam-export', version: 1, source: 'wishlist',
       capturedAt: c.finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
@@ -190,6 +194,17 @@
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
+    if (c.deliver === 'download') { // the page saves the envelope as a local file and returns only a small, checkable summary
+      const text = JSON.stringify(envelope, null, 2) + '\n', fileBytes = new TextEncoder().encode(text);
+      const file = `gc-wishlist-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
+      const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+      a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      const d = envelope.diagnostics;
+      return {delivered: 'download', file, bytes: fileBytes.length, fileSha256: (await sha256Hex(fileBytes)).match(/.{8}/g).join(' '), // grouped: Claude in Chrome blocks a bare 64-hex string as "base64 data"
+        records: c.records.length, expected: d.expectedCount,
+        complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view};
+    }
     return envelope;
   }
 })({})

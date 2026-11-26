@@ -4,7 +4,7 @@
 //
 //   node save-capture.mjs <file | -> --account <alias> --access-scope signed-in|public|unknown
 //        [--dest <cache/steam dir>] [--settings <settings.json>] [--view unfiltered]
-//        [--existing-account <alias>] [--existing-view unfiltered] [--keep-separate] [--dry-run]
+//        [--existing-account <alias>] [--existing-view unfiltered] [--keep-separate] [--expect-sha256 <hex>] [--dry-run]
 // (--view / --existing-view / --existing-account are confirmations by the user or caller, not observations.)
 //
 // Input is the file Claude Code writes when a javascript_tool result is too large (a JSON array of
@@ -242,7 +242,7 @@ function isMain() {
 }
 
 if (isMain()) {
-  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view'];
+  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view', '--expect-sha256'];
   const opt = n => { const i = args.indexOf(n); return i < 0 ? undefined : args[i + 1]; };
   const file = args.find((a, i) => (!a.startsWith('--') || a === '-') && !valued.includes(args[i - 1]));
   if (!file) { console.error('usage: save-capture.mjs <file | -> --account <alias> --access-scope <scope> [options]'); process.exit(2); }
@@ -251,6 +251,8 @@ if (isMain()) {
     const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
     checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
     const raw = file === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(file, 'utf8');
+    const expectSha = opt('--expect-sha256'); // bytes the page reported for a downloaded file; guards the transfer
+    if (expectSha !== undefined && sha256(raw) !== expectSha.toLowerCase().replace(/[\s-]/g, '')) throw new Error('Transferred file does not match --expect-sha256 (the file is incomplete, changed or not the one the page produced)');
     const env = canonicalize(parseToolResult(raw));
     const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
     const {errors, incomplete} = validate(env, {account, accessScope});
