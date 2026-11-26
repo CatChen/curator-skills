@@ -8,6 +8,7 @@ import {pathToFileURL} from 'node:url';
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from '../browser/wishlist-rows.mjs';
 import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord, libraryLabelCount, libraryFieldsKey} from '../browser/library-rows.mjs';
 import {snapshotReviews, reviewPageKey, queueReviewPages} from '../browser/review-rows.mjs';
+import {snapshotReplay, dedupeReplayApps, replayYears} from '../browser/replay-rows.mjs';
 import {sha256Hex, makeWaiter, deliverEnvelope} from './page-common.mjs';
 
 const dir = new URL('.', import.meta.url);
@@ -15,6 +16,7 @@ export const PAGES = {
   wishlist: {functions: [snapshotWishlist, mergeWishlistRow, toWishlistRecords]},
   library: {functions: [snapshotLibrary, libraryLabelCount, libraryFieldsKey, mergeLibraryRow, normalizeLibraryRecord]},
   reviews: {functions: [snapshotReviews, reviewPageKey, queueReviewPages]},
+  replay: {functions: [snapshotReplay, dedupeReplayApps, replayYears]},
 };
 const COMMON = [sha256Hex, makeWaiter, deliverEnvelope];
 const inline = fns => fns.map(f => '  ' + f.toString().replace(/\n/g, '\n  ')).join('\n').trimStart();

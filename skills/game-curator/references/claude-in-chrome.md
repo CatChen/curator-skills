@@ -99,6 +99,13 @@ Same procedure, consent and safeguards as the wishlist. Reviews are paginated an
 - Save with `--provenance download --page-summary '<summary JSON>' --names-from <library snapshot>`; the library snapshot must be a capture of the same account (its `account` alias must equal `--account`), and enrichment is bound to that file's digest.
 - Live in Chrome (32 reviews): 4 collection runs, 32/32, complete; the download matched its page summary; observed records identical to the Codex cache and to the built-in browser capture.
 
+## Replay in Chrome
+
+Same procedure, consent and safeguards as Reviews. Open `https://store.steampowered.com/replay/`, run `scripts/claude-code/steam-replay-page.js` with `({deliver: 'download'})`, then for each `next` URL send one `browser_batch` of `navigate` plus the same generated file again (the account path in the URL is the account's Steam ID: do not copy it into logs or commits). The trust boundary, report staging, privacy rules, saver behavior and the legacy-file handling are in [Claude Code](claude-code.md#replay-built-in-browser-claude-in-chrome-differs-only-in-delivery).
+
+- Every reply except the last is small; the last is the download summary (`gc-replay-<time>.json`, about 27 KB for four years). Save with `--provenance download --page-summary '<summary JSON>'`.
+- Live in Chrome (4 annual reports): 4 runs, complete, the download appeared promptly at the reported byte count (store.steampowered.com was a new download site for the browser), and its records and checksum equal the built-in browser's capture from the same final script.
+
 ## Architectural notes for other sources
 
 - **Transfer is the browser-specific part.** Chrome's result channel is about 1 KB, so any collector that returns a full dataset needs a download (or another out-of-band route). Design collectors as "collect in page, then deliver", with `return` and `download` as delivery modes.
@@ -106,4 +113,4 @@ Same procedure, consent and safeguards as the wishlist. Reviews are paginated an
 - A leading `await` and results that are small and JSON-friendly work in both browsers.
 - One download is the only safe assumption per site until the user approves more; batch a source into one file.
 - Chrome's real tab has accurate timers and prompt rendering, so large sources are faster than in the unfocused built-in pane, but the 45 s per-call limit and resume design are still needed.
-- Library, Reviews and Replay have not been tried in Chrome.
+- All four sources have now been run in Chrome; the permission, result-size and per-page-navigation lessons above apply to each.
