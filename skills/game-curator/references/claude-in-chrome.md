@@ -43,7 +43,7 @@ In the development session Chrome saved the first page-initiated download from `
 | Result filtering | A long string that looks like base64, including a bare 64-character hex digest, was replaced by `[BLOCKED: Base64 encoded data]`. Treated as a boundary, not a puzzle: no digest is reported through this tool | None observed |
 | Trailing promise | Not awaited (`{}`); use a leading `await` | Awaited, and a leading `await` also works |
 | Bulk transfer to disk | Page-initiated Blob download to the browser's download location (needs user authorization; may be held or dropped, see Outcomes); not the result | Native tool-result file |
-| Download delivery in the built-in browser | **Untested.** Do not assume it works there; it uses the native result file | n/a |
+| Download delivery in the built-in browser | **Verified, slow.** A page-initiated Blob download was saved to the Downloads folder, but only after about 90 s for the real Reviews capture (and more than 4 s for a synthetic probe), so poll for a bounded time. Large results still use the native result file | n/a |
 | Viewport | The tested window was 1595px wide and got the desktop layout; other windows may differ (the script throws below 1000px) | Default pane about 700px wide gives Steam's reduced layout; needs `resize_window` 1280x900 and is cleared each turn |
 | Timers | Observed accurate in one session (10x120 ms took 1.2 s with another tab in front; tab reported visible and focused). Not promised for other profiles, windows or Chrome versions | Observed about 8x slow when the pane was unfocused |
 | Lazy list | Same virtualized list; the same collection code worked unchanged in the tested session | Same |
@@ -89,6 +89,15 @@ Same procedure and safeguards as the wishlist (consent, connection, authorizatio
 - Save with `--provenance download --page-summary '<summary JSON>'`; the file is written as `library.json` (or `library.partial.*`).
 - Live in Chrome (795 games): 1 call, 0.9 s in page, 0 scroll steps, 795/795, download saved at the reported byte count on first use. The records equal the built-in browser's capture and the existing Codex library cache in every parsed field.
 - After the shared-code refactor the wishlist was re-run live in both browsers: built-in browser 2.0 s and Chrome 5.2 s (165/165, 7 steps each), records identical to the production cache and to each other.
+
+## Reviews in Chrome
+
+Same procedure, consent and safeguards as the wishlist. Reviews are paginated and each page is a real navigation, so the page script is a per-page step machine whose batches live in `sessionStorage` (page JavaScript state does not survive navigation; `sessionStorage` and `window.name` do). The full description, interruption handling and name enrichment are in [Claude Code](claude-code.md#reviews-built-in-browser-claude-in-chrome-differs-only-in-delivery).
+
+- Open `https://steamcommunity.com/my/recommended/`, run `scripts/claude-code/steam-reviews-page.js` with `({deliver: 'download'})`, then for each `next` URL in the replies send one `browser_batch` of `navigate` plus `await (window.__gcReviewsRun = eval(sessionStorage.getItem('gcReviewsFn')))({})`. Every reply is small (well under Chrome's 1 KB result limit); the last one is the download summary (`gc-reviews-<time>.json`, about 15 KB for 32 reviews).
+- **Download permission is per site and was needed again here:** a second download from `steamcommunity.com` in the same browser session (the Library file was the first) was held until the user approved downloads for that site; after approval the file was saved. Never change the setting yourself and do not rerun the collection: the page keeps the finished envelope for 10 minutes (`window.__gcRedeliver()` after authorization).
+- Save with `--provenance download --page-summary '<summary JSON>' --names-from <library snapshot>`; the library snapshot must be a capture of the same account (its `account` alias must equal `--account`).
+- Live in Chrome (32 reviews): 4 collection calls, 32/32, complete; the download matched its page summary; observed records identical to the Codex cache and to the built-in browser capture.
 
 ## Architectural notes for other sources
 
