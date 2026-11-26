@@ -41,7 +41,9 @@ assert.equal(lazy.warnings.some(x=>x.includes('placeholders')),false);
 const stuck=await collectWishlist(tabWith([{expected:2,rows:[{appid:1,rank:1,name:'One',pageText:'One',complete:true},{appid:2,rank:2,name:'MY CATEGORIES:',pageText:'MY CATEGORIES:',complete:false}]}]),{maxScrolls:2});
 assert.equal(stuck.diagnostics.placeholderNameRows,1);
 assert.ok(stuck.warnings.some(x=>x.includes('placeholders')));
-assert.equal(stuck.records.length,2);
+assert.deepEqual(stuck.records.map(r=>r.name),['One']); // unresolved placeholder omitted, not stored
+assert.equal(stuck.diagnostics.uniqueCount,1);
+assert.ok(stuck.warnings.some(x=>x.includes('Displayed 2')));
 // The shared row snapshot is the function handed to the host's read-only evaluate.
 let evaluated=null;
 await collectWishlist({playwright:{evaluate:async fn=>{evaluated=fn;return {expected:1,rows:[{appid:1,rank:1,name:'One'}]}}}});

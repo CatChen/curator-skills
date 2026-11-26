@@ -9,16 +9,16 @@
 //
 // javascript_tool is cut off at 45 s per call, so a long run returns {inProgress:true,...} and resumes with
 // the one-line call `await window.__gcWishlistRun({})`. Options (object literal on the last line):
-//   callBudgetMs (35000)  maxMs (150000)  maxSteps (1000)  fresh (discard saved state)
-//   forceFileTransfer     pad a small result so the runtime returns it as a file (see references/claude-code.md)
+//   callBudgetMs (35000, per call)  maxMs (150000)  maxSteps (1000)  fresh (discard saved state)
+// maxMs and maxSteps are remembered across resume calls; the rest apply to the call they are passed to.
 (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   /*@@SHARED@@*/
-  if (innerWidth < 1000) throw new Error(`Viewport ${innerWidth}px wide: Steam serves a reduced layout. Use resize_window width 1280 height 900, reload, retry`);
   const cleanup = () => { delete window.__gcWishlist; delete window.__gcWishlistRun; };
   try {
+    if (innerWidth < 1000) throw new Error(`Viewport ${innerWidth}px wide: Steam serves a reduced layout. Use resize_window width 1280 height 900, reload, retry`);
     const callStart = Date.now();
-    const callBudget = opts.callBudgetMs ?? 35000, maxMs = opts.maxMs ?? 150000, maxSteps = opts.maxSteps ?? 1000;
+    const callBudget = opts.callBudgetMs ?? 35000;
     const left = () => callStart + callBudget + 2000 - Date.now(); // absolute bound for every wait in this call
     const sleep = ms => new Promise(r => setTimeout(r, Math.max(0, Math.min(ms, left()))));
 
@@ -43,12 +43,13 @@
 
     let snap = snapshotWishlist();
     for (let i = 0; !snap.rows.length && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotWishlist(); }
-    const view = viewInfo(), expected0 = snap.expected;
-    const sig = JSON.stringify([location.pathname.replace(/\/+$/, ''), location.search, expected0, view.sort, view.search]);
+    let view = viewInfo(); const expected0 = snap.expected;
+    const sigOf = (v, count) => JSON.stringify([location.pathname.replace(/\/+$/, ''), location.search, count, v.sort, v.search]);
+    let sig = sigOf(view, expected0);
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-verified', view, stats: {}, activeMs: 0, calls: 1, warnings: []});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: []});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -56,7 +57,7 @@
     scroller = (box && box !== document.body) ? box : document.scrollingElement;
 
     // Resumable state, bound to the verified view. A different view or count discards it.
-    const fresh = () => ({sig, startedAt, got: new Map(), byRank: new Map(), skipped: new Set(), retries: {}, activeMs: 0, started: false,
+    const fresh = () => ({sig, startedAt, got: new Map(), byRank: new Map(), skipped: new Set(), retries: {}, activeMs: 0, started: false, byApp: new Map(), opts: {},
       stats: {steps: 0, waits: 0, settleTimeouts: 0, backtracks: 0, calls: 0, restarts: 0}, futile: 0, lastSize: -1, warnings: [], conflict: false});
     let S = window.__gcWishlist;
     if (S && (opts.fresh || S.sig !== sig || Date.now() - S.touched > 600000)) {
@@ -65,13 +66,18 @@
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
+    for (const k of ['maxMs', 'maxSteps']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
     const outOfCall = () => Date.now() - callStart > callBudget;
     const outOfTotal = () => S.activeMs + Date.now() - callStart > maxMs || stats.steps > maxSteps;
     const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
-    const noteRows = rows => { for (const r of rows) { mergeWishlistRow(got, r); const prior = S.byRank.get(r.rank); if (prior === undefined) S.byRank.set(r.rank, r.appid); else if (prior !== r.appid) S.conflict = true; } };
-    const viewChanged = s => S.conflict || (s.expected !== null && s.expected !== expected);
+    const noteRows = rows => { for (const r of rows) { mergeWishlistRow(got, r); const prior = S.byRank.get(r.rank); if (prior === undefined) S.byRank.set(r.rank, r.appid); else if (prior !== r.appid) S.conflict = true;
+      const at = S.byApp.get(r.appid); if (at === undefined) S.byApp.set(r.appid, r.rank); else if (at !== r.rank) S.conflict = true; } };
+    // Re-read the observable view at every collection boundary: count, sort, search and URL, plus rank<->AppID conflicts in observed rows.
+    // Changes confined to ranks never observed in this run cannot be detected.
+    const viewChanged = s => S.conflict || (s.expected !== null && s.expected !== expected) || sigOf(viewInfo(), s.expected ?? expected) !== sig;
 
     async function settle(limit) { // wait for placeholder rows to finish loading, bounded
       const end = Date.now() + limit;
@@ -102,8 +108,8 @@
       if (viewChanged(s)) { // rows of a different view/membership would be mixed in: restart once, then stop with a warning
         if (stats.restarts >= 1) { stopReason = 'view-changed'; break; }
         stats.restarts++; S.warnings.push('The wishlist view or item count changed during collection; restarted once.');
-        got.clear(); S.byRank.clear(); S.skipped.clear(); S.retries = {}; S.conflict = false; S.futile = 0; S.lastSize = -1;
-        expected = s.expected ?? expected; scroller.scrollTop = 0; await untilWindowChanges('', 600); continue;
+        got.clear(); S.byRank.clear(); S.byApp.clear(); S.skipped.clear(); S.retries = {}; S.conflict = false; S.futile = 0; S.lastSize = -1;
+        expected = s.expected ?? expected; view = viewInfo(); sig = S.sig = sigOf(view, expected); scroller.scrollTop = 0; await untilWindowChanges('', 600); continue;
       }
       const need = nextNeeded();
       if (need === null) { stopReason = S.skipped.size ? 'rows-missing' : 'complete'; break; }
@@ -122,6 +128,8 @@
       scroller.scrollTop = Math.max(0, target); stats.steps++;
       await untilWindowChanges(rankKey(rows), 2500);
     }
+    if (stopReason === 'complete' && viewChanged(snapshotWishlist())) stopReason = 'view-changed'; // last look before emitting
+    if (stopReason === 'view-changed') view = viewInfo(); // never emit the stale starting view for a changed one
     S.activeMs += Date.now() - callStart;
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
@@ -133,14 +141,18 @@
   async function envelopeOf(c) {
     const ranks = c.records.map(r => r.rank), incomplete = c.incomplete ?? 0;
     const contiguous = c.expected !== null && ranks.length === c.expected && ranks.every((r, i) => r === i + 1);
-    const done = (c.stopReason === 'complete' && contiguous && !incomplete && !(c.skipped?.length)) || c.stopReason === 'empty-verified';
+    const done = c.stopReason === 'complete' && contiguous && !incomplete && !(c.skipped?.length); // an empty page is only ever 'observed'
+    const have = new Set(ranks), missingRanks = [];
+    for (let r = 1; r <= (c.expected ?? 0) && missingRanks.length < 500; r++) if (!have.has(r)) missingRanks.push(r);
     const warnings = [...c.warnings];
     if (c.expected !== null && c.records.length !== c.expected) warnings.push(`Displayed ${c.expected} items; collected ${c.records.length} unique AppIDs.`);
     if (c.expected !== null && !contiguous && c.records.length) warnings.push('Observed wishlist positions do not cover all displayed ranks.');
-    if (incomplete) warnings.push(`${incomplete} rows were still placeholders after retries; their names and fields are unreliable.`);
+    if (incomplete) warnings.push(`${incomplete} rows were still placeholders after retries and were omitted rather than stored with unreliable fields.`);
+    if (c.stopReason === 'empty-observed') warnings.push('The page showed 0 items and no rows. Owner, account and filter state of an empty list were not independently verified, so this is not treated as a verified empty wishlist.');
     if (c.skipped?.length) warnings.push(`Gave up waiting for lazy rows at ranks ${c.skipped.join(',')}.`);
     if (!done) warnings.push(`Incomplete capture (stop reason: ${c.stopReason}); do not treat it as the full wishlist.`);
     warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account and membership.');
+    warnings.push('Consistency was checked for observed rows and the displayed count, sort and search only; changes confined to unobserved ranks cannot be detected.');
     warnings.push('Wishlist filters were not verified (only sort and search state were recorded); confirm them before treating this as the full wishlist.');
     const bytes = new TextEncoder().encode(JSON.stringify(c.records));
     const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -148,7 +160,7 @@
       format: 'game-curator-steam-export', version: 1, source: 'wishlist',
       capturedAt: c.finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
       diagnostics: {expectedCount: c.expected, uniqueCount: c.records.length, ranksObserved: ranks.length, ranksContiguous: contiguous,
-        placeholderNameRows: incomplete, complete: done, stopReason: c.stopReason, startedAt: c.startedAt, finishedAt: c.finishedAt,
+        placeholderNameRows: incomplete, missingRanks, complete: done, stopReason: c.stopReason, startedAt: c.startedAt, finishedAt: c.finishedAt,
         elapsedMs: c.activeMs, calls: c.calls, viewportWidth: innerWidth, view: c.view, waitStrategy: 'mutation-observer',
         scrollSteps: c.stats.steps ?? 0, backtracks: c.stats.backtracks ?? 0, restarts: c.stats.restarts ?? 0, settleWaits: c.stats.waits ?? 0,
         settleTimeouts: c.stats.settleTimeouts ?? 0, reorderHandles: !!document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]'),
@@ -156,9 +168,6 @@
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
-    // A small result is returned inline by the runtime and cannot be saved without retyping it. forceFileTransfer pads
-    // it past the runtime's inline limit so the runtime's own tool-result file is used; the saver strips the padding.
-    if (opts.forceFileTransfer) { const need = 80000 - JSON.stringify(envelope).length; if (need > 0) envelope.transportPadding = 'x'.repeat(need); }
     return envelope;
   }
 })({})

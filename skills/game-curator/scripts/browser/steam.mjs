@@ -53,10 +53,10 @@ export async function collectWishlist(tab, {maxScrolls=20} = {}) {
       const data = await read(tab, snapshotWishlist); expected = data.expected ?? expected;
       const before = loaded() + rowsByApp.size;
       for (const row of data.rows) { mergeWishlistRow(rowsByApp, row); }
-      ranks.clear(); for (const row of rowsByApp.values()) ranks.add(row.rank);
+      ranks.clear(); for (const row of rowsByApp.values()) if (row.complete) ranks.add(row.rank);
       // Progress counts new rows and placeholder rows that finished loading.
       stagnant = loaded() + rowsByApp.size === before ? stagnant+1 : 0;
-      const ranksCovered = expected !== null && rowsByApp.size === expected && ranks.size === expected && loaded() === expected &&
+      const ranksCovered = expected !== null && ranks.size === expected && loaded() === expected &&
         [...ranks].every(rank=>Number.isInteger(rank) && rank>=1 && rank<=expected);
       if (steps >= maxScrolls || ranksCovered || stagnant >= 3) break;
       await scroll(tab); await refresh(tab); steps++;
@@ -68,7 +68,7 @@ export async function collectWishlist(tab, {maxScrolls=20} = {}) {
   const records = toWishlistRecords(rowsByApp), placeholders = rowsByApp.size - loaded();
   if (!records.length) warnings.push('No wishlist rows found; verify authentication, page identity and selectors.');
   if (expected !== null && expected !== records.length) warnings.push(`Displayed ${expected} items; collected ${records.length} unique AppIDs.`);
-  if (placeholders) warnings.push(`${placeholders} rows were still placeholders (lazy content not loaded); their names and fields are unreliable.`);
+  if (placeholders) warnings.push(`${placeholders} rows were still placeholders (lazy content not loaded) and were omitted rather than stored with unreliable fields.`);
   if (expected !== null && (ranks.size !== expected || ![...ranks].every(rank=>Number.isInteger(rank) && rank>=1 && rank<=expected))) warnings.push('Observed wishlist positions do not cover all displayed ranks.');
   warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account, filters and membership.');
   return envelope('wishlist',records,warnings,

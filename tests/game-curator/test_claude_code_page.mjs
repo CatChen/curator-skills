@@ -44,8 +44,10 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   assert.equal(e.diagnostics.complete, false);
   assert.equal(e.diagnostics.stopReason, 'rows-missing');
   assert.equal(e.diagnostics.placeholderNameRows, 1);
+  assert.deepEqual(e.diagnostics.missingRanks, [7]);
   assert.ok(e.warnings.some(w => w.includes('ranks 7')));
-  assert.equal(e.records.length, 30);
+  assert.equal(e.records.length, 29); // the unresolved row is omitted, never stored with blank or placeholder fields
+  assert.ok(e.records.every(r => r.name && r.pageText.trim()));
 }
 
 // 4. Resume across calls gives the same records as a single run, and returns small progress objects.
@@ -105,26 +107,63 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   assert.ok(e.records.length > 0 && e.records.length < 80);
 }
 
-// 8. Empty page: a verified empty wishlist is distinct from a page that has not loaded.
+// 8. Empty page: observed, but never claimed as a verified empty wishlist; an unloaded page throws.
 {
   const empty = makeWishlistPage({n: 0, count: 0});
   empty.state.rendered = [];
   const e = j(await empty.run());
   assert.equal(e.records.length, 0);
-  assert.equal(e.diagnostics.stopReason, 'empty-verified');
-  assert.equal(e.diagnostics.complete, true);
+  assert.equal(e.diagnostics.stopReason, 'empty-observed');
+  assert.equal(e.diagnostics.complete, false);
+  assert.ok(e.warnings.some(w => w.includes('not independently verified')));
   const unloaded = makeWishlistPage({n: 0, count: 5});
   unloaded.state.rendered = [];
   await assert.rejects(() => unloaded.run({callBudgetMs: 800}), /No wishlist rows rendered/);
   assert.equal(unloaded.ctx.window.__gcWishlistRun, undefined); // failed runs clean up too
 }
 
+// 8b. View checked at collection boundaries, not only on resume: a same-count sort or search change inside one call.
+{
+  const p = makeWishlistPage({n: 120});
+  let changed = false;
+  p.ctx.document.querySelectorAll = (orig => sel => sel === 'button' ? [{innerText: `Sort by:\n${changed ? 'Name' : 'Your Rank'}`}] : orig(sel))(p.ctx.document.querySelectorAll);
+  setTimeout(() => { changed = true; }, 150);
+  const e = j(await p.run());
+  assert.ok(e.diagnostics.restarts >= 1, 'a sort change at the same count must restart collection');
+  assert.equal(e.diagnostics.view.sort, e.diagnostics.stopReason === 'complete' ? 'Name' : e.diagnostics.view.sort);
+  assert.notEqual(e.diagnostics.view.sort, 'Your Rank', 'stale view evidence must not be emitted after a restart');
+  const s2 = makeWishlistPage({n: 120, search: ''});
+  let q = ''; s2.ctx.document.querySelector = (orig => sel => /Search by name/.test(sel) ? {value: q} : orig(sel))(s2.ctx.document.querySelector);
+  setTimeout(() => { q = 'x'; }, 150);
+  const e2 = j(await s2.run());
+  assert.ok(e2.diagnostics.restarts >= 1);
+  assert.equal(e2.diagnostics.view.search, 'active');
+}
+// 8c. Inverse mapping: the same AppID appearing at a different rank is a conflict.
+{
+  let shift = false;
+  const p = makeWishlistPage({n: 120, appidOf: r => (shift && r > 40 && r < 60 ? 1000 + r - 1 : 1000 + r)}); // duplicates a neighbour's AppID
+  const first = j(await p.run({callBudgetMs: 60}));
+  assert.ok(first.inProgress);
+  shift = true;
+  const e = j(await p.run({callBudgetMs: 60000}));
+  assert.ok(e.diagnostics.restarts >= 1 || e.diagnostics.complete === false);
+}
+// 8d. maxMs/maxSteps are remembered across resume calls.
+{
+  const p = makeWishlistPage({n: 120});
+  const first = j(await p.run({callBudgetMs: 60, maxSteps: 1}));
+  assert.ok(first.inProgress || first.diagnostics?.stopReason === 'budget');
+  const e = first.inProgress ? j(await p.run({callBudgetMs: 60000})) : first;
+  assert.equal(e.diagnostics.stopReason, 'budget');
+}
+
 // 9. Guards and options.
 {
   await assert.rejects(() => makeWishlistPage({n: 10, width: 700}).run(), /reduced layout/);
-  const e = j(await makeWishlistPage({n: 12}).run({forceFileTransfer: true}));
-  assert.ok(JSON.stringify(e).length >= 80000 && e.transportPadding);
-  assert.equal(e.diagnostics.recordsSha256, sha(e.records));
+  const g = makeWishlistPage({n: 10, width: 700});
+  await assert.rejects(() => g.run(), /reduced layout/);
+  assert.equal(g.ctx.window.__gcWishlistRun, undefined); // the viewport guard is inside the cleanup path
   const f = j(await makeWishlistPage({n: 12, search: 'zzz'}).run());
   assert.equal(f.diagnostics.view.search, 'active');
 }

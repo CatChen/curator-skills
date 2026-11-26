@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {parseToolResult, canonicalize, validate, decide, fieldLosses, checkCacheAuthorized, save, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {spawnSync} from 'node:child_process';
+import {makeWishlistPage} from './fake-wishlist-dom.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
@@ -28,9 +30,7 @@ const parsed = canonicalize(parseToolResult(harness(env)));
 assert.deepEqual(Object.keys(parsed), ['format', 'version', 'source', 'capturedAt', 'method', 'coverage', 'warnings', 'diagnostics', 'accessScope', 'records']);
 assert.deepEqual(validate(parsed, {accessScope: 'signed-in'}), {errors: [], incomplete: []});
 assert.deepEqual(parseToolResult(JSON.stringify(env)), env);
-const padded = {...env, transportPadding: 'x'.repeat(100)};
-assert.deepEqual(canonicalize(padded), canonicalize(env)); // padding is transport only
-assert.deepEqual(validate(padded, {accessScope: 'signed-in'}).errors, []);
+bad({...env, transportPadding: 'xxx'}, /unexpected envelope field/); // no transport padding is accepted or stripped
 
 // Contract validation rejects incompatible input instead of repairing it.
 bad({...make(2), extra: 1}, /unexpected envelope field/);
@@ -57,9 +57,13 @@ assert.ok(validate(make(3, {diag: {complete: false, stopReason: 'budget'}}), {ac
 assert.ok(validate(make(3, {diag: {placeholderNameRows: 2}}), {accessScope: 'signed-in'}).incomplete.some(r => /placeholder/.test(r)));
 assert.ok(validate(make(3, {diag: {expectedCount: 9}}), {accessScope: 'signed-in'}).incomplete.some(r => /9 items/.test(r)));
 { const gap = make(0, {records: [row(1), row(3)]}); assert.ok(validate(gap, {accessScope: 'signed-in'}).incomplete.some(r => /contiguous/.test(r))); }
-// A verified empty wishlist is valid; "no rows" without that evidence is not.
-{ const e = make(0, {records: [], diag: {expectedCount: 0, stopReason: 'empty-verified', reorderHandles: false}}); assert.deepEqual(validate(e, {accessScope: 'unknown'}).errors, []); }
-bad(make(0, {records: []}), /verified-empty/, {accessScope: 'unknown'});
+// An empty page is preserved as an uncertain observation (never promotable); zero rows without that observation are invalid.
+{ const e = make(0, {records: [], diag: {expectedCount: 0, stopReason: 'empty-observed', complete: false, reorderHandles: false}});
+  const v = validate(e, {accessScope: 'unknown'}); assert.deepEqual(v.errors, []); assert.ok(v.incomplete.some(r => /not independently verified/.test(r))); }
+bad(make(0, {records: []}), /empty-page observation/, {accessScope: 'unknown'});
+// Omitted unresolved rows keep the capture valid but incomplete; nothing is fabricated for them.
+{ const e = make(0, {records: [row(1), row(3)], diag: {expectedCount: 3, placeholderNameRows: 1, missingRanks: [2], complete: false, stopReason: 'rows-missing'}});
+  const v = validate(e, {accessScope: 'signed-in'}); assert.deepEqual(v.errors, []); assert.ok(v.incomplete.length >= 2); }
 
 // Replacement policy.
 const U = {sort: 'Your Rank', search: 'empty', filters: 'none'};
@@ -69,6 +73,16 @@ assert.equal(decide(null, next).action, 'create');
 assert.equal(decide(old, next).action, 'replace'); // a legitimately smaller unfiltered wishlist replaces
 assert.match(decide(old, next).notes.join(), /1 removed/);
 const reason = (o, n, ctx) => decide(o, n, ctx).reason;
+// Creation and promotion both need established identity, scope and view; otherwise the capture stays separate.
+assert.match(reason(null, make(3, {account: 'me', accessScope: 'unknown'})), /not established/);
+assert.match(reason(null, make(3, {accessScope: 'signed-in'})), /not established/); // no verified account
+assert.match(reason(null, make(3, {account: 'me', view: {...U, filters: 'unknown'}})), /not verified as default sort/);
+assert.match(reason(make(4, {account: 'me', accessScope: 'unknown', at: '2026-11-25T00:00:00Z'}), make(3, {account: 'me', accessScope: 'unknown'})), /not established/); // unknown never replaces unknown
+// Observed evidence and caller attestation stay separate: an attestation can supply filters 'none' but never a default sort.
+{ const attested = make(3, {account: 'me', view: {...U, filters: 'unknown'}}); attested.diagnostics.attestations = {by: 'caller', filters: 'none'};
+  assert.equal(decide(null, attested).action, 'create');
+  const wrongSort = make(3, {account: 'me', view: {sort: 'Name', search: 'empty', filters: 'unknown'}}); wrongSort.diagnostics.attestations = {by: 'caller', filters: 'none'};
+  assert.match(reason(null, wrongSort), /not verified as default sort/); }
 assert.equal(decide(old, next, {keepSeparate: true}).action, 'separate');
 assert.equal(decide(old, next, {incomplete: ['x']}).action, 'separate');
 assert.match(reason({...old, account: undefined}, next), /account/); // unknown identity is never merged
@@ -81,11 +95,25 @@ assert.match(reason({malformed: true}, next), /not a valid wishlist/);
 assert.match(reason({...old, records: [{appid: 'x'}]}, next), /not a valid wishlist/);
 // Filters and sort: unknown, active or non-default views never promote.
 for (const view of [{...U, filters: 'unknown'}, {...U, filters: 'active'}, {...U, sort: 'Name'}, {...U, search: 'active'}, null])
-  assert.match(reason(old, make(3, {account: 'me', at: '2026-11-26T03:00:00Z', view})), /not verified as default sort and unfiltered/);
+  assert.match(reason(old, make(3, {account: 'me', at: '2026-11-26T03:00:00Z', view})), /not verified as default sort/);
 const legacy = {...old, diagnostics: {expectedCount: 4}}; // an older capture with no view evidence
 assert.match(reason(legacy, next), /no filter\/sort evidence/);
 assert.equal(decide(legacy, next, {existingViewUnfiltered: true}).action, 'replace');
-assert.match(reason({...old, diagnostics: {...old.diagnostics, view: {...U, filters: 'active'}}}, next), /no filter\/sort evidence/);
+// --existing-view only fills missing evidence; it never overrides explicitly conflicting recorded evidence.
+for (const view of [{...U, filters: 'active'}, {...U, sort: 'Name'}, {...U, search: 'active'}]) {
+  const conflicted = {...old, diagnostics: {...old.diagnostics, view}};
+  assert.match(reason(conflicted, next, {existingViewUnfiltered: true}), /non-default sort, active search or active filter/);
+}
+assert.equal(decide({...old, diagnostics: {...old.diagnostics, view: {...U, filters: 'unknown'}}}, next, {existingViewUnfiltered: true}).action, 'replace'); // unknown filters: user may fill
+// Existing files must be structurally sound but need no new diagnostics (historical v1 data stays usable).
+assert.match(reason({...old, records: [old.records[0], {...old.records[0]}]}, next), /not a valid wishlist/); // duplicate AppID
+assert.match(reason({...old, records: [old.records[0], {...old.records[1], rank: 1}]}, next), /not a valid wishlist/); // duplicate rank
+assert.match(reason({...old, coverage: 'bogus'}, next), /not a valid wishlist/);
+assert.match(reason({...old, warnings: undefined}, next), /not a valid wishlist/);
+assert.match(reason({...old, method: ''}, next), /not a valid wishlist/);
+{ const historical = {format: 'game-curator-steam-export', version: 1, source: 'wishlist', capturedAt: '2026-11-25T00:00:00Z', method: 'browser-dom', coverage: 'partial', warnings: [], diagnostics: {expectedCount: 4},
+    accessScope: 'signed-in', account: 'me', records: old.records.map(({appid, name, pageText, membershipSource}) => ({appid, name, pageText, membershipSource}))};
+  assert.equal(decide(historical, next, {existingViewUnfiltered: true}).action, 'replace'); }
 // Field loss is checked per label for retained AppIDs; one gained field cannot offset a lost one.
 {
   const a = make(0, {account: 'me', at: '2026-11-25T00:00:00Z', records: [row(1), row(2, {labels: ['RELEASE DATE:']})]});
@@ -114,7 +142,12 @@ assert.throws(() => checkCacheAuthorized(dest), /steamCache false/);
 fs.writeFileSync(settings, '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
 assert.equal(checkCacheAuthorized(dest), settings);
 assert.throws(() => checkCacheAuthorized(path.join(tmp, 'elsewhere')), /--settings/); // custom locations need an explicit settings path
-assert.equal(checkCacheAuthorized(path.join(tmp, 'elsewhere'), settings), settings);
+assert.throws(() => checkCacheAuthorized(path.join(tmp, 'elsewhere'), settings), /does not govern/); // the record must belong to the destination
+fs.mkdirSync(path.join(home, 'custom', 'wl'), {recursive: true});
+assert.equal(checkCacheAuthorized(path.join(home, 'custom', 'wl'), settings), settings);
+fs.symlinkSync(os.tmpdir(), path.join(home, 'escape'));
+assert.throws(() => checkCacheAuthorized(path.join(home, 'escape', 'x'), settings), /does not govern/); // symlinks cannot escape the governed tree
+fs.unlinkSync(path.join(home, 'escape'));
 
 // Filesystem behavior: create, replace with preserved backup, separate, concurrent edit, lock, no deletion.
 const list = () => fs.readdirSync(dest).sort();
@@ -151,6 +184,14 @@ assert.equal(list().filter(f => f.startsWith('.')).length, 0); // no temp or loc
   assert.equal(save(filtered, dest, {dryRun: true}).action, 'separate');
   assert.equal(save(make(2, {account: 'me', at: '2026-11-26T07:00:00Z'}), dest, {keepSeparate: true}).action, 'separate');
 }
+// Consent is rechecked before anything is written: revocation between decision and commit stops the save.
+{
+  const before = list();
+  let on = true;
+  assert.throws(() => save(make(2, {account: 'me', at: '2026-11-26T09:00:00Z'}), dest, {recheckConsent: () => { if (!on) throw new Error('revoked'); }, hooks: {beforeCommit: () => { on = false; }}}), /revoked/);
+  assert.ok(before.every(f => list().includes(f)));
+  assert.equal(list().filter(f => f.startsWith('.')).length, 0); // own temp file removed
+}
 // A held lock blocks a concurrent saver instead of racing it.
 fs.writeFileSync(path.join(dest, '.wishlist.lock'), 'other');
 assert.throws(() => save(make(2, {account: 'me', at: '2026-11-26T08:00:00Z'}), dest), /EEXIST/);
@@ -166,6 +207,54 @@ fs.unlinkSync(path.join(dest, '.wishlist.lock'));
   assert.equal(count(), before); // nothing pruned automatically
 }
 fs.rmSync(tmp, {recursive: true});
+
+// End to end: simulated page -> runtime-style result file -> saver CLI in a scratch Curator Home.
+{
+  const cli = new URL('../../skills/game-curator/scripts/claude-code/save-capture.mjs', import.meta.url).pathname;
+  const home2 = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-e2e-')), cache = path.join(home2, 'cache', 'steam');
+  fs.mkdirSync(cache, {recursive: true});
+  const pageRun = async (opts, run = {}) => JSON.parse(JSON.stringify(await makeWishlistPage(opts).run(run)));
+  const toFile = (envelope, name) => { const f = path.join(home2, name); fs.writeFileSync(f, harness(envelope)); return f; };
+  const run = (file, ...args) => spawnSync(process.execPath, [cli, file, '--dest', cache, ...args], {encoding: 'utf8'});
+  const good = toFile(await pageRun({n: 50}), 'good.json');
+  assert.notEqual(run(good, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered').status, 0, 'no settings record: nothing may be read or written');
+  assert.deepEqual(fs.readdirSync(cache), []);
+  fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+  // complete capture with confirmed view -> main file; observed evidence and attestations stay separate
+  let r = run(good, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered');
+  assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).action, 'create');
+  const saved = JSON.parse(fs.readFileSync(path.join(cache, 'wishlist.json'), 'utf8'));
+  assert.equal(saved.accessScope, 'signed-in'); assert.equal(saved.account, 'me');
+  assert.equal(saved.diagnostics.view.filters, 'unknown'); // observed, unchanged
+  assert.equal(saved.diagnostics.attestations.filters, 'none'); // attested by the caller
+  assert.equal(saved.diagnostics.attestations.pageReportedAccessScope, 'unknown');
+  assert.match(saved.diagnostics.attestations.sourceEnvelopeSha256, /^[0-9a-f]{64}$/);
+  // the same capture without confirming the view cannot be promoted over it
+  const later = toFile(await pageRun({n: 49}), 'later.json');
+  await new Promise(res => setTimeout(res, 5));
+  r = run(later, '--account', 'me', '--access-scope', 'signed-in');
+  assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).action, 'separate');
+  // a placeholder that never loads: omitted row, valid but incomplete -> preserved separately
+  const stuck = toFile(await pageRun({n: 30, neverLoad: new Set([7])}), 'stuck.json');
+  r = run(stuck, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered');
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout); assert.equal(out.action, 'separate'); assert.match(out.reason, /incomplete/);
+  const partial = JSON.parse(fs.readFileSync(out.target, 'utf8'));
+  assert.equal(partial.records.length, 29); assert.deepEqual(partial.diagnostics.missingRanks, [7]);
+  assert.ok(partial.records.every(x => x.name && x.pageText));
+  // an empty page: preserved as an uncertain observation, scope stays unknown
+  const emptyPage = makeWishlistPage({n: 0, count: 0}); emptyPage.state.rendered = [];
+  const empty = toFile(JSON.parse(JSON.stringify(await emptyPage.run())), 'empty.json');
+  r = run(empty, '--account', 'me', '--access-scope', 'unknown');
+  assert.equal(r.status, 0, r.stderr);
+  const eout = JSON.parse(r.stdout); assert.equal(eout.action, 'separate');
+  assert.equal(JSON.parse(fs.readFileSync(eout.target, 'utf8')).records.length, 0);
+  assert.notEqual(run(empty, '--account', 'me', '--access-scope', 'signed-in').status, 0); // signed-in claim has no owner evidence
+  // revoked consent stops the CLI
+  fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":false}}');
+  assert.notEqual(run(good, '--account', 'me', '--access-scope', 'signed-in', '--dry-run').status, 0);
+  fs.rmSync(home2, {recursive: true});
+}
 
 // The committed page script must be the generated output of the template plus the shared row code, and stay read-only.
 const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-wishlist-page.js', import.meta.url), 'utf8');

@@ -31,7 +31,9 @@ export function mergeWishlistRow(rows, row) {
   return rows.get(row.appid);
 }
 
-// Records as stored in the envelope: the evidence-only `complete` flag is not part of the data contract.
+// Records as stored in the envelope: only rows whose content actually loaded. An unresolved placeholder
+// (blank or placeholder text, no app link) is omitted rather than stored with fabricated or empty fields; callers
+// report its rank as missing. The evidence-only `complete` flag is not part of the data contract.
 export function toWishlistRecords(rows) {
-  return [...rows.values()].sort((a, b) => a.rank - b.rank).map(({complete, ...record}) => record);
+  return [...rows.values()].filter(r => r.complete).sort((a, b) => a.rank - b.rank).map(({complete, ...record}) => record);
 }
