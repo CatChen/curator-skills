@@ -432,33 +432,53 @@ export const HOOK_TOOLS = ['mcp__Claude_Browser__javascript_tool', 'mcp__claude-
 export const STAGING_DIR = '.staging';
 const HOOK_META_KEYS = ['bytes', 'call', 'capturedAt', 'deliver', 'kind', 'scriptSha256', 'sha256', 'source', 'stagedAt', 'tool', 'toolUseId', 'version'];
 
-// Verify a staged file against its sidecar before it may be called hook-captured. Throws on any mismatch; returns the sidecar.
-export function verifyHookStaging(file, dest, {now = Date.now(), defaultDest = path.join(os.homedir(), '.curator/game-curator/cache/steam')} = {}) {
+// Read a staged file ONCE, under verification, and return the exact bytes that were verified: the caller must parse and save those bytes
+// and never reread the path. The location is checked before anything is read (the staging directory of this cache, or of the skill's default
+// cache, private and owned by the user); the files are opened without following links and checked on the open descriptor (regular, owned by
+// the user, not readable by others); the sidecar must describe exactly these bytes. Returns {meta, bytes, root, identity}: `root` is the cache
+// whose staging directory held the file (its own consent governs the read, see the CLI) and `identity` lets removeIfUnchanged prove the pair is
+// still the verified one. Throws on any mismatch.
+export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest = path.join(os.homedir(), '.curator/game-curator/cache/steam')} = {}) {
   const real = p => fs.realpathSync(p);
-  const plain = (f, what) => {
-    const st = fs.lstatSync(f);
-    if (!st.isFile() || st.isSymbolicLink()) throw new Error(`hook-capture: ${what} is not a regular file`);
-    if (st.uid !== process.getuid()) throw new Error(`hook-capture: ${what} is not owned by the current user`);
-    if (st.mode & 0o077) throw new Error(`hook-capture: ${what} is readable by others`);
-  };
+  const name = path.basename(file);
+  if (!/^gc-[a-z]+-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$/.test(name)) throw new Error('hook-capture: unexpected staged file name');
   let dir; try { dir = real(path.dirname(file)); } catch { throw new Error('hook-capture: the staged file does not exist'); }
-  // The hook stages under the default cache location it is authorized for; a saver run against another destination (for example a
-  // private scratch cache) may still consume it, because the save is separately governed by that destination's own settings.json.
-  const trusted = [dest, defaultDest].filter(d => { try { return fs.existsSync(d); } catch { return false; } }).map(d => path.join(real(d), STAGING_DIR));
-  const staging = trusted.find(t => t === dir);
-  if (!staging) throw new Error('hook-capture: the file is not in the skill\'s private staging directory');
-  const sd = fs.lstatSync(staging);
+  // The hook stages under the default cache location it is authorized for; a saver run against another destination (for example a private
+  // scratch cache) may still consume it, but only while that default location's own consent holds too (checked by the caller from `root`).
+  const root = [dest, defaultDest].find(d => { try { return fs.existsSync(d) && path.join(real(d), STAGING_DIR) === dir; } catch { return false; } });
+  if (root === undefined) throw new Error('hook-capture: the file is not in the skill\'s private staging directory');
+  const sd = fs.lstatSync(dir);
   if (!sd.isDirectory() || sd.isSymbolicLink() || sd.uid !== process.getuid() || (sd.mode & 0o077)) throw new Error('hook-capture: the staging directory is not private');
-  if (!/^gc-[a-z]+-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$/.test(path.basename(file))) throw new Error('hook-capture: unexpected staged file name');
-  plain(file, 'the staged file'); plain(file + '.meta.json', 'the sidecar');
-  let meta; try { meta = JSON.parse(fs.readFileSync(file + '.meta.json', 'utf8')); } catch { throw new Error('hook-capture: the sidecar is not valid JSON'); }
+  const open = (f, what) => {
+    let fd; try { fd = fs.openSync(f, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch (e) { throw new Error(`hook-capture: cannot open ${what} (${e.code ?? e.message})`); }
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile()) throw new Error(`hook-capture: ${what} is not a regular file`);
+      if (st.uid !== process.getuid()) throw new Error(`hook-capture: ${what} is not owned by the current user`);
+      if (st.mode & 0o077) throw new Error(`hook-capture: ${what} is readable by others`);
+      const bytes = fs.readFileSync(fd);
+      if (bytes.length !== st.size) throw new Error(`hook-capture: ${what} changed while it was read`);
+      return {bytes, identity: {dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs}};
+    } finally { fs.closeSync(fd); }
+  };
+  const staged = open(path.join(dir, name), 'the staged file'), sidecar = open(path.join(dir, name + '.meta.json'), 'the sidecar');
+  let meta; try { meta = JSON.parse(sidecar.bytes.toString('utf8')); } catch { throw new Error('hook-capture: the sidecar is not valid JSON'); }
   if (!meta || typeof meta !== 'object' || Object.keys(meta).sort().join() !== HOOK_META_KEYS.join() || meta.version !== 1 || meta.kind !== 'game-curator-hook-capture' || meta.deliver !== 'hook') throw new Error('hook-capture: the sidecar is not a hook capture record');
   if (!HOOK_TOOLS.includes(meta.tool)) throw new Error('hook-capture: the sidecar names a tool the hook does not handle');
-  const bytes = fs.readFileSync(file);
-  if (bytes.length !== meta.bytes || sha256(bytes) !== meta.sha256) throw new Error('hook-capture: the staged file does not match its sidecar (size or digest)');
+  if (staged.bytes.length !== meta.bytes || sha256(staged.bytes) !== meta.sha256) throw new Error('hook-capture: the staged file does not match its sidecar (size or digest)');
   const age = now - Date.parse(meta.stagedAt);
   if (!(age >= -60000 && age <= 24 * 3600 * 1000)) throw new Error('hook-capture: the staged file is older than 24 hours or dated in the future');
-  return meta;
+  return {meta, bytes: staged.bytes, root, identity: {dir, name, file: staged.identity, sidecar: sidecar.identity}};
+}
+
+// Remove the staged pair only if both files are still exactly the ones that were verified and read (same file, size and times); otherwise leave
+// both in place. Returns true when removed.
+export function removeIfUnchanged(identity) {
+  const same = (f, id) => { try { const st = fs.lstatSync(f); return st.isFile() && !st.isSymbolicLink() && st.dev === id.dev && st.ino === id.ino && st.size === id.size && st.mtimeMs === id.mtimeMs && st.ctimeMs === id.ctimeMs; } catch { return false; } };
+  const file = path.join(identity.dir, identity.name), sidecar = file + '.meta.json';
+  if (!same(file, identity.file) || !same(sidecar, identity.sidecar)) return false;
+  for (const f of [file, sidecar]) fs.rmSync(f, {force: true});
+  return true;
 }
 
 // Persistence consent: strict settings.json v1 (persistence.md "Durable scope record"). Fails closed.
@@ -562,24 +582,29 @@ if (isMain()) {
   if (!file) { console.error('usage: save-capture.mjs <file | -> --account <alias> --access-scope <scope> [options]'); process.exit(2); }
   try {
     const dryRun = args.includes('--dry-run');
+    let hookRoot = null;
     const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
     checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
-    const rawBytes = file === '-' ? fs.readFileSync(0) : fs.readFileSync(file); // Buffer: hash the exact received bytes, before decoding
     const sourceSha = opt('--source-sha256'), expectBytes = opt('--expect-bytes'), provenanceArg = opt('--provenance'), summaryArg = opt('--page-summary');
+    if (provenanceArg !== undefined && !['tool-result', 'download', 'hook-capture'].includes(provenanceArg)) throw new Error('--provenance must be tool-result, download or hook-capture');
+    let hookMeta = null, hookIdentity = null, rawBytes;
+    if (provenanceArg === 'hook-capture') {
+      // Verify the location and the sidecar BEFORE reading, read the file once, and use only those verified bytes from here on.
+      if (file === '-') throw new Error('--provenance hook-capture needs the staged file path, not stdin');
+      const verified = readVerifiedStaging(path.resolve(file), dest);
+      // A staged file is data the skill retained under the cache consent of the home that staged it: that consent must hold now (and again
+      // before the commit), as well as the destination's own, so a revoked default home cannot be bypassed by saving elsewhere.
+      if (path.resolve(verified.root) !== dest) checkCacheAuthorized(path.resolve(verified.root));
+      hookMeta = verified.meta; hookIdentity = verified.identity; rawBytes = verified.bytes; hookRoot = path.resolve(verified.root);
+    } else rawBytes = file === '-' ? fs.readFileSync(0) : fs.readFileSync(file); // Buffer: hash the exact received bytes, before decoding
     if (sourceSha !== undefined && !/^[0-9a-fA-F]{64}$/.test(sourceSha)) throw new Error('--source-sha256 must be exactly 64 hexadecimal characters');
     if (expectBytes !== undefined && !/^\d+$/.test(expectBytes)) throw new Error('--expect-bytes must be a non-negative integer');
-    if (provenanceArg !== undefined && !['tool-result', 'download', 'hook-capture'].includes(provenanceArg)) throw new Error('--provenance must be tool-result, download or hook-capture');
     if (sourceSha !== undefined && sha256(rawBytes) !== sourceSha.toLowerCase()) throw new Error('Received file does not match --source-sha256 (incomplete, changed, or not the expected file)');
     if (expectBytes !== undefined && rawBytes.length !== Number(expectBytes)) throw new Error(`Received file is ${rawBytes.length} bytes, expected ${expectBytes}`);
     const raw = rawBytes.toString('utf8');
     if (provenanceArg === 'tool-result' && !isToolResult(raw)) throw new Error('--provenance tool-result was declared but the file does not have the runtime tool-result structure');
     if (provenanceArg === 'download' && isToolResult(raw)) throw new Error('--provenance download was declared but the file is a tool-result file');
-    let hookMeta = null;
-    if (provenanceArg === 'hook-capture') {
-      if (file === '-') throw new Error('--provenance hook-capture needs the staged file path, not stdin');
-      if (isToolResult(raw)) throw new Error('--provenance hook-capture was declared but the file is a tool-result file');
-      hookMeta = verifyHookStaging(path.resolve(file), dest);
-    }
+    if (provenanceArg === 'hook-capture' && isToolResult(raw)) throw new Error('--provenance hook-capture was declared but the file is a tool-result file');
     let env = canonicalize(parseToolResult(raw));
     if (hookMeta && (env.source !== hookMeta.source || env.capturedAt !== hookMeta.capturedAt)) throw new Error('hook-capture: the envelope does not match the sidecar (source or capture time)');
     let summaryChecks = null;
@@ -626,7 +651,7 @@ if (isMain()) {
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
     const policy = {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
-      recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))};
+      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null && hookRoot !== dest) checkCacheAuthorized(hookRoot); }};
     if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {
@@ -640,9 +665,8 @@ if (isMain()) {
       const result = save(canonicalize(env), dest, policy);
       console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun}, null, 2));
     }
-    if (hookMeta && !dryRun) { // saved (kept or separate included): the private staged pair has served its purpose
-      for (const f of [path.resolve(file), path.resolve(file) + '.meta.json']) fs.rmSync(f, {force: true});
-      console.error('removed the staged hook capture');
+    if (hookMeta && !dryRun) { // saved (kept or separate included): remove the staged pair only if it is still the verified one
+      console.error(removeIfUnchanged(hookIdentity) ? 'removed the staged hook capture' : 'the staged files changed after verification: left in place, not removed');
     }
   } catch (e) { console.error(String(e.message ?? e)); process.exit(1); }
 }

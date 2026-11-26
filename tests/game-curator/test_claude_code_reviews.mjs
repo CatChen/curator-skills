@@ -127,7 +127,16 @@ const safeNext = n => typeof n === 'string' && new RegExp(`^${LIST.replace(/[.*+
   assert.equal(e.diagnostics.stopReason, 'budget'); assert.equal(e.diagnostics.complete, false); assert.equal(e.diagnostics.pagesVisited, 2);
   assert.ok(e.diagnostics.pagesPending >= 1 && e.records.length === 20); assert.ok(e.warnings.some(w => /unvisited pages/.test(w)));
 }
-// 11. Delivery modes are shared: download is initiation-only, remembered across pages, and carries the same records.
+// 10b. deliver is per call and never restored from state: only the call that finishes the run can start a download.
+{
+  const site = makeReviewsSite({total: 25}); let r = j(await site.runFile({deliver: 'download'}));
+  while (r.status === 'continue') { site.navigate(r.next); r = j(await site.runFile({})); } // later calls omit deliver
+  assert.equal(r.source, 'reviews'); assert.equal(r.downloadInitiated, undefined); assert.equal(site.downloads.length, 0, 'no download from remembered state');
+  const h = makeReviewsSite({total: 25}); let x = j(await h.runFile({deliver: 'hook'}));
+  while (x.status === 'continue') { h.navigate(x.next); x = j(await h.runFile({deliver: 'hook'})); }
+  assert.equal(x.source, 'reviews'); assert.equal(h.downloads.length, 0, "'hook' never starts a download");
+}
+// 11. Delivery modes are shared: download is initiation-only (stated on the call that finishes the run), and carries the same records.
 {
   const site = makeReviewsSite({total: 25});
   const plain = (await drive(makeReviewsSite({total: 25}))).r;
@@ -179,6 +188,7 @@ const safeNext = n => typeof n === 'string' && new RegExp(`^${LIST.replace(/[.*+
     'non-boolean owner flag': S => { S.owner = 'yes'; },
     'non-string warnings': S => { S.warnings = [{}]; },
     'unknown delivery mode': S => { S.opts.deliver = 'beacon'; },
+    'restored download mode': S => { S.opts.deliver = 'download'; },
     'absurd page bound': S => { S.opts.maxPages = 1e9; },
     'tampered view kind': S => { S.view.kind = 'something'; },
     'state is an array': S => { S.__replace = []; },

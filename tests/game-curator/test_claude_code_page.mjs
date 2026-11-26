@@ -167,6 +167,16 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   const f = j(await makeWishlistPage({n: 12, search: 'zzz'}).run());
   assert.equal(f.diagnostics.view.search, 'active');
 }
+// 9b. deliver is per call and never restored: a download starts only when the call that finishes the run says so (page-held state is site-visible).
+{
+  const p = makeWishlistPage({n: 80});
+  let r = j(await p.run({deliver: 'download', callBudgetMs: 60})), calls = 1;
+  while (r.inProgress && calls < 60) { r = j(await p.run({callBudgetMs: 60})); calls++; } // resume calls that omit deliver
+  assert.ok(calls > 1); assert.equal(r.format, 'game-curator-steam-export', 'the envelope is returned, not a download summary'); assert.equal(r.downloadInitiated, undefined); assert.equal(p.state.downloads.length, 0, 'no download was initiated from remembered state');
+  const q = makeWishlistPage({n: 80}); let h = j(await q.run({deliver: 'hook', callBudgetMs: 60})); calls = 1;
+  while (h.inProgress && calls < 60) { h = j(await q.run({deliver: 'hook', callBudgetMs: 60})); calls++; }
+  assert.equal(h.format, 'game-curator-steam-export'); assert.equal(q.state.downloads.length, 0, "'hook' returns the envelope inline and never starts a download");
+}
 // 10. deliver:'download' (for tools that truncate results at ~1 KB): the page STARTS a local download and reports initiation only,
 // returns a small summary, and keeps the finished envelope in bounded collector-owned state for an authorized retry.
 {
@@ -174,7 +184,7 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   const p = makeWishlistPage({n: 80});
   let r = j(await p.run({deliver: 'download', callBudgetMs: 60}));
   let calls = 1;
-  while (r.inProgress && calls < 60) { r = j(await p.run({callBudgetMs: 60})); calls++; } // deliver is remembered across resume
+  while (r.inProgress && calls < 60) { r = j(await p.run({deliver: 'download', callBudgetMs: 60})); calls++; } // deliver is NOT remembered: every call states it
   assert.ok(calls > 1);
   assert.equal(r.downloadInitiated, true);
   assert.equal(r.delivered, undefined, 'a download must be reported as initiated, never as delivered');

@@ -18,7 +18,7 @@
 //   finished envelope is kept for an authorized retry via window.__gcRedeliver() / window.__gcRelease().
 //   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging
 //   the inline result privately (see references/claude-code.md). Put it on every call of a run, resume calls included.
-// maxMs, maxSteps, deliver and retainMs are remembered across resume calls.
+// maxMs, maxSteps and retainMs are remembered across resume calls. deliver is NOT remembered: pass it on every call (restored state never starts a download).
 await (window.__gcLibraryRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   /*@@SHARED@@*/
@@ -56,7 +56,7 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     }
     S = window.__gcLibrary ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps', 'deliver', 'retainMs', 'quietMs', 'stallMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    for (const k of ['maxMs', 'maxSteps', 'retainMs', 'quietMs', 'stallMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 200;
     const quietMs = S.opts.quietMs ?? 800, stallMs = S.opts.stallMs ?? 1500; // quiet period that confirms completion; stall period before scrolling
     const {got, stats} = S;
@@ -115,7 +115,7 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     const viewAtStop = stopReason === 'view-changed' ? {view: viewInfo(), expected: snapshotLibrary().expected} : null;
     S.activeMs += Date.now() - callStart;
     const c = {startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, got, stopReason, view, stats, activeMs: S.activeMs, calls: stats.calls,
-      warnings: S.warnings, deliver: S.opts.deliver, retainMs: S.opts.retainMs, viewAtStop};
+      warnings: S.warnings, deliver: opts.deliver, retainMs: S.opts.retainMs, viewAtStop};
     cleanup();
     return envelopeOf(c);
   } catch (error) { cleanup(); throw error; }

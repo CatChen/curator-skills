@@ -160,7 +160,7 @@ async function drive(site, opts = {}, {maxSteps = 30, onStep} = {}) {
     'pending contains a url': s => ({...s, pending: ['https://evil.example/']}), 'pending year out of range': s => ({...s, pending: [2022, 3000]}), 'duplicate pending': s => ({...s, pending: [2022, 2022]}),
     'too many years': s => ({...s, pending: Array.from({length: 40}, (_, i) => 2000 + i)}), 'records disagree with visited': s => ({...s, visited: [2025, 2024]}),
     'oversized text': s => ({...s, records: [{...s.records[0], semanticText: 'x'.repeat(70000)}]}), 'bad app source': s => ({...s, records: [{...s.records[0], apps: [{appid: 1, name: null, source: 'eval'}]}]}),
-    'non-object app': s => ({...s, records: [{...s.records[0], apps: ['x']}]}), 'bad deliver option': s => ({...s, opts: {deliver: 'eval'}}), 'bad owner flag': s => ({...s, owner: 'yes'}),
+    'non-object app': s => ({...s, records: [{...s.records[0], apps: ['x']}]}), 'bad deliver option': s => ({...s, opts: {deliver: 'eval'}}), 'restored download mode': s => ({...s, opts: {deliver: 'download'}}), 'bad owner flag': s => ({...s, owner: 'yes'}),
     'bad counter': s => ({...s, calls: -1}), 'expired': s => ({...s, touched: Date.now() - 11 * 60000}), 'too old': s => ({...s, born: Date.now() - 31 * 60000}), 'not an object': () => 'a string', 'not json': null,
   };
   for (const [name, mutate] of Object.entries(cases)) {
@@ -172,6 +172,7 @@ async function drive(site, opts = {}, {maxSteps = 30, onStep} = {}) {
     assert.ok(e.warnings.some(w => /Discarded saved collector state/.test(w)), `${name}: bad state is discarded and reported`);
     assert.deepEqual([...e.records.map(x => x.year)].sort(), [2022, 2023, 2024, 2025], name);
     assert.ok(!e.records.some(x => x.semanticText.length > 20000), name);
+    assert.equal(site.downloads.length, 0, `${name}: restored state never starts a download`);
   }
   // a well-formed state of another account whose requested year led here stops the run instead of mixing accounts
   const site = makeReplaySite(); let r = j(await site.runFile()); const s = site.state();
@@ -183,6 +184,15 @@ async function drive(site, opts = {}, {maxSteps = 30, onStep} = {}) {
   const site = makeReplaySite(); await site.runFile(); site.store.set('unrelated', 'keep');
   const out = j(await site.runFile({cancel: true})); assert.deepEqual(out, {cancelled: true, removed: ['gcReplay']});
   assert.deepEqual([...site.store.keys()], ['unrelated']); assert.equal(typeof site.ctx.__gcReplayRun, 'undefined');
+}
+// 9b. deliver is per call: it is not remembered across years, so only the call that finishes the run can start a download.
+{
+  const site = makeReplaySite(); let r = j(await site.runFile({deliver: 'download'}));
+  while (r.status === 'continue') { site.navigate(r.next); r = j(await site.runFile({})); } // later calls omit deliver
+  assert.equal(r.source, 'replay', 'the envelope is returned inline'); assert.equal(r.downloadInitiated, undefined); assert.equal(site.downloads.length, 0);
+  const h = makeReplaySite(); let x = j(await h.runFile({deliver: 'hook'}));
+  while (x.status === 'continue') { h.navigate(x.next); x = j(await h.runFile({deliver: 'hook'})); }
+  assert.equal(x.source, 'replay'); assert.equal(h.downloads.length, 0, "'hook' never starts a download");
 }
 // 10. Download delivery: the finished capture is handed to the browser, summarized without data, and retained for recovery until released.
 {

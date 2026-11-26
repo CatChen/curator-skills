@@ -20,7 +20,7 @@
 // the script runs; it is NOT removed by a timer, so an abandoned run leaves its data in this tab's sessionStorage until it is cancelled,
 // discarded by a later run, or the tab closes.
 // The leading `await` matters: Claude in Chrome's tool does not await a trailing promise (it returns {}).
-// Options (object literal on the last line; maxPages, deliver and retainMs are remembered across pages):
+// Options (object literal on the last line; maxPages and retainMs are remembered across pages; deliver is not (pass it on every call: restored state never starts a download)):
 //   maxPages (20, at most 100)  fresh (discard saved state)  cancel (remove the saved state and stop)  callBudgetMs (20000)
 //   deliver 'return' | 'download' | 'hook' and retainMs: see page-common.mjs ('hook' returns the envelope exactly like 'return' and only
 //   states that this call opts into the skill's PostToolUse hook staging it privately; the page itself does nothing different)
@@ -62,8 +62,8 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       if (![S.repeats, S.attempts, S.calls, S.restarts].every(n => isInt(n, 10000))) return 'bad counters';
       if (!(S.expected === null || isInt(S.expected, 100000)) || typeof S.owner !== 'boolean') return 'bad expected or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxPages', 'deliver', 'retainMs']) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
-        || !(S.opts.deliver === undefined || ['return', 'download', 'hook'].includes(S.opts.deliver)) || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
+      if (!has(S.opts, ['maxPages', 'retainMs']) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
+        || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'recommended-list' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.pages || !list.every(k => okPageKey(k, listPath))) return 'bad page list';
       if (!(S.requested === null || okPageKey(S.requested, listPath))) return 'bad requested page';
@@ -92,7 +92,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxPages', 'deliver', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    for (const k of ['maxPages', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const maxPages = Math.min(S.opts.maxPages ?? 20, HARD.pages);
     const seen = new Set(S.rows.map(r => r.reviewUrl));
 
@@ -166,6 +166,6 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: S.opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
   }
 })({})

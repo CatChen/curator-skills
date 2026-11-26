@@ -10,8 +10,8 @@ import {makeReplaySite} from './fake-replay-site.mjs';
 import {makeReviewsSite} from './fake-reviews-site.mjs';
 import {makeLibraryPage} from './fake-library-dom.mjs';
 import {makeWishlistPage} from './fake-wishlist-dom.mjs';
-import {handleHook, identifyCall, readInlineEnvelope} from '../../skills/game-curator/scripts/claude-code/capture-hook.mjs';
-import {verifyHookStaging, STAGING_DIR, HOOK_TOOLS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {handleHook, identifyCall as identify, parseOptions, readInlineEnvelope} from '../../skills/game-curator/scripts/claude-code/capture-hook.mjs';
+import {readVerifiedStaging, removeIfUnchanged, STAGING_DIR, HOOK_TOOLS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 
 const root = new URL('../../skills/game-curator/scripts/claude-code/', import.meta.url).pathname;
 const j = o => JSON.parse(JSON.stringify(o));
@@ -19,6 +19,7 @@ const PAGES = {wishlist: 'steam-wishlist-page.js', library: 'steam-library-page.
 const script = s => fs.readFileSync(path.join(root, PAGES[s]), 'utf8').replace(/\(\{\}\)\s*$/, '');
 const call = (s, literal = "({deliver: 'hook'})") => script(s) + literal;
 const sortKeys = v => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, sortKeys(v[k])])) : v);
+const identifyCall = (text, dir) => identify(text === undefined || typeof text !== 'string' ? {action: 'javascript_exec', text} : {action: 'javascript_exec', text}, dir);
 const IAB = '\n\n(captured at origin https://store.steampowered.com)';
 const tab = '\n\nTab Context:\n- Executed on tabId: seed';
 // What the built-in browser returns for an inline result: pretty JSON with alphabetized keys, an origin note, then tab context.
@@ -85,14 +86,14 @@ for (const s of Object.keys(PAGES)) {
   assert.equal(JSON.stringify(JSON.parse(fs.readFileSync(file, 'utf8'))), JSON.stringify(sortKeys(ENV[s])), 'the staged bytes are the received result, byte for byte, with no model in between');
   const meta = JSON.parse(fs.readFileSync(file + '.meta.json', 'utf8'));
   assert.equal(meta.source, s); assert.equal(meta.tool, HOOK_TOOLS[0]); assert.equal(meta.call, 'run'); assert.equal(meta.deliver, 'hook'); assert.equal(meta.toolUseId, 'toolu_synthetic');
-  assert.equal(verifyHookStaging(file, f.dest).sha256, meta.sha256);
+  assert.equal(readVerifiedStaging(file, f.dest).meta.sha256, meta.sha256);
   assert.deepEqual(everything(f.home).filter(n => !n.startsWith('.curator/game-curator/cache/steam/.staging') && !/^\.curator(\/game-curator(\/cache(\/steam)?)?)?$/.test(n)).filter(n => n !== '.curator/game-curator/settings.json'), [], 'nothing else is written');
   // The same result delivered twice (a retried hook) is idempotent, not an error and not a second copy.
   handleHook(p, f.opts); assert.equal(f.staged().length, 2);
 }
 { // Chrome tool name, and a resume call
   const f = fixture(), e = ENV.library;
-  handleHook(payload('library', e, {tool_name: HOOK_TOOLS[1], tool_response: response(e, ''), tool_input: {text: "await window.__gcLibraryRun({deliver: 'hook'})"}}), f.opts);
+  handleHook(payload('library', e, {tool_name: HOOK_TOOLS[1], tool_response: response(e, ''), tool_input: {action: 'javascript_exec', text: "await window.__gcLibraryRun({deliver: 'hook'})"}}), f.opts);
   assert.equal(f.staged().length, 2); const m = JSON.parse(fs.readFileSync(path.join(f.dest, STAGING_DIR, f.staged().find(n => n.endsWith('.meta.json'))), 'utf8'));
   assert.equal(m.tool, HOOK_TOOLS[1]); assert.equal(m.call, 'resume'); assert.equal(m.scriptSha256, null);
 }
@@ -109,7 +110,7 @@ for (const s of Object.keys(PAGES)) {
   none(payload('replay', {probe: 'x', format: 'game-curator-steam-export'}, {tool_input: {text: "({format: 'game-curator-steam-export', deliver: 'hook'})"}})); // a page-style marker is not authorization
   none(payload('replay', ENV.replay, {tool_input: {text: "return {format: 'game-curator-steam-export', source: 'replay', deliver: 'hook'}"}}));
   none(null); none({}); none(payload('replay', ENV.replay, {tool_response: undefined}));
-  assert.match(handleHook(payload('replay', ENV.replay, {tool_input: {text: "await window.__gcReplayRun({deliver: 'hook'}); await fetch('x')"}}), f.opts), /not a recognized collector run/);
+  assert.match(handleHook(payload('replay', ENV.replay, {tool_input: {text: "await window.__gcReplayRun({deliver: 'hook'}); await fetch('x')"}}), f.opts), /not a recognized, unambiguous collector run/);
   assert.deepEqual(f.staged(), []);
 }
 
@@ -188,14 +189,14 @@ for (const s of ['wishlist', 'library', 'reviews', 'replay']) {
   { const {f, file} = mk(); const m = JSON.parse(fs.readFileSync(file + '.meta.json', 'utf8')); fs.writeFileSync(file + '.meta.json', JSON.stringify({...m, extra: 1}), {mode: 0o600}); fails(f, file, /not a hook capture record/); }
   { const {f, file} = mk(); const m = JSON.parse(fs.readFileSync(file + '.meta.json', 'utf8')); fs.writeFileSync(file + '.meta.json', JSON.stringify({...m, stagedAt: new Date(Date.now() - 30 * 3600 * 1000).toISOString()}), {mode: 0o600}); fails(f, file, /older than 24 hours/); }
   { const {f, file} = mk(); fs.rmSync(file + '.meta.json'); fails(f, file, /ENOENT|no such file/i); }
-  { const {f, file} = mk(); const copy = path.join(f.home, path.basename(file)); fs.copyFileSync(file, copy); fs.copyFileSync(file + '.meta.json', copy + '.meta.json'); fs.chmodSync(copy, 0o600); fs.chmodSync(copy + '.meta.json', 0o600); fails(f, copy, /not in the skill's private staging directory/); }
-  { const {f, file} = mk(); const link = path.join(path.dirname(file), 'gc-library-20200101T000000Z-deadbeef.json'); fs.symlinkSync(file, link); fs.symlinkSync(file + '.meta.json', link + '.meta.json'); fails(f, link, /not a regular file|does not match/); }
+  { const {f, file} = mk(); const copy = path.join(f.home, path.basename(file)); fs.copyFileSync(file, copy); fs.copyFileSync(file + '.meta.json', copy + '.meta.json'); fs.chmodSync(copy, 0o600); fs.chmodSync(copy + '.meta.json', 0o600); fails(f, copy, /unexpected staged file name|not in the skill's private staging directory/); }
+  { const {f, file} = mk(); const link = path.join(path.dirname(file), 'gc-library-20200101T000000Z-deadbeef.json'); fs.symlinkSync(file, link); fs.symlinkSync(file + '.meta.json', link + '.meta.json'); fails(f, link, /cannot open/); }
 }
 { // A plain file or a native tool-result file cannot claim hook-capture, and hook files cannot claim other provenance as verified.
   const f = fixture(), plain = path.join(f.home, 'plain.json'); fs.writeFileSync(plain, JSON.stringify(ENV.library));
-  const r = runSaver(f, plain, ['--provenance', 'hook-capture']); assert.equal(r.status, 1); assert.match(r.stderr, /not in the skill's private staging directory/);
+  const r = runSaver(f, plain, ['--provenance', 'hook-capture']); assert.equal(r.status, 1); assert.match(r.stderr, /unexpected staged file name|not in the skill's private staging directory/);
   const tr = path.join(f.home, 'tr.json'); fs.writeFileSync(tr, JSON.stringify(response(ENV.library)));
-  const r2 = runSaver(f, tr, ['--provenance', 'hook-capture']); assert.equal(r2.status, 1); assert.match(r2.stderr, /file is a tool-result file/);
+  const r2 = runSaver(f, tr, ['--provenance', 'hook-capture']); assert.equal(r2.status, 1); assert.match(r2.stderr, /unexpected staged file name/);
   const r3 = spawnSync(process.execPath, [saver, '-', '--dest', f.dest, '--settings', f.settings, '--account', 'scratch', '--access-scope', 'signed-in', '--provenance', 'hook-capture'], {input: JSON.stringify(ENV.library), encoding: 'utf8'}); assert.equal(r3.status, 1); assert.match(r3.stderr, /needs the staged file path/);
   assert.ok(!fs.existsSync(path.join(f.dest, 'library.json')));
 }
@@ -250,4 +251,73 @@ for (const s of ['wishlist', 'library', 'reviews', 'replay']) {
   assert.equal(none.status, 0); assert.equal(none.stdout, '');
   assert.equal((front.match(/^\s+- type:/gm) ?? []).length, 1); assert.ok(!/PreToolUse|Stop|SessionStart|UserPromptSubmit/.test(front), 'no other events');
 }
+// 11. Review follow-up. (a) The options literal is parsed, never evaluated: a repeated key, an unknown key, code or a non-exec action never opts in.
+{
+  assert.deepEqual(parseOptions("({deliver: 'hook'})"), {deliver: 'hook'}); assert.deepEqual(parseOptions('({deliver: "hook", maxYears: 3, fresh: true,})'), {deliver: 'hook', maxYears: 3, fresh: true}); assert.deepEqual(parseOptions('({})'), {});
+  for (const bad of ["({deliver: 'download', deliver: 'hook'})", "({deliver: 'hook', deliver: 'return'})", "({deliver: 'hook', deliver: 'hook'})", "({deliver: 'hook', surprise: 1})", "({deliver: 'hook', maxMs: 1 + 1})", "({deliver: ('hook')})",
+    "({deliver: `hook`})", "({['deliver']: 'hook'})", "({...x, deliver: 'hook'})", "({deliver: 'Hook'})", "({deliver: 'hook'}, 1)", "({deliver: 'hook'}).x", "({deliver: 'hook' deliver: 'hook'})", "({deliver 'hook'})", '(1)', 'x', undefined, 7]) assert.equal(parseOptions(bad), null, String(bad));
+  for (const s of Object.keys(PAGES)) {
+    assert.equal(identifyCall(call(s, "({deliver: 'download', deliver: 'hook'})"), root), null, 'a repeated deliver key is not an opt-in'); assert.equal(identifyCall(call(s, "({deliver: 'hook', deliver: 'return'})"), root), null);
+    assert.equal(identifyCall(call(s, "({deliver: 'hook', unknownOption: 1})"), root), null);
+    assert.equal(identify({action: 'javascript_exec', text: call(s)}, root).optIn, true); assert.equal(identify({action: 'other', text: call(s)}, root), null); assert.equal(identify({text: call(s)}, root), null); assert.equal(identify({action: 'javascript_exec'}, root), null);
+    assert.equal(identify({action: 'javascript_exec', text: `await window.__gc${s[0].toUpperCase() + s.slice(1)}Run({deliver: 'hook', deliver: 'hook'})`}, root), null);
+  }
+  const f = fixture();
+  assert.equal(handleHook(payload('replay', ENV.replay, {tool_input: {action: 'other', text: call('replay')}}), f.opts), null); assert.equal(handleHook(payload('replay', ENV.replay, {tool_input: {text: call('replay')}}), f.opts), null);
+  assert.deepEqual(f.staged(), [], 'nothing is staged without javascript_exec');
+  assert.match(handleHook(payload('replay', ENV.replay, {tool_input: {action: 'javascript_exec', text: "await window.__gcReplayRun({deliver: 'download', deliver: 'hook'})"}}), f.opts), /not a recognized, unambiguous collector run/);
+  assert.deepEqual(f.staged(), []);
+}
+// (b) The saver reads the staged file once and uses exactly the verified bytes: the path is never reread, and the pair is removed only if it is still the verified pair.
+{
+  const mk = () => { const f = fixture(); handleHook(payload('library', ENV.library), f.opts); const file = path.join(f.dest, STAGING_DIR, f.staged().find(n => !n.endsWith('.meta.json'))); return {f, file}; };
+  { const {f, file} = mk(), v = readVerifiedStaging(file, f.dest), original = Buffer.from(v.bytes);
+    const tampered = JSON.parse(original.toString('utf8')); tampered.warnings = ['changed after verification'];
+    fs.rmSync(file); fs.writeFileSync(file, JSON.stringify(tampered), {mode: 0o600}); // same path, new file, after the verified read
+    assert.deepEqual(v.bytes, original, 'the verified bytes do not change when the path does'); assert.equal(removeIfUnchanged(v.identity), false, 'a replaced file is not removed');
+    assert.ok(fs.existsSync(file) && fs.existsSync(file + '.meta.json'), 'both files are left in place'); }
+  { const {f, file} = mk(), v = readVerifiedStaging(file, f.dest);
+    fs.appendFileSync(file, ' '); // same file, modified in place after the verified read
+    assert.equal(removeIfUnchanged(v.identity), false); assert.ok(fs.existsSync(file) && fs.existsSync(file + '.meta.json')); }
+  { const {f, file} = mk(), v = readVerifiedStaging(file, f.dest);
+    fs.rmSync(file + '.meta.json'); fs.writeFileSync(file + '.meta.json', '{}', {mode: 0o600}); // the sidecar was replaced
+    assert.equal(removeIfUnchanged(v.identity), false); assert.ok(fs.existsSync(file)); }
+  { const {f, file} = mk(), v = readVerifiedStaging(file, f.dest); assert.equal(removeIfUnchanged(v.identity), true, 'the untouched verified pair is removed'); assert.deepEqual(f.staged(), []); }
+  { const {f, file} = mk(); const link = path.join(f.dest, STAGING_DIR, 'gc-library-20200101T000000Z-cafef00d.json');
+    fs.symlinkSync(file, link); fs.symlinkSync(file + '.meta.json', link + '.meta.json'); assert.throws(() => readVerifiedStaging(link, f.dest), /cannot open/, 'links are never followed'); }
+  { // nothing arbitrary is read before the location is verified: a path outside the staging directory or with another name fails without being opened
+    const f = fixture(), outside = path.join(f.home, 'gc-library-20200101T000000Z-cafef00d.json'); fs.writeFileSync(outside, 'secret', {mode: 0o600});
+    assert.throws(() => readVerifiedStaging(outside, f.dest), /not in the skill's private staging directory/); assert.throws(() => readVerifiedStaging(path.join(f.home, 'secret.txt'), f.dest), /unexpected staged file name/);
+    assert.throws(() => readVerifiedStaging(path.join(f.dest, STAGING_DIR, 'gc-library-20200101T000000Z-cafef00d.json'), f.dest), /does not exist|cannot open/); }
+}
+// (c) Consent over the source: a staged file in the default home may not be consumed into another, separately authorized destination once the default home's steamCache is revoked.
+{
+  const f = fixture(); handleHook(payload('reviews', ENV.reviews), f.opts); const file = path.join(f.dest, STAGING_DIR, f.staged().find(n => !n.endsWith('.meta.json')));
+  const scratch = fixture(), saveInto = (extra = []) => spawnSync(process.execPath, [saver, file, '--dest', scratch.dest, '--settings', scratch.settings, '--account', 'scratch', '--access-scope', 'signed-in', '--provenance', 'hook-capture', ...extra], {encoding: 'utf8', env: {...process.env, HOME: f.home}});
+  fs.writeFileSync(f.settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: false}})); // the default home revokes
+  const r = saveInto(); assert.equal(r.status, 1); assert.match(r.stderr, /steamCache false/); assert.equal(f.staged().length, 2, 'the staged pair stays'); assert.ok(!fs.existsSync(path.join(scratch.dest, 'reviews.json')), 'nothing was written to the scratch cache');
+  assert.equal(saveInto(['--dry-run']).status, 1, 'a dry run is refused too');
+  fs.rmSync(f.settings); const r2 = saveInto(); assert.equal(r2.status, 1); assert.match(r2.stderr, /Cache not authorized/); assert.ok(!fs.existsSync(path.join(scratch.dest, 'reviews.json')));
+  fs.writeFileSync(f.settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: true}})); // consent restored: the same file now saves
+  const ok = saveInto(); assert.equal(ok.status, 0, ok.stderr); assert.ok(fs.existsSync(path.join(scratch.dest, 'reviews.json'))); assert.deepEqual(f.staged(), []);
+  // and the destination's own consent still governs: a destination that declines receives nothing
+  const f2 = fixture(); handleHook(payload('library', ENV.library), f2.opts); const file2 = path.join(f2.dest, STAGING_DIR, f2.staged().find(n => !n.endsWith('.meta.json')));
+  const declined = fixture(); fs.writeFileSync(declined.settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: false}}));
+  const r3 = spawnSync(process.execPath, [saver, file2, '--dest', declined.dest, '--settings', declined.settings, '--account', 'scratch', '--access-scope', 'signed-in', '--provenance', 'hook-capture'], {encoding: 'utf8', env: {...process.env, HOME: f2.home}});
+  assert.equal(r3.status, 1); assert.match(r3.stderr, /steamCache false/); assert.equal(f2.staged().length, 2); assert.ok(!fs.existsSync(path.join(declined.dest, 'library.json')));
+}
+// (d) The hook locator runs the script of the installation it finds, and a mismatched installation fails safely: a copy whose shipped script differs from the one the model ran stages nothing.
+{
+  const skill = fs.readFileSync(new URL('../../skills/game-curator/SKILL.md', import.meta.url), 'utf8').match(/^---\n([\s\S]*?)\n---\n/)[1], block = skill.match(/command: \|\n((?:            .*\n?)+)/)[1].replace(/^ {12}/gm, '');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-hook-mismatch-')), dir = path.join(home, '.curator/game-curator'), dest = path.join(dir, 'cache/steam');
+  fs.mkdirSync(dest, {recursive: true}); fs.mkdirSync(path.join(home, '.claude/skills'), {recursive: true});
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: true}}));
+  const copy = path.join(home, '.claude/skills/game-curator'); fs.cpSync(path.join(root, '..', '..'), copy, {recursive: true});
+  fs.appendFileSync(path.join(copy, 'scripts/claude-code/steam-replay-page.js'), '// an older or newer release of the script\n'); // the installed copy is a different release than the model's script
+  const run = (input, env = {}) => spawnSync('sh', ['-c', block], {input, encoding: 'utf8', env: {PATH: process.env.PATH, HOME: home, ...env}});
+  const r = run(JSON.stringify(payload('replay', ENV.replay))); assert.equal(r.status, 0); assert.equal(r.stdout, ''); assert.ok(!fs.existsSync(path.join(dest, STAGING_DIR)), 'a mismatched installation stages nothing');
+  assert.equal(run(JSON.stringify(payload('reviews', ENV.reviews))).status, 0); assert.equal(fs.readdirSync(path.join(dest, STAGING_DIR)).length, 2, 'a source whose script still matches is staged');
+  const unsupported = run(JSON.stringify(payload('reviews', ENV.reviews)), {HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'gc-hook-elsewhere-'))}); assert.equal(unsupported.status, 0); assert.equal(unsupported.stdout, '', 'an undocumented install layout is a silent no-op');
+}
+
 console.log('Claude Code hook capture checks passed');

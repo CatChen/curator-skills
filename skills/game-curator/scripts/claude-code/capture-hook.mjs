@@ -9,9 +9,10 @@
 //
 // What it stages. All of these must hold, otherwise it stays silent and writes nothing:
 //   1. the tool is the built-in browser's or Claude in Chrome's javascript_tool;
-//   2. the call's own text is a shipped collector run (this skill's generated page script, byte for byte, followed
-//      by a plain options literal) or a resume call of one, AND that literal says deliver: 'hook' (the caller's
-//      per-run opt-in, made after considering the user's current instructions);
+//   2. the call is a javascript_exec whose text is a shipped collector run (this skill's generated page script, byte for byte,
+//      followed by a plain options literal) or a resume call of one, AND that literal sets deliver exactly once, to 'hook' (the
+//      caller's per-run opt-in, made after considering the user's current instructions); the literal is parsed, never evaluated,
+//      and a repeated or unknown key makes the call unrecognized;
 //   3. the response is one complete game-curator-steam-export v1 envelope of the same source that passes the saver's
 //      validation (intermediate results and summaries are ignored);
 //   4. persistence is authorized right now (settings.json, steamCache true), checked by the saver's own function.
@@ -30,26 +31,43 @@ export const MAX_STAGED_BYTES = 16 * 1024 * 1024;
 export const STAGED_MAX_AGE_MS = 24 * 3600 * 1000;
 const PAGES = {wishlist: 'steam-wishlist-page.js', library: 'steam-library-page.js', reviews: 'steam-reviews-page.js', replay: 'steam-replay-page.js'};
 const RESUME = {__gcWishlistRun: 'wishlist', __gcLibraryRun: 'library', __gcReviewsRun: 'reviews', __gcReplayRun: 'replay'};
-const OPTIONS = /^\(\{(?:\s*[A-Za-z]+:\s*(?:'[a-z]*'|"[a-z]*"|\d+|true|false)\s*,?)*\s*\}\)$/;
-const OPT_IN = /\bdeliver:\s*(['"])hook\1/;
+const OPTION_KEYS = new Set(['callBudgetMs', 'maxMs', 'maxSteps', 'fresh', 'cancel', 'deliver', 'retainMs', 'maxYears', 'maxPages', 'quietMs', 'stallMs', 'settleMs', 'settleCapMs']);
 const sha256 = b => crypto.createHash('sha256').update(b).digest('hex');
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// Which collector run is this call? Returns {source, call: 'run'|'resume', scriptSha256, optIn} or null.
-export function identifyCall(text, dir = here) {
-  if (typeof text !== 'string') return null;
-  const t = text.replace(/\s+$/, '');
-  const resume = t.match(/^await window\.(__gc[A-Za-z]+Run)\((\{[^()]*\})\)$/);
-  if (resume && RESUME[resume[1]] && OPTIONS.test(`(${resume[2]})`)) return {source: RESUME[resume[1]], call: 'resume', scriptSha256: null, optIn: OPT_IN.test(resume[2])};
+// Parse the restricted options literal `({key: value, ...})` WITHOUT evaluating anything: known keys only, values are a short lowercase
+// string, an integer, true or false, and a repeated key makes the whole literal invalid (so an ambiguous `deliver` never opts in).
+export function parseOptions(literal) {
+  const m = typeof literal === 'string' && literal.match(/^\(\{([^{}()]*)\}\)$/);
+  if (!m) return null;
+  const out = {};
+  let rest = m[1];
+  const item = /^\s*([A-Za-z]+)\s*:\s*('[a-z]*'|"[a-z]*"|\d+|true|false)\s*(?:,|$)/;
+  while (rest.trim() !== '') {
+    const t = item.exec(rest);
+    if (!t || !OPTION_KEYS.has(t[1]) || Object.hasOwn(out, t[1])) return null;
+    const v = t[2];
+    out[t[1]] = v === 'true' ? true : v === 'false' ? false : /^\d/.test(v) ? Number(v) : v.slice(1, -1);
+    rest = rest.slice(t[0].length);
+  }
+  return out;
+}
+
+// Which collector run is this call? Returns {source, call: 'run'|'resume', scriptSha256, optIn} or null. optIn is true only when the
+// options literal sets deliver exactly once, to 'hook'; the tool call must also be a plain javascript_exec.
+export function identifyCall(input, dir = here) {
+  if (!input || input.action !== 'javascript_exec' || typeof input.text !== 'string') return null;
+  const t = input.text.replace(/\s+$/, '');
+  const resume = t.match(/^await window\.(__gc[A-Za-z]+Run)(\(\{[^()]*\}\))$/);
+  if (resume && RESUME[resume[1]]) { const o = parseOptions(resume[2]); return o ? {source: RESUME[resume[1]], call: 'resume', scriptSha256: null, optIn: o.deliver === 'hook'} : null; }
   for (const [source, file] of Object.entries(PAGES)) {
     let body; try { body = fs.readFileSync(path.join(dir, file), 'utf8'); } catch { continue; }
     const tail = body.match(/\(\{\}\)\s*$/);
     if (!tail) continue;
     const prefix = body.slice(0, tail.index);
     if (!t.startsWith(prefix)) continue;
-    const literal = t.slice(prefix.length);
-    if (!OPTIONS.test(literal)) return null; // not a plain options literal: not this skill's run
-    return {source, call: 'run', scriptSha256: sha256(body), optIn: OPT_IN.test(literal)};
+    const o = parseOptions(t.slice(prefix.length)); // not a plain, unambiguous options literal: not this skill's run
+    return o ? {source, call: 'run', scriptSha256: sha256(body), optIn: o.deliver === 'hook'} : null;
   }
   return null;
 }
@@ -92,10 +110,10 @@ function prune(dir, now) {
 // Decide and act on one hook payload. Returns the additionalContext text to show the model, or null to stay silent.
 export function handleHook(payload, {dest = path.join(os.homedir(), '.curator/game-curator/cache/steam'), settings, skillDir = here, now = Date.now()} = {}) {
   if (!payload || payload.hook_event_name !== 'PostToolUse' || !HOOK_TOOLS.includes(payload.tool_name)) return null;
-  const call = identifyCall(payload.tool_input?.text, skillDir);
+  const call = identifyCall(payload.tool_input, skillDir);
   if (!call) {
     const t = payload.tool_input?.text;
-    return typeof t === 'string' && t.length < 400 && /__gc[A-Za-z]+Run/.test(t) && OPT_IN.test(t) ? 'Game Curator hook: this call is not a recognized collector run, so nothing was staged.' : null;
+    return typeof t === 'string' && t.length < 400 && /__gc[A-Za-z]+Run/.test(t) && /\bdeliver\b/.test(t) ? 'Game Curator hook: this call is not a recognized, unambiguous collector run, so nothing was staged.' : null;
   }
   if (!call.optIn) return null; // the caller did not ask for hook delivery on this call
   const got = readInlineEnvelope(payload.tool_response);

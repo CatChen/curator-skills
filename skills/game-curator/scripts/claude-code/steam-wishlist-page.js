@@ -19,7 +19,8 @@
 //   window.__gcRedeliver() starts the download again, window.__gcRelease() discards it.
 //   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging
 //   the inline result privately (see references/claude-code.md). Put it on every call of a run, resume calls included.
-// maxMs, maxSteps, deliver and retainMs are remembered across resume calls; the rest apply to the call they are passed to.
+// maxMs, maxSteps and retainMs are remembered across resume calls; the rest apply to the call they are passed to. deliver is NOT remembered: only the
+// call that finishes the run starts a download or returns the envelope as that call says, so pass it on every call (restored state never starts a download).
 await (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   function snapshotWishlist() {
@@ -125,7 +126,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps', 'deliver', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    for (const k of ['maxMs', 'maxSteps', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
@@ -192,7 +193,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, deliver: S.opts.deliver, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
