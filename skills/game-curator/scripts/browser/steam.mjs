@@ -141,8 +141,9 @@ export async function collectReviews(tab, {maxPages=20, library=null, verifiedSa
   return envelope('reviews',[...records.values()],warnings,{expectedCount:expected,uniqueCount:records.size,pagesVisited:visited.size,pagesPending:unvisited.length,pageAttempts:attempts});
 }
 
-export async function collectReplay(tab, {maxYears=20} = {}) {
+export async function collectReplay(tab, {maxYears=20, settleMs=1200, settleCapMs=10000} = {}) {
   if (!Number.isInteger(maxYears) || maxYears < 1 || maxYears > LIMIT) throw new Error('Invalid maxYears');
+  if (!Number.isFinite(settleMs) || !Number.isFinite(settleCapMs) || settleMs < 0 || settleCapMs < settleMs || settleCapMs > 30000) throw new Error('Invalid Replay settling limits');
   const records = [], visited = new Set(), pending = [], warnings = [];
   let accountPath = null, attempts = 0, requestedYear = null;
   while (attempts < maxYears) {
@@ -163,9 +164,13 @@ export async function collectReplay(tab, {maxYears=20} = {}) {
         return {year:Number(m[2]), accountPath:m[1], text, links, apps};
       });
       let data = await extract();
-      for (let attempt=0; attempt<8 && (!data.text || /^(LOADING\.\.\.)$/i.test(data.text)); attempt++) {
-        await new Promise(resolve=>setTimeout(resolve,500));
+      const placeholder = text => /(^|\n)\s*LOADING\.\.\.\s*(\n|$)/i.test(text || '');
+      const signature = d => `${d.text?.length || 0}:${d.text?.slice(-200) || ''}:${d.apps.length}`;
+      const start = Date.now(); let stableSince = start, last = signature(data);
+      while ((!data.text || placeholder(data.text) || Date.now()-stableSince < settleMs) && Date.now()-start < settleCapMs) {
+        await new Promise(resolve=>setTimeout(resolve,Math.min(250, settleCapMs-(Date.now()-start))));
         data = await extract();
+        const current = signature(data); if (current !== last) { last = current; stableSince = Date.now(); }
       }
       if (accountPath !== null && data.accountPath !== accountPath) throw Error('Replay account changed');
       if (!data.text || /^(LOADING\.\.\.)$/i.test(data.text)) throw Error('Replay report did not finish loading');
@@ -173,6 +178,8 @@ export async function collectReplay(tab, {maxYears=20} = {}) {
         warnings.push(`Replay navigation did not reach requested year ${requestedYear}; preserving partial records.`); break;
       }
       if (visited.has(data.year)) { warnings.push('Replay navigation returned a previously visited year; preserving partial records.'); break; }
+      if (placeholder(data.text)) warnings.push(`The ${data.year} report still showed a LOADING... placeholder when it was read, so its text may be partial.`);
+      else if (Date.now()-stableSince < settleMs) warnings.push(`The ${data.year} report did not settle before the time limit, so its text and game references may be partial.`);
       accountPath = data.accountPath; visited.add(data.year);
       const apps = new Map();
       for (const app of data.apps) {

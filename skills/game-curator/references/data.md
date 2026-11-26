@@ -11,6 +11,8 @@ These experimental browser-runtime collectors return serializable objects to the
 
 For each source verify the account, source identity, representative records, observed count and any pages or scroll ranges that were inaccessible. The library goal is membership plus labeled playtime, last played and achievement counts; repeat scoped batches across the full list, and note any gaps. The wishlist goal is membership and order, with names, dates and release metadata when available. The reviews goal is all accessible pages, with text, polarity, dates, playtime and review links when available; track page coverage and missing fields. Replay's goal is per-year activity, game percentages, sessions, monthly activity, achievements and streaks; preserve relevant semantic evidence and report missing metrics. No count match proves full coverage. Use the [recovery procedure](acquisition.md#recovery) when a strategy or selector fails.
 
+The Codex Replay collector waits for a stable report signature and warns if an embedded loading placeholder remains or the report does not settle within its time limit. A stable signature does not guarantee that every section has rendered; check the captured evidence and warnings.
+
 ## Running from a supported browser runtime
 
 The collectors below need a tab object with `playwright.evaluate`, as in Codex. In Claude Code's built-in browser follow [Claude Code](claude-code.md) instead; it produces the same envelope. In Codex's computer-use JavaScript runtime, first create or select a tab in the user's chosen browser, navigate to the source page, and verify the account and the page. `skillPath` is the absolute path of the loaded `SKILL.md`; resolve scripts relative to it, not a hardcoded checkout. For example:
