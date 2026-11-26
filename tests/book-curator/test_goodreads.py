@@ -62,6 +62,14 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(json.loads(dest.read_text())['records'][0]['title'], 'Example')
             self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o600)
 
+    def test_decimal_ratings_from_export(self):
+        data = make_csv([['Book Id', 'Title', 'My Rating'], ['1', 'A', '4.0'],
+                         ['2', 'B', '0.0'], ['3', 'C', 'NaN']])
+        result = module.normalize(data)
+        self.assertEqual([x['rating'] for x in result['records']], [4.0, None, None])
+        self.assertEqual(result['records'][0]['original']['My Rating'], '4.0')
+        self.assertTrue(any('invalid rating' in w for w in result['warnings']))
+
     def test_id_conflicts_are_reported_without_dropping_records(self):
         data = make_csv([['Book Id','Title','Author'], ['', 'Unknown', 'A'],
                          ['1','First','A'], ['1','Different','B']])

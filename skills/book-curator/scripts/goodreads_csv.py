@@ -5,6 +5,7 @@ import csv
 from datetime import datetime, timezone
 import json
 import os
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 FIELDS = {
@@ -39,13 +40,17 @@ def normalize(stream, captured_at=None):
         for field in ('isbn', 'isbn13'):
             item[field] = clean_identifier(item[field] or '')
         rating = item['rating']
-        if rating is None or rating == '0':
+        if rating is None:
             item['rating'] = None
-        elif rating in ('1', '2', '3', '4', '5'):
-            item['rating'] = int(rating)
         else:
-            item['rating'] = None
-            warnings.append(f'Row {line}: invalid rating retained in original metadata')
+            try:
+                number = Decimal(rating)
+                if not number.is_finite() or not (number == 0 or 1 <= number <= 5):
+                    raise InvalidOperation
+                item['rating'] = None if number == 0 else float(number)
+            except InvalidOperation:
+                item['rating'] = None
+                warnings.append(f'Row {line}: invalid rating retained in original metadata')
         if not item['title']:
             warnings.append(f'Row {line}: missing title')
         book_id = item['goodreads_book_id']
