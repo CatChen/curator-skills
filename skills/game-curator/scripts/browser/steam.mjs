@@ -34,12 +34,24 @@ async function scroll(tab) {
 
 export {normalizeLibraryRecord};
 
-export async function collectWishlist(tab, {maxScrolls=20} = {}) {
+export async function collectWishlist(tab, {maxScrolls=80} = {}) {
   if (!Number.isInteger(maxScrolls) || maxScrolls < 0 || maxScrolls > LIMIT) throw new Error('Invalid maxScrolls');
   const rowsByApp = new Map(), warnings = [], ranks = new Set();
-  let expected = null, stagnant = 0, steps = 0;
+  let expected = null, stagnant = 0, steps = 0, waits = 0;
+  const retries = new Map(), skipped = new Set();
   const loaded = () => [...rowsByApp.values()].filter(r => r.complete).length;
+  const missing = () => expected === null ? [] : Array.from({length:expected}, (_, i)=>i+1).filter(r=>!ranks.has(r));
+  const pause = () => new Promise(resolve=>setTimeout(resolve,200));
+  async function wishlistScroll(direction) {
+    if (typeof tab.scroll === 'function') {
+      try { return await tab.scroll([300, 500], direction, 1); }
+      catch (error) { if (!/DOM.only|not supported|unsupported/i.test(String(error.message || error))) throw error; }
+    }
+    if (tab.playwright?.locator) return tab.playwright.locator('body').press(direction === 'up' ? 'PageUp' : 'PageDown');
+    throw new Error('No supported browser scrolling operation');
+  }
   try {
+    let lastWindow = null;
     while (true) {
       const data = await read(tab, snapshotWishlist); expected = data.expected ?? expected;
       const before = loaded() + rowsByApp.size;
@@ -49,8 +61,23 @@ export async function collectWishlist(tab, {maxScrolls=20} = {}) {
       stagnant = loaded() + rowsByApp.size === before ? stagnant+1 : 0;
       const ranksCovered = expected !== null && ranks.size === expected && loaded() === expected &&
         [...ranks].every(rank=>Number.isInteger(rank) && rank>=1 && rank<=expected);
-      if (steps >= maxScrolls || ranksCovered || stagnant >= 3) break;
-      await scroll(tab); await refresh(tab); steps++;
+      if (steps >= maxScrolls || ranksCovered) break;
+      const windowKey = data.rows.map(r=>`${r.appid}:${r.rank}:${r.complete !== false}`).join('|');
+      const visibleRanks = data.rows.map(r=>r.rank).filter(Number.isInteger);
+      const need = missing().find(r=>!skipped.has(r));
+      const lo = Math.min(...visibleRanks), hi = Math.max(...visibleRanks);
+      // Give a lazy row or unchanged virtualized window time to render, then re-read it.
+      if ((need !== undefined && need >= lo && need <= hi) || (windowKey === lastWindow && stagnant > 0)) {
+        const key = need ?? -1, n = (retries.get(key) || 0) + 1; retries.set(key,n);
+        if (n <= 3) { waits++; await pause(); lastWindow=windowKey; continue; }
+        if (need !== undefined) skipped.add(need);
+        if (stagnant >= 8) break;
+      }
+      const target = missing().find(r=>!skipped.has(r));
+      if (expected !== null && target === undefined && stagnant >= 8) break;
+      const direction = target !== undefined && visibleRanks.length && target < lo ? 'up' : 'down';
+      lastWindow=windowKey;
+      await wishlistScroll(direction); await refresh(tab); steps++;
     }
   } catch (error) {
     if (!rowsByApp.size) throw error;
@@ -63,7 +90,7 @@ export async function collectWishlist(tab, {maxScrolls=20} = {}) {
   if (expected !== null && (ranks.size !== expected || ![...ranks].every(rank=>Number.isInteger(rank) && rank>=1 && rank<=expected))) warnings.push('Observed wishlist positions do not cover all displayed ranks.');
   warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account, filters and membership.');
   return envelope('wishlist',records,warnings,
-    {expectedCount:expected, uniqueCount:records.length, ranksObserved:ranks.size, placeholderNameRows:placeholders, scrollSteps:steps, stagnantSteps:stagnant});
+    {expectedCount:expected, uniqueCount:records.length, ranksObserved:ranks.size, placeholderNameRows:placeholders, missingRanks:missing(), scrollSteps:steps, stagnantSteps:stagnant, settleWaits:waits});
 }
 
 export async function collectLibrary(tab, {maxScrolls=40} = {}) {
