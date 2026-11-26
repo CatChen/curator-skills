@@ -13,7 +13,7 @@ For each source verify the account, source identity, representative records, obs
 
 ## Running from a supported browser runtime
 
-In Codex's computer-use JavaScript runtime, first create or select a tab in the user's chosen browser, navigate to the source page, and verify the account and the page. `skillPath` is the absolute path of the loaded `SKILL.md`; resolve scripts relative to it, not a hardcoded checkout. For example:
+The collectors below need a tab object with `playwright.evaluate`, as in Codex. In Claude Code's built-in browser follow [Claude Code](claude-code.md) instead; it produces the same envelope. In Codex's computer-use JavaScript runtime, first create or select a tab in the user's chosen browser, navigate to the source page, and verify the account and the page. `skillPath` is the absolute path of the loaded `SKILL.md`; resolve scripts relative to it, not a hardcoded checkout. For example:
 
 ```js
 const { pathToFileURL } = await import('node:url');
