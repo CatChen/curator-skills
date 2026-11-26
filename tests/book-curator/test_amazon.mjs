@@ -47,6 +47,19 @@ test('repeated page and missing pre-click range never trigger a blind click',asy
   const stopped=await collectCategory(tab,'books',{settleDelayMs:0}); assert.equal(stopped.coverage,'partial'); assert.equal(clicks,0);
   scans=[first,first,first]; const repeated=await collectCategory(tab,'books',{settleAttempts:3,settleDelayMs:0}); assert.equal(repeated.coverage,'partial'); assert.equal(repeated.records.length,1); assert.equal(clicks,1);
 });
+test('waits through stable stale rows and preserves persistent overlap as partial',async()=>{
+  const first=page(1,2,4,[row('1'),row('2')]);
+  const stale=page(3,4,4,[row('1'),row('2')]);
+  const second=page(3,4,4,[row('3'),row('4')]);
+  let scans=[first,first,first,stale,stale,second,second];
+  const tab={playwright:{evaluate:async()=>scans.shift() ?? second,locator:()=>({click:async()=>{}})}};
+  const result=await collectCategory(tab,'books',{settleDelayMs:0,settleAttempts:6});
+  assert.equal(result.coverage,'complete-observed'); assert.deepEqual(result.records.map(r=>r.sourceId),['1','2','3','4']);
+  scans=[first,first,first,stale,stale];
+  tab.playwright.evaluate=async()=>scans.shift() ?? stale;
+  const partial=await collectCategory(tab,'books',{settleDelayMs:0,settleAttempts:3});
+  assert.equal(partial.coverage,'partial'); assert.equal(partial.records.length,4); assert.equal(partial.diagnostics.duplicateCount,2);
+});
 test('cache requires consent and never replaces an existing richer file',async()=>{
   let dir=await mkdtemp(join(tmpdir(),'book-cache-test-')); try {
     let path=join(dir,'cache.json'); const capture=assessPages([page(1,1,1,[row('1')])],'books');

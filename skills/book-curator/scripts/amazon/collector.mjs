@@ -67,28 +67,32 @@ export async function collectCategory(tab, category, options = {}) {
   const delay = options.settleDelayMs ?? 250;
   const signature = p => JSON.stringify([p.range, p.rows.map(r => [r.sourceType, r.sourceId])]);
   const coherent = p => Array.isArray(p.range) && p.range.length === 3 && p.range.every(Number.isSafeInteger) && p.range[0] >= 1 && p.range[1] >= p.range[0] && p.range[1] <= p.range[2] && p.rows.length === p.range[1] - p.range[0] + 1;
+  const observedIds = new Set();
+  const key = r => r.sourceId && r.sourceType ? `${r.sourceType}:${r.sourceId}` : null;
   async function settled(expectedStart) {
-    let last = null;
+    let last = null, ambiguous = null;
     for (let n = 0; n < attempts; n++) {
       const p = await tab.playwright.evaluate(scanPage);
       if (p.challenge) return {failure:'human verification or sign-in required'};
       if (p.category !== category) return {failure:'unexpected source or category'};
       if (coherent(p) && p.range[0] === expectedStart) {
         const sig = signature(p);
-        if (sig === last) return {page:p};
+        const overlaps = p.rows.some(r => key(r) && observedIds.has(key(r)));
+        if (sig === last && !overlaps) return {page:p};
+        if (sig === last && overlaps) ambiguous = p;
         last = sig;
       } else last = null;
       await new Promise(resolve => setTimeout(resolve, delay));
     }
-    return {failure:'page did not settle at expected range'};
+    return ambiguous ? {page:ambiguous, failure:'page contains previously observed identifiers after settling'} : {failure:'page did not settle at expected range'};
   }
   try {
     let expected = 1;
     for (let n = 0; n < maxPages; n++) {
       const result = await settled(expected);
-      if (result.failure) { failure = result.failure; break; }
       const page = result.page;
-      pages.push(page);
+      if (page) { pages.push(page); for (const row of page.rows) if (key(row)) observedIds.add(key(row)); }
+      if (result.failure) { failure = result.failure; break; }
       if (page.range[1] >= page.range[2]) break;
       const nextNumber = Math.floor((page.range[0] - 1) / (page.range[1] - page.range[0] + 1)) + 2;
       // Re-read immediately before the click, checking both coherent range and control.
