@@ -200,19 +200,21 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     if (c.deliver === 'download') { // initiation only; the envelope is retained (bounded) until the caller releases it or it expires
       const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
       const file = `gc-wishlist-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
-      const retainMs = Math.min(Math.max(Number(c.retainMs) || 600000, 1000), 3600000);
+      const retainMs = Math.min(Math.max(Number(c.retainMs) || 600000, 1000), 3600000), expiresAt = Date.now() + retainMs;
+      window.__gcWishlistRelease?.(); // a new delivery replaces and releases any earlier retained one (timer and state)
       const start = () => {
         const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
         a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
       };
       const release = () => { clearTimeout(window.__gcWishlistExpiry); delete window.__gcWishlistRedeliver; delete window.__gcWishlistRelease; delete window.__gcWishlistExpiry; return 'released'; };
-      window.__gcWishlistRedeliver = () => { start(); return {downloadInitiated: true, retry: true, file, bytes}; };
+      // Timers can be delayed in background tabs, so redelivery checks the absolute expiry as well as the timer.
+      window.__gcWishlistRedeliver = () => { if (Date.now() > expiresAt) { release(); return {expired: true, retry: false}; } start(); return {downloadInitiated: true, retry: true, file, bytes}; };
       window.__gcWishlistRelease = release;
       window.__gcWishlistExpiry = setTimeout(release, retainMs);
       start();
       const d = envelope.diagnostics;
-      return {downloadInitiated: true, file, bytes, retainedForMs: retainMs, records: c.records.length, expected: d.expectedCount,
+      return {downloadInitiated: true, source: 'wishlist', capturedAt: envelope.capturedAt, file, bytes, retainedForMs: retainMs, records: c.records.length, expected: d.expectedCount,
         complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view,
         note: 'Initiation only. Confirm the file exists with the reported byte count before using it.'};
     }

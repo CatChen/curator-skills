@@ -207,4 +207,31 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   assert.equal(JSON.parse(await z.state.downloads[0].blob.text()).records.length, 29);
   z.ctx.window.__gcWishlistRelease();
 }
+// 10b. Retained delivery: a new delivery replaces and releases the earlier one; redelivery checks an absolute expiry.
+{
+  const p = makeWishlistPage({n: 12});
+  const cleared = []; const origClear = p.ctx.clearTimeout; p.ctx.clearTimeout = id => { cleared.push(id); return origClear(id); };
+  const first = j(await p.run({deliver: 'download', retainMs: 600000}));
+  const firstTimer = p.ctx.window.__gcWishlistExpiry;
+  assert.ok(firstTimer !== undefined);
+  assert.equal(first.source, 'wishlist'); assert.match(first.capturedAt, /^\d{4}-\d\d-\d\dT/); // non-filtered summary facts for the saver to check
+  const second = j(await p.run({deliver: 'download', retainMs: 700000}));
+  assert.ok(cleared.includes(firstTimer), 'the earlier retained delivery timer must be cleared when replaced');
+  assert.notEqual(p.ctx.window.__gcWishlistExpiry, firstTimer);
+  assert.equal(second.retainedForMs, 700000);
+  assert.equal(p.state.downloads.length, 2);
+  p.ctx.window.__gcWishlistRelease();
+  // background tabs can delay timers: redelivery must not trust the timer alone
+  const q = makeWishlistPage({n: 12});
+  q.ctx.setTimeout = (fn, ms, ...a) => (ms === 1234 ? 0 : setTimeout(fn, ms, ...a)); // drop only the expiry timer, as a stalled timer would
+  const sum = j(await q.run({deliver: 'download', retainMs: 1234}));
+  assert.equal(sum.retainedForMs, 1234);
+  assert.equal(typeof q.ctx.window.__gcWishlistRedeliver, 'function');
+  const before = q.state.downloads.length;
+  await new Promise(res => setTimeout(res, 1400));
+  assert.equal(typeof q.ctx.window.__gcWishlistRedeliver, 'function', 'timer never fired, so the function is still present');
+  const late = j(q.ctx.window.__gcWishlistRedeliver());
+  assert.equal(late.expired, true); assert.equal(q.state.downloads.length, before, 'an expired retained envelope must not be re-downloaded');
+  assert.equal(q.ctx.window.__gcWishlistRedeliver, undefined, 'expired state is released');
+}
 console.log('Claude Code page script behavior checks passed');
