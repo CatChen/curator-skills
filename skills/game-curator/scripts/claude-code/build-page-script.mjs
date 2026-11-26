@@ -6,13 +6,13 @@
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from '../browser/wishlist-rows.mjs';
-import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord} from '../browser/library-rows.mjs';
+import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord, libraryLabelCount, libraryFieldsKey} from '../browser/library-rows.mjs';
 import {sha256Hex, makeWaiter, deliverEnvelope} from './page-common.mjs';
 
 const dir = new URL('.', import.meta.url);
 export const PAGES = {
   wishlist: {functions: [snapshotWishlist, mergeWishlistRow, toWishlistRecords]},
-  library: {functions: [snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord]},
+  library: {functions: [snapshotLibrary, libraryLabelCount, libraryFieldsKey, mergeLibraryRow, normalizeLibraryRecord]},
 };
 const COMMON = [sha256Hex, makeWaiter, deliverEnvelope];
 const inline = fns => fns.map(f => '  ' + f.toString().replace(/\n/g, '\n  ')).join('\n').trimStart();

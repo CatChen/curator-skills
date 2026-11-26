@@ -6,20 +6,23 @@ import fs from 'node:fs';
 // rowText(i) builds the labeled text for game i (1-based); by default every 3rd game has playtime, every 6th achievements.
 export function makeLibraryPage({n = 100, chunk = 25, chunkMs = 20, requireScroll = false, scrollChunk = 25, countText = undefined, search = '', tab = 'all', lang = 'en',
   width = 1280, owner = true, appidOf = i => 2000 + i, nameOf = i => `Game ${i}`, rowText, sameName = false, path = '/id/test/games'} = {}) {
-  const state = {rendered: 0, scrolls: 0, observers: new Set(), n, count: n, search, tab, lang, downloads: []};
+  const state = {rendered: 0, scrolls: 0, observers: new Set(), n, count: n, search, tab, lang, downloads: [], epoch: 0, churn: 0, late: new Map()};
   const notify = () => { for (const cb of [...state.observers]) cb(); };
   const defaultText = i => {
     const lines = [nameOf(i)];
     if (i % 3 === 0) lines.push('TOTAL PLAYED', `${i}.5 hours`, 'LAST PLAYED', 'May 23, 2025');
     if (i % 6 === 0) lines.push('ACHIEVEMENTS', `${i % 10}/${(i % 10) + 5}`);
-    lines.push('My Game Stats', 'My Game Content', owner ? 'DOWNLOAD' : 'Public');
+    if (owner) lines.push('My Game Stats', 'My Game Content', 'DOWNLOAD'); // owner-only controls; a public view shows none
+    else lines.push('Public');
     return lines.join('\n');
   };
-  const text = rowText ?? defaultText;
+  const baseText = rowText ?? defaultText;
+  // churn: volatile client text (install size) that changes without any library change; late: a labeled value that appears after rendering
+  const text = i => baseText(i) + (i === 1 ? `\n${state.churn} GB` : '') + (state.late.get(i) ?? '');
   const anchors = () => {
     const out = [];
     for (let i = 1; i <= state.rendered; i++) {
-      const row = {innerText: text(i)}, id = appidOf(i), name = nameOf(i);
+      const row = {innerText: text(i)}, id = appidOf(i) + state.epoch * 10000, name = nameOf(i);
       const title = {href: `https://store.steampowered.com/app/${id}/`, getAttribute: k => (k === 'aria-label' ? null : null), innerText: name, querySelector: () => null, closest: () => row};
       const image = {href: `https://store.steampowered.com/app/${id}/`, getAttribute: () => null, innerText: '', querySelector: () => ({alt: name}), closest: () => row};
       out.push(title, image);

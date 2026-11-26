@@ -68,6 +68,44 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   assert.ok(e2.diagnostics.restarts >= 1); assert.equal(e2.diagnostics.view.tab, 'completed');
   assert.ok(e2.warnings.some(w => /does not select the "All Games" tab/.test(w)));
 }
+// 4a. A second view change keeps only coherent batches and the envelope describes THOSE batches, not the page it stopped on.
+{
+  const p = makeLibraryPage({n: 150, chunk: 10, chunkMs: 25});
+  setTimeout(() => { p.state.epoch = 1; p.state.search = 'first'; p.notify(); }, 60);   // first change: the collector restarts on the new view
+  setTimeout(() => { p.state.epoch = 2; p.state.search = ''; p.notify(); }, 140); // second change (a different search STATE; text edits within an active search are not observable): stop, keep the coherent batch only
+  const e = j(await p.run(fast));
+  assert.equal(e.diagnostics.stopReason, 'view-changed'); assert.equal(e.diagnostics.complete, false); assert.equal(e.diagnostics.restarts, 1);
+  const epochs = new Set(e.records.map(r => Math.floor(r.appid / 10000)));
+  assert.ok(epochs.size <= 1, `records must come from one view, saw epochs ${[...epochs]}`);
+  assert.ok(!epochs.has(Math.floor(2000 / 10000) + 2), 'no row from the view the page stopped on may be included');
+  assert.equal(e.diagnostics.view.search, 'active'); // the batches' view: the first change's search state, not the final page
+  assert.equal(e.diagnostics.viewAtStop.view.search, 'empty'); // where the page was when collection stopped
+  assert.ok(e.warnings.some(w => /only the batches collected before the change/.test(w)));
+  // owner evidence describes the retained rows, not whatever the page shows now
+  assert.equal(e.diagnostics.ownerControls, e.records.some(r => /DOWNLOAD/.test(r.pageText)));
+}
+// 4c. A changed displayed count or tab never leaks rows into the batches either.
+{
+  const p = makeLibraryPage({n: 150, chunk: 10, chunkMs: 25});
+  setTimeout(() => { p.state.epoch = 1; p.state.tab = 'completed'; p.notify(); }, 70);
+  setTimeout(() => { p.state.epoch = 2; p.state.tab = 'followed'; p.notify(); }, 150);
+  const e = j(await p.run(fast));
+  assert.equal(e.diagnostics.stopReason, 'view-changed');
+  assert.equal(e.diagnostics.view.tab, 'completed'); assert.equal(e.diagnostics.viewAtStop.view.tab, 'followed');
+  assert.ok(new Set(e.records.map(r => Math.floor(r.appid / 10000))).size <= 1);
+}
+// 4d. Settling: volatile client text does not keep the collector waiting; a late labeled value does reset it and is captured.
+{
+  const p = makeLibraryPage({n: 60, chunk: 30, chunkMs: 15});
+  const timer = setInterval(() => { p.state.churn++; p.notify(); }, 20);
+  const t0 = Date.now(); const e = j(await p.run({quietMs: 250, stallMs: 400})); clearInterval(timer);
+  assert.equal(e.diagnostics.complete, true); assert.ok(Date.now() - t0 < 1500, 'size/install churn must not starve completion');
+  const q = makeLibraryPage({n: 60, chunk: 30, chunkMs: 15});
+  setTimeout(() => { q.state.late.set(5, '\nTOTAL PLAYED\n9 hours'); q.notify(); }, 200);
+  const late = j(await q.run({quietMs: 450, stallMs: 600}));
+  assert.equal(late.records.find(r => r.name === 'Game 5').hours, 9, 'a meaningful late change inside the quiet period is captured');
+  assert.equal(late.diagnostics.complete, true);
+}
 // 4b. Resume bound to the view: a changed displayed count discards earlier state.
 {
   const p = makeLibraryPage({n: 150, chunk: 10, chunkMs: 25});

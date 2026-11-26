@@ -32,9 +32,19 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     }
     return {expected: count ? Number(count[1].replace(/,/g, '')) : null, records: [...rows.values()]};
   }
+  function libraryLabelCount(record) {
+    const n = normalizeLibraryRecord(record);
+    return (n.hours !== null) + (n.lastPlayedDisplay !== null) + (n.achievements !== null);
+  }
+  function libraryFieldsKey(record) {
+    const n = normalizeLibraryRecord(record);
+    return JSON.stringify([n.name || null, n.hours, n.lastPlayedDisplay, n.achievements]);
+  }
   function mergeLibraryRow(rows, row) {
     const previous = rows.get(row.appid);
-    if (!previous || (row.pageText?.length || 0) > (previous.pageText?.length || 0)) rows.set(row.appid, previous && !row.name && previous.name ? {...row, name: previous.name} : row);
+    const richer = !previous || libraryLabelCount(row) > libraryLabelCount(previous)
+      || (libraryLabelCount(row) === libraryLabelCount(previous) && (row.pageText?.length || 0) > (previous.pageText?.length || 0));
+    if (richer) rows.set(row.appid, previous && !row.name && previous.name ? {...row, name: previous.name} : row);
     else if (!previous.name && row.name) previous.name = row.name;
     return rows.get(row.appid);
   }
@@ -125,15 +135,20 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     const {got, stats} = S;
     const outOfTotal = () => S.activeMs + Date.now() - callStart > maxMs || stats.steps > maxSteps;
 
-    // Rows arrive progressively (about 2 s for 800 rows). Merge every observation; report whether anything new rendered.
+    // Rows arrive progressively (about 2 s for 800 rows). The view is checked BEFORE anything is merged: a snapshot taken from a
+    // different view, count or search is never added to the batches already collected, so every retained row belongs to the view and
+    // count the envelope reports. "Changed" means a new game or a meaningful change (name, playtime, last played, achievements);
+    // volatile client state in the row text (install size, DOWNLOAD/UNINSTALL/UPDATE) does not reset the quiet period.
     const observe = () => {
-      const s = snapshotLibrary(); let changed = false;
+      const s = snapshotLibrary();
+      if (viewChanged(s)) return {s, changed: false, viewChanged: true};
+      let changed = false;
       for (const r of s.records) {
-        const before = got.get(r.appid), len = before?.pageText.length, hadName = !!before?.name;
+        const before = got.get(r.appid), beforeKey = before && libraryFieldsKey(before);
         const after = mergeLibraryRow(got, r);
-        if (!before || after.pageText.length !== len || (!hadName && !!after.name)) changed = true;
+        if (!before || libraryFieldsKey(after) !== beforeKey) changed = true;
       }
-      return {s, changed};
+      return {s, changed, viewChanged: false};
     };
     const viewChanged = s => (s.expected !== null && expected !== null && s.expected !== expected) || sigOf(viewInfo(), s.expected ?? expected) !== sig;
     // The page may scroll the document or an inner container; only used to coax more rows if rendering stalls.
@@ -152,8 +167,8 @@ await (window.__gcLibraryRun = async (opts = {}) => {
         S.activeMs += Date.now() - callStart; S.touched = Date.now();
         return {inProgress: true, collected: got.size, expected, elapsedMs: S.activeMs, calls: stats.calls, hint: 'Run window.__gcLibraryRun({}) again to resume'};
       }
-      const {s, changed} = observe();
-      if (viewChanged(s)) { // rows from a different view would be mixed in: restart once, then stop with a warning
+      const {s, changed, viewChanged: moved} = observe();
+      if (moved) { // the page is now a different view: nothing from it was merged. Restart once; the second time stop with the coherent batches only
         if (stats.restarts >= 1) { stopReason = 'view-changed'; break; }
         stats.restarts++; S.warnings.push('The library view or item count changed during collection; restarted once.');
         got.clear(); S.scrollStalls = 0; expected = s.expected ?? expected; view = viewInfo(); sig = S.sig = sigOf(view, expected); S.quietSince = Date.now(); continue;
@@ -169,10 +184,11 @@ await (window.__gcLibraryRun = async (opts = {}) => {
       stats.waits++; await nextMutation(reached ? Math.max(50, quietMs - quiet) : Math.min(400, stallMs));
     }
     if (stopReason === 'complete' && viewChanged(snapshotLibrary())) stopReason = 'view-changed'; // last look before emitting
-    if (stopReason === 'view-changed') view = viewInfo();
+    // On a view change the envelope keeps describing the batches that were collected (view, expected); the page's present state is reported separately.
+    const viewAtStop = stopReason === 'view-changed' ? {view: viewInfo(), expected: snapshotLibrary().expected} : null;
     S.activeMs += Date.now() - callStart;
     const c = {startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, got, stopReason, view, stats, activeMs: S.activeMs, calls: stats.calls,
-      warnings: S.warnings, deliver: S.opts.deliver, retainMs: S.opts.retainMs};
+      warnings: S.warnings, deliver: S.opts.deliver, retainMs: S.opts.retainMs, viewAtStop};
     cleanup();
     return envelopeOf(c);
   } catch (error) { cleanup(); throw error; }
@@ -190,11 +206,12 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     if (c.view.language && !/^en/i.test(c.view.language)) warnings.push(`Page language is "${c.view.language}"; labels are parsed in English only, so playtime, last played and achievements may be missing.`);
     if (c.view.tab !== 'all') warnings.push('The page URL does not select the "All Games" tab; membership may be partial.');
     if (c.view.search === 'active') warnings.push('A game-name search is active, so membership is filtered.');
+    if (c.viewAtStop) warnings.push('The page changed to a different view or count while collecting; the records are only the batches collected before the change, and diagnostics.viewAtStop describes the page when collection stopped.');
     for (const r of records) if (r.achievements && r.achievements.unlocked > r.achievements.total) warnings.push(`AppID ${r.appid}: achievement counts are inconsistent.`);
     warnings.push('Missing playtime, last played or achievements labels are unknown values (null), not zero: a game without them may still have been played.');
     warnings.push('DOM capture may omit unrendered items; verify account and source membership. Consistency was checked for the displayed count, tab and search only.');
     const sha = await sha256Hex(new TextEncoder().encode(JSON.stringify(records)));
-    const text = r => r.pageText;
+    const OWNER_CONTROL = /\b(DOWNLOAD|UNINSTALL|UPDATE)\b|My Game Content/;
     const envelope = {
       format: 'game-curator-steam-export', version: 1, source: 'library',
       capturedAt: c.finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
@@ -204,7 +221,8 @@ await (window.__gcLibraryRun = async (opts = {}) => {
         // Informational counts of rows that carried each label; absent labels are unknown, not zero.
         rowsWithPlaytime: records.filter(r => r.hours !== null).length, rowsWithLastPlayed: records.filter(r => r.lastPlayedDisplay !== null).length,
         rowsWithAchievements: records.filter(r => r.achievements !== null).length, rowsWithoutName: records.filter(r => !r.name).length,
-        ownerControls: records.some(r => /\bDOWNLOAD\b/.test(text(r))) || /REMOTE DOWNLOAD TO/i.test(document.body.innerText),
+        ownerControls: records.some(r => OWNER_CONTROL.test(r.pageText)), // from the retained rows only, never from whatever the page shows now
+        viewAtStop: c.viewAtStop,
         urlPath: location.pathname.replace(/\/+$/, ''), recordsSha256: sha, extraction: 'claude-code-page-script'},
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
