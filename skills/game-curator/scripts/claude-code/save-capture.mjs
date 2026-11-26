@@ -176,14 +176,24 @@ const SOURCES = {
       const count = n => Number.isSafeInteger(n) && n >= 0;
       if (!Array.isArray(d.years) || !d.years.every(y => Number.isInteger(y) && y >= 2000 && y <= 2099) || new Set(d.years).size !== d.years.length) errors.push('diagnostics.years must be distinct years');
       for (const k of ['yearsPending', 'yearAttempts']) if (!count(d[k])) errors.push(`diagnostics.${k} must be a non-negative integer`);
+      for (const k of ['unsettledYears', 'truncatedYears']) {
+        if (!Array.isArray(d[k]) || new Set(d[k]).size !== d[k].length || !d[k].every(y => Array.isArray(d.years) && d.years.includes(y))) errors.push(`diagnostics.${k} must list distinct visited years`);
+      }
       if (Array.isArray(d.years)) {
         if (env.diagnosticsScope === undefined && JSON.stringify(d.years) !== JSON.stringify(recs.map(r => r.year))) errors.push('diagnostics.years disagrees with the records');
         if (env.diagnosticsScope !== undefined && recs.length === 1 && !d.years.includes(recs[0].year)) errors.push('the annual record is not among the original capture\'s years');
+        if (env.diagnosticsScope !== undefined && (d.uniqueCount !== d.years.length)) errors.push('the original capture\'s year list disagrees with its record count');
+        if (env.diagnosticsScope !== undefined && env.diagnostics?.attestations?.split && env.diagnostics.attestations.split.originalRecords !== d.uniqueCount) errors.push('the split attestation\'s original record count disagrees with the original capture\'s diagnostics');
         if (count(d.yearsPending) && d.expectedCount !== d.years.length + d.yearsPending) errors.push('diagnostics.expectedCount disagrees with the discovered years');
         if (count(d.yearAttempts) && d.yearAttempts < d.years.length) errors.push('year attempts are inconsistent with the visited years');
       }
     },
-    incompleteReasons: recs => (recs.some(r => typeof r?.semanticText === 'string' && /(^|\n)\s*LOADING\.\.\.\s*(\n|$)/i.test(r.semanticText)) ? ['a report still contained a LOADING... placeholder, so its text may be partial'] : []),
+    // Per-report reasons a single year must not be promoted, decided for each per-year file (other years of the same capture are unaffected).
+    yearIncomplete: (d, r) => [
+      ...(typeof r?.semanticText === 'string' && /(^|\n)\s*LOADING\.\.\.\s*(\n|$)/i.test(r.semanticText) ? ['the report still contained a LOADING... placeholder, so its text may be partial'] : []),
+      ...(d?.unsettledYears?.includes(r?.year) ? ['the report had not stopped changing when it was read, or the wait budget ended, so it may be incomplete'] : []),
+      ...(d?.truncatedYears?.includes(r?.year) ? ['the report\'s game references were truncated at the collector\'s limit, so it is incomplete'] : []),
+    ],
     ownerEvidence: d => d?.ownerControls === true, ownerLabel: 'owner-only evidence (the page visibility control on every report)',
     viewOk: e => e?.diagnostics?.view?.kind === 'annual-report',
     viewConflict: e => { const v = e?.diagnostics?.view; return !!v && v.kind != null && v.kind !== 'annual-report'; },
@@ -291,7 +301,6 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
     const sp = d?.attestations?.split;
     if (!(isPlainObject(sp) && recs.length === 1 && sp.year === recs[0].year && sp.recordSha256 === sha256(JSON.stringify(recs[0])) && Number.isSafeInteger(sp.originalRecords) && sp.originalRecords >= 1)) errors.push('a per-year file lacks a matching split attestation for its record');
   }
-  incomplete.push(...(rules.incompleteReasons?.(recs) ?? []));
   if (isPlainObject(d) && annual) {
     if (typeof d.recordsSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.recordsSha256)) errors.push('the original capture\'s records checksum is missing');
     if (!Number.isSafeInteger(d.uniqueCount) || d.uniqueCount < 1) errors.push('diagnostics.uniqueCount is invalid');
@@ -484,6 +493,9 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
   return result;
 }
 
+// Reasons one report of a Replay capture must not be promoted (decided per year, so other years of the same capture are unaffected).
+export const replayYearIncomplete = (env, record) => SOURCES.replay.yearIncomplete(env.diagnostics, record);
+
 // Split a validated multi-year Replay capture into one envelope per year, in year order. Each keeps the capture's metadata (account, access
 // scope, warnings, observed diagnostics and attestations), is labeled as carrying the ORIGINAL multi-year capture's diagnostics, and records a
 // checksum of its own record so the per-year file stays verifiable without the original.
@@ -573,7 +585,7 @@ if (isMain()) {
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {
         const year = annual.records[0].year;
-        try { const r = save(annual, path.join(dest, 'replay'), {...policy, stem: String(year)}); outcomes.push({year, action: r.action, reason: r.reason, notes: r.notes, target: r.target, backup: r.backup, bytes: r.bytes, sha256: r.sha256}); }
+        try { const r = save(annual, path.join(dest, 'replay'), {...policy, incomplete: [...incomplete, ...replayYearIncomplete(annual, annual.records[0])], stem: String(year)}); outcomes.push({year, action: r.action, reason: r.reason, notes: r.notes, target: r.target, backup: r.backup, bytes: r.bytes, sha256: r.sha256}); }
         catch (e) { outcomes.push({year, error: String(e.message ?? e)}); }
       }
       console.log(JSON.stringify({source: 'replay', capturedAt: env.capturedAt, records: env.records.length, years: outcomes, dryRun}, null, 2));

@@ -116,16 +116,19 @@ await (window.__gcReplayRun = async (opts = {}) => {
     let snap = snapshotReplay();
     for (let i = 0; !snap.loaded && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotReplay(); }
     if (!snap.loaded) throw new Error('The Replay report did not finish loading; it may be signed out or redirected. Saved data was kept: verify sign-in, navigate to the requested year and run this file again (or pass {fresh:true} or {cancel:true})');
-    // The report renders in stages (text, then game images, then counters and rank badges, with animation for a few seconds): wait until its text and
-    // game-reference count have been unchanged for a stable window (default 1200 ms, at most 10 s) before reading it, so an early partial render is not taken.
-    // A "LOADING..." line inside the text means some section has not rendered yet (the whole-text placeholder is only the first stage).
+    // The report renders in stages (text, then game images, then counters and rank badges, with animation for a few seconds). Wait until its whole text and
+    // its deduplicated game references have been identical for a stable window (default 1200 ms) before reading it, bounded by a cap (default 10 s) and the
+    // call budget. A "LOADING..." line inside the text also counts as not settled. If the window is not reached the report is still kept, but flagged below.
     const placeholder = t => /(^|\n)\s*LOADING\.\.\.\s*(\n|$)/i.test(t);
+    let settled = false;
     {
-      const key = k => `${k.text.length}:${k.text.slice(-200)}:${k.apps.length}`, settleStart = Date.now(), stableFor = opts.settleMs ?? 1200;
-      let last = key(snap), stableSince = Date.now();
-      while ((Date.now() - stableSince < stableFor || placeholder(snap.text)) && Date.now() - settleStart < (opts.settleCapMs ?? 10000) && left() > 0) {
+      const content = k => k.text + '\u0000' + JSON.stringify(dedupeReplayApps(k.apps)), settleStart = Date.now(), stableFor = opts.settleMs ?? 1200, cap = opts.settleCapMs ?? 10000;
+      let last = content(snap), stableSince = Date.now();
+      for (;;) {
+        if (Date.now() - stableSince >= stableFor && !placeholder(snap.text)) { settled = true; break; }
+        if (Date.now() - settleStart >= cap || left() <= 0) break;
         await sleep(250); snap = snapshotReplay();
-        const k = key(snap); if (k !== last) { last = k; stableSince = Date.now(); }
+        const k = content(snap); if (k !== last) { last = k; stableSince = Date.now(); }
       }
     }
     if (!snap.loaded) throw new Error('The Replay report did not finish loading; saved data was kept (run this file again, or pass {fresh:true} or {cancel:true})');
@@ -137,7 +140,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
     const has = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
     // Returns null if the state is acceptable, otherwise the reason it is not.
     const invalid = S => {
-      if (!has(S, ['v', 'accountPath', 'startedAt', 'born', 'touched', 'activeMs', 'records', 'visited', 'pending', 'requested', 'repeats', 'attempts', 'calls', 'owner', 'warnings', 'opts', 'view'])) return 'unexpected shape';
+      if (!has(S, ['v', 'accountPath', 'startedAt', 'born', 'touched', 'activeMs', 'records', 'visited', 'pending', 'requested', 'repeats', 'attempts', 'calls', 'owner', 'warnings', 'opts', 'view', 'unsettled', 'truncated'])) return 'unexpected shape';
       if (S.v !== 1) return 'unsupported version';
       if (typeof S.accountPath !== 'string' || !/^\/replay\/[A-Za-z0-9_-]{1,64}$/.test(S.accountPath)) return 'bad account path';
       if (typeof S.startedAt !== 'string' || !Number.isFinite(Date.parse(S.startedAt)) || S.startedAt.length > 40) return 'bad start time';
@@ -149,6 +152,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'annual-report' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.years || !list.every(isYear) || new Set(list).size !== list.length) return 'bad year list';
       if (!(S.requested === null || isYear(S.requested))) return 'bad requested year';
+      for (const list of [S.unsettled, S.truncated]) if (!Array.isArray(list) || list.length > HARD.years || !list.every(y => S.visited.includes(y)) || new Set(list).size !== list.length) return 'bad flagged years';
       if (!Array.isArray(S.records) || S.records.length > HARD.years) return 'too many records';
       for (const r of S.records) {
         if (!has(r, ['year', 'semanticText', 'apps']) || !isYear(r.year) || typeof r.semanticText !== 'string' || !r.semanticText || r.semanticText.length > HARD.text || !Array.isArray(r.apps) || r.apps.length > HARD.apps) return 'bad record';
@@ -159,7 +163,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       return null;
     };
     const fresh = why => { const S = {v: 1, accountPath: snap.accountPath, startedAt, born: Date.now(), touched: Date.now(), activeMs: 0, records: [], visited: [], pending: [], requested: null, repeats: 0, attempts: 0,
-      calls: 0, owner: snap.ownerControls, warnings: [], opts: {}, view: {kind: 'annual-report', language: snap.language}}; if (why) S.warnings.push(why); return S; };
+      calls: 0, owner: snap.ownerControls, warnings: [], unsettled: [], truncated: [], opts: {}, view: {kind: 'annual-report', language: snap.language}}; if (why) S.warnings.push(why); return S; };
 
     let S = null, viewAtStop = null, stopReason = null;
     const stored = raw();
@@ -193,8 +197,10 @@ await (window.__gcReplayRun = async (opts = {}) => {
           S.pending.unshift(S.requested); S.warnings.push(`Replay navigation did not reach requested year ${S.requested}; merged year ${snap.year} and kept the requested year pending.`);
         }
         S.requested = null; S.repeats = 0;
-        if (placeholder(snap.text)) S.warnings.push(`The ${snap.year} report still showed a LOADING... placeholder when it was read, so its text may be partial.`);
-        S.records.push({year: snap.year, semanticText: snap.text, apps: dedupeReplayApps(snap.apps).slice(0, HARD.apps)});
+        const refs = dedupeReplayApps(snap.apps), cut = refs.length > HARD.apps;
+        if (!settled) { S.unsettled.push(snap.year); S.warnings.push(placeholder(snap.text) ? `The ${snap.year} report still showed a LOADING... placeholder when it was read, so its text may be partial.` : `The ${snap.year} report was still changing, or the wait budget ended, when it was read, so it may be incomplete.`); }
+        if (cut) { S.truncated.push(snap.year); S.warnings.push(`The ${snap.year} report has ${refs.length} game references; only the first ${HARD.apps} were kept, so it is incomplete.`); }
+        S.records.push({year: snap.year, semanticText: snap.text, apps: refs.slice(0, HARD.apps)});
         S.visited.push(snap.year); S.attempts++; S.owner = S.owner && snap.ownerControls;
         for (const y of replayYears(snap.links, snap.accountPath)) if (!S.visited.includes(y) && !S.pending.includes(y)) S.pending.push(y);
         S.pending = S.pending.filter(y => !S.visited.includes(y)).slice(0, HARD.years);
@@ -221,6 +227,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
     const done = stopReason === 'complete' && pending === 0;
     const warnings = [...S.warnings];
     if (pending) warnings.push('Year discovery stopped with unvisited reports.');
+    if (S.unsettled.length || S.truncated.length) warnings.push('Reports flagged as unsettled or truncated are kept as partial records and are never promoted (see diagnostics.unsettledYears and diagnostics.truncatedYears).');
     if (!done) warnings.push(`Incomplete capture (stop reason: ${stopReason}); do not treat it as every annual report.`);
     if (viewAtStop) warnings.push('The tab moved to a different account while collecting; only the reports collected before the change are included, and diagnostics.viewAtStop describes where it stopped.');
     if (!S.owner) warnings.push('Owner-only controls were not seen on every report, so this may be a public view.');
@@ -230,7 +237,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
     const envelope = {
       format: 'game-curator-steam-export', version: 1, source: 'replay',
       capturedAt: finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
-      diagnostics: {expectedCount: S.visited.length + pending, uniqueCount: records.length, years: S.visited, yearsPending: pending, yearAttempts: S.attempts,
+      diagnostics: {expectedCount: S.visited.length + pending, uniqueCount: records.length, years: S.visited, yearsPending: pending, yearAttempts: S.attempts, unsettledYears: S.unsettled, truncatedYears: S.truncated,
         complete: done, stopReason, startedAt: S.startedAt, finishedAt, elapsedMs: S.activeMs, calls: S.calls, viewportWidth: innerWidth,
         view: S.view, ownerControls: S.owner, viewAtStop, recordsSha256: sha, extraction: 'claude-code-page-script', carrier: 'sessionStorage-data-only'},
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them

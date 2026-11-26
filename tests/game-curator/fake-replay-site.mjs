@@ -6,8 +6,8 @@ import fs from 'node:fs';
 export const ACCOUNT = '/replay/76561190000000001';
 export const OTHER = '/replay/76561190000000002';
 
-export function makeReplaySite({account = ACCOUNT, years = [2025, 2022, 2023, 2024], owner = true, lang = 'en', width = 1280, redirects = {}, loadingReads = 0, stageReads = 0, textFor, appsFor, linkYears} = {}) {
-  const site = {account, years, owner, lang, redirects, downloads: [], visits: [], store: new Map(), loadingReads, stageReads, current: null};
+export function makeReplaySite({account = ACCOUNT, years = [2025, 2022, 2023, 2024], owner = true, lang = 'en', width = 1280, redirects = {}, loadingReads = 0, stageReads = 0, driftReads = 0, alwaysChanging = false, textFor, appsFor, linkYears} = {}) {
+  const site = {account, years, owner, lang, redirects, downloads: [], visits: [], store: new Map(), loadingReads, stageReads, driftReads, alwaysChanging, current: null};
   let ctx = null, reads = 0;
   const sessionStorage = {getItem: k => (site.store.has(k) ? site.store.get(k) : null), setItem: (k, v) => site.store.set(k, String(v)), removeItem: k => site.store.delete(k)};
   const blobs = new Map();
@@ -19,10 +19,10 @@ export function makeReplaySite({account = ACCOUNT, years = [2025, 2022, 2023, 20
     const m = url.pathname.match(/^(\/replay\/[^/]+)\/(20\d{2})\/?$/);
     site.current = url.pathname;
     const acct = m?.[1], year = m ? Number(m[2]) : null;
-    const allApps = m ? appsOf(acct, year) : [], staged = () => reads <= site.loadingReads + site.stageReads;
+    const allApps = m ? appsOf(acct, year) : [], staged = () => reads <= site.loadingReads + site.stageReads, drifting = () => reads <= site.loadingReads + site.stageReads + site.driftReads;
     const head = site.owner ? `Test's\nSTEAM REPLAY ${year}\nYour Page Visibility:\nFriends Only\nShare\n` : `Test's\nSTEAM REPLAY ${year}\n`;
-    const content = {get innerText() { reads++; return m ? (reads <= site.loadingReads ? 'LOADING...' : reads <= site.loadingReads + site.stageReads ? `${head}partial render ${reads}` : head + textOf(acct, year)) : 'Sign in to Steam'; },
-      querySelectorAll: sel => (sel === 'img[src]' ? (staged() ? [] : allApps).filter(a => a.source === 'image-asset').map(a => ({alt: a.name ?? '', getAttribute: () => `https://cdn.example/steam/apps/${a.appid}/capsule.jpg`}))
+    const content = {get innerText() { reads++; return m ? (reads <= site.loadingReads ? 'LOADING...' : reads <= site.loadingReads + site.stageReads ? `${head}partial render ${reads}` : (() => { const full = head + textOf(acct, year); return site.alwaysChanging || reads <= site.loadingReads + site.stageReads + site.driftReads ? full.slice(0, -1) + String(reads % 10) : full; })()) : 'Sign in to Steam'; },
+      querySelectorAll: sel => (sel === 'img[src]' ? (staged() ? [] : allApps.map(a => (drifting() ? {...a, appid: a.appid + 1000} : a))).filter(a => a.source === 'image-asset').map(a => ({alt: a.name ?? '', getAttribute: () => `https://cdn.example/steam/apps/${a.appid}/capsule.jpg`}))
         : /\/app\//.test(sel) ? (staged() ? [] : allApps).filter(a => a.source === 'app-link').map(a => ({href: `https://store.steampowered.com/app/${a.appid}/`, innerText: a.name ?? '', querySelector: () => null})) : [])};
     const linked = m ? (linkYears ?? site.years) : [];
     const links = linked.map(y => ({href: `https://store.steampowered.com${acct}/${y}`}));

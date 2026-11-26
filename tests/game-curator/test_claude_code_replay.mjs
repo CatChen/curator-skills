@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {makeReplaySite, ACCOUNT, OTHER} from './fake-replay-site.mjs';
-import {validate, splitReplay, canonicalize, decide, checkPageSummary} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {validate, splitReplay, canonicalize, decide, checkPageSummary, replayYearIncomplete} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 
 const j = o => JSON.parse(JSON.stringify(o));
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
@@ -60,7 +60,29 @@ async function drive(site, opts = {}, {maxSteps = 30, onStep} = {}) {
 {
   const e = (await drive(makeReplaySite({years: [2025], textFor: () => 'Top games\nLOADING...\nMore'}), {settleMs: 0, settleCapMs: 300})).r;
   assert.ok(e.warnings.some(w => /still showed a LOADING\.\.\. placeholder/.test(w)));
-  assert.ok(validate(e, {accessScope: 'signed-in', incoming: true}).incomplete.some(m => /LOADING\.\.\. placeholder/.test(m)));
+  assert.ok(replayYearIncomplete(e, e.records[0]).some(m => /LOADING\.\.\. placeholder/.test(m))); assert.deepEqual(e.diagnostics.unsettledYears, [2025]);
+}
+// 2d. Review: a change that keeps the text length and the number of game references (same-length text, different AppIDs) is still a change, so the
+// report is read only after it stops, and the final content wins.
+{
+  const e = (await drive(makeReplaySite({years: [2025], driftReads: 3}), {settleMs: 200})).r;
+  assert.ok(e.records[0].semanticText.endsWith('.'), 'the drifting same-length render must not be captured'); assert.deepEqual(e.records[0].apps.map(a => a.appid), [5025, 6000]);
+  assert.deepEqual(e.diagnostics.unsettledYears, []);
+}
+// 2e. Review: a report that never stops changing (or whose wait budget ends) is kept, flagged unsettled, and reported honestly.
+{
+  const e = (await drive(makeReplaySite({years: [2025], alwaysChanging: true}), {settleMs: 600, settleCapMs: 500})).r;
+  assert.deepEqual(e.diagnostics.unsettledYears, [2025]); assert.equal(e.records.length, 1); assert.ok(e.warnings.some(w => /still changing, or the wait budget ended/.test(w)));
+  assert.ok(replayYearIncomplete(e, e.records[0]).some(m => /not stopped changing/.test(m)));
+  const e2 = (await drive(makeReplaySite({years: [2025]}), {settleMs: 600, callBudgetMs: -1900})).r; // the call budget is already spent: it cannot settle
+  assert.deepEqual(e2.diagnostics.unsettledYears, [2025]);
+}
+// 2f. Review: references beyond the collector's limit are truncated, flagged, and that report is never promoted.
+{
+  const many = Array.from({length: 450}, (_, i) => ({appid: 10000 + i, name: null, source: 'image-asset'}));
+  const e = (await drive(makeReplaySite({years: [2025], appsFor: () => many}))).r;
+  assert.equal(e.records[0].apps.length, 400); assert.deepEqual(e.diagnostics.truncatedYears, [2025]); assert.ok(e.warnings.some(w => /only the first 400 were kept/.test(w)));
+  assert.ok(replayYearIncomplete(e, e.records[0]).some(m => /truncated/.test(m)));
 }
 // 2b. A report that never loads: the script throws, keeps saved data, and says how to continue.
 {
@@ -192,6 +214,8 @@ const env0 = await page();
   bad(e => { e.records[0].year = 1999; }, /invalid year/); bad(e => { e.records[0].apps[0].source = 'x'; }, /unexpected source|checksum/); bad(e => { e.records[0].extra = 1; }, /unexpected field/);
   bad(e => { e.diagnostics.ownerControls = false; }, /signed-in scope claimed without/); bad(e => { e.diagnostics.years = [2025]; }, /years disagrees/);
   bad(e => { e.diagnostics.yearsPending = 'x'; }, /yearsPending/); bad(e => { e.records[0].semanticText = 'LOADING...'; }, /placeholder/);
+  bad(e => { e.diagnostics.unsettledYears = [2031]; }, /unsettledYears must list distinct visited years/); bad(e => { e.diagnostics.truncatedYears = [2025, 2025]; }, /truncatedYears must list distinct visited years/);
+  bad(e => { delete e.diagnostics.unsettledYears; }, /unsettledYears must list/);
   const pending = j(env0); pending.diagnostics.yearsPending = 1; pending.diagnostics.expectedCount = 5; pending.diagnostics.complete = false; pending.diagnostics.stopReason = 'budget';
   const v = validate(pending, {accessScope: 'signed-in'}); assert.deepEqual(v.errors, []); assert.ok(v.incomplete.some(m => /annual reports were not visited/.test(m)));
   assert.ok(validate({...env0, source: 'replays'}, {accessScope: 'signed-in'}).errors.some(e => /unsupported source/.test(e)));
@@ -215,6 +239,10 @@ const env0 = await page();
   const t2 = j(parts[0]); t2.records.push(j(parts[1].records[0])); assert.ok(validate(t2, {accessScope: 'signed-in'}).errors.some(e => /exactly one record/.test(e)));
   const t3 = j(parts[0]); delete t3.diagnostics.attestations.split; assert.ok(validate(t3, {accessScope: 'signed-in'}).errors.some(e => /split attestation/.test(e)));
   const t4 = j(parts[0]); t4.diagnosticsScope = 'something-else'; assert.ok(validate(t4, {accessScope: 'signed-in'}).errors.some(e => /unsupported diagnosticsScope/.test(e)));
+  // split consistency: the original capture's counts and years must agree with each other and with the split attestation
+  { const t5 = j(parts[0]); t5.diagnostics.uniqueCount = 3; assert.ok(validate(t5, {accessScope: 'signed-in'}).errors.some(e => /year list disagrees with its record count|original record count disagrees/.test(e)));
+    const t6 = j(parts[0]); t6.diagnostics.attestations.split.originalRecords = 9; assert.ok(validate(t6, {accessScope: 'signed-in'}).errors.some(e => /original record count disagrees/.test(e)));
+    const t7 = j(parts[0]); t7.diagnostics.years = [2022, 2023, 2024]; assert.ok(validate(t7, {accessScope: 'signed-in'}).errors.some(e => /year list disagrees|not among/.test(e))); }
   // decisions (per year): a legacy file without account or view evidence is never replaced; a different year is never confused
   const next = parts[3], legacy = {format: 'game-curator-steam-export', version: 1, source: 'replay', capturedAt: '2026-11-25T06:48:08.755Z', method: 'browser-dom', coverage: 'partial', warnings: [], diagnostics: {years: [2025], yearsPending: 0, yearAttempts: 1}, accessScope: 'signed-in', diagnosticsScope: 'original-multi-year-capture', records: [{year: 2025, semanticText: 't', apps: [{appid: 1, name: null, source: 'image-asset'}]}]};
   const ok = {transferVerified: true};
@@ -267,6 +295,22 @@ const env0 = await page();
   // consent revoked: nothing is written
   fs.writeFileSync(path.join(home, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":false}}');
   const before = fs.readdirSync(path.join(cache, 'replay')).length; r = run(file, summary); assert.notEqual(r.status, 0); assert.match(r.stderr, /not authorized/); assert.equal(fs.readdirSync(path.join(cache, 'replay')).length, before);
+  fs.rmSync(home, {recursive: true});
+}
+// A flagged report is kept as a partial snapshot and never promoted, while the other years of the same capture are saved normally.
+{
+  const cli = new URL('../../skills/game-curator/scripts/claude-code/save-capture.mjs', import.meta.url).pathname;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-replay-flag-')), cache = path.join(home, 'cache', 'steam'); fs.mkdirSync(cache, {recursive: true});
+  fs.writeFileSync(path.join(home, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+  const site = makeReplaySite(), {r: summary} = await drive(site, {deliver: 'download'}), env = JSON.parse(await site.downloads[0].blob.text()); site.ctx.__gcRelease();
+  env.diagnostics.unsettledYears = [2023]; env.diagnostics.truncatedYears = [2024];
+  const text = JSON.stringify(env, null, 2) + '\n', file = path.join(home, summary.file); fs.writeFileSync(file, text);
+  const r = spawnSync(process.execPath, [cli, file, '--dest', cache, '--account', 'tester', '--access-scope', 'signed-in', '--provenance', 'download', '--page-summary', JSON.stringify({...summary, bytes: Buffer.byteLength(text)})], {encoding: 'utf8'});
+  assert.equal(r.status, 0, r.stderr); const out = JSON.parse(r.stdout).years;
+  assert.deepEqual(out.map(y => [y.year, y.action]), [[2022, 'create'], [2023, 'separate'], [2024, 'separate'], [2025, 'create']]);
+  assert.match(out[1].reason, /not stopped changing/); assert.match(out[2].reason, /truncated/);
+  assert.ok(fs.existsSync(path.join(cache, 'replay', '2022.json')) && !fs.existsSync(path.join(cache, 'replay', '2023.json')) && !fs.existsSync(path.join(cache, 'replay', '2024.json')));
+  const kept = JSON.parse(fs.readFileSync(out[1].target, 'utf8')); assert.equal(kept.records[0].year, 2023); assert.deepEqual(kept.diagnostics.unsettledYears, [2023], 'the partial record keeps honest diagnostics');
   fs.rmSync(home, {recursive: true});
 }
 console.log('Claude Code Replay collector behavior checks passed');
