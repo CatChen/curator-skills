@@ -401,7 +401,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   assert.ok(validate(lib(4, {diag: {expectedCount: null}}), {accessScope: 'signed-in'}).incomplete.some(r => /count was not available/.test(r)));
   assert.ok(validate(lib(4, {diag: {complete: false, stopReason: 'no-progress'}}), {accessScope: 'signed-in'}).incomplete.some(r => /no-progress/.test(r)));
   { const e = lib(0, {records: [], diag: {expectedCount: 0, stopReason: 'empty-observed', complete: false}}); assert.ok(validate(e, {accessScope: 'unknown'}).incomplete.some(r => /empty source observed/.test(r))); }
-  assert.ok(validate({...lib(2), source: 'replay'}, {accessScope: 'signed-in'}).errors.some(e => /unsupported source/.test(e)));
+  assert.ok(validate({...lib(2), source: 'achievements'}, {accessScope: 'signed-in'}).errors.some(e => /unsupported source/.test(e)));
   // policy: view evidence is observed (tab all, empty search); no attestation exists for the library
   const lnext = lib(4, {account: 'me', at: '2026-11-27T00:00:00.000Z'});
   assert.equal(decide(null, lnext).action, 'create');
@@ -591,7 +591,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
 
 // The page scripts only read the page; the one local write path is the Blob download inside deliverEnvelope (shared by every source).
 const delivery = fn => { const i = generated.indexOf(`function ${fn}(`); return i; };
-for (const name of ['wishlist', 'library', 'reviews']) {
+for (const name of ['wishlist', 'library', 'reviews', 'replay']) {
   const src = fs.readFileSync(new URL(`../../skills/game-curator/scripts/claude-code/steam-${name}-page.js`, import.meta.url), 'utf8');
   assert.equal(src, buildPageScript(name), `steam-${name}-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs`);
   const d0 = src.indexOf('async function deliverEnvelope('), d1 = src.indexOf('\n  }\n', d0);
