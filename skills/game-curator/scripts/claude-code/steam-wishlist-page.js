@@ -1,143 +1,186 @@
-// Game Curator: Steam wishlist collector for Claude Code's built-in browser.
-// Run the WHOLE file as the `text` of mcp__Claude_Browser__javascript_tool (action javascript_exec)
-// on the verified signed-in https://store.steampowered.com/wishlist/... tab.
-// The file is a single async expression: the tool awaits it and returns the envelope as the result.
-// Read-only: it reads the DOM and scrolls the wishlist's own scroll container. No requests, no clicks,
-// no internal page state. Options are the literal object on the last line: callBudgetMs (35000),
-// maxMs (150000), maxSteps (1000), fresh. javascript_tool is cut off at 45 s per call, so a longer run
-// returns {inProgress:true,...}. The script registers itself as window.__gcWishlistRun, so resume with the
-// short call `await window.__gcWishlistRun({})` instead of pasting the file again.
+// Game Curator: Steam wishlist collector for Claude Code's built-in browser (page side).
+// GENERATED FILE is steam-wishlist-page.js; edit this template and run `node build-page-script.mjs`.
+//
+// Run the WHOLE generated file as the `text` of mcp__Claude_Browser__javascript_tool (action javascript_exec)
+// on the verified signed-in https://store.steampowered.com/wishlist/... tab. It is one async expression that
+// registers itself as window.__gcWishlistRun and runs once. Read-only: it reads the DOM and scrolls the
+// wishlist's own scroll container; no requests, no clicks, no internal page state. Its only page state is
+// window.__gcWishlist (its own rows) and window.__gcWishlistRun, both removed when the run ends or fails.
+//
+// javascript_tool is cut off at 45 s per call, so a long run returns {inProgress:true,...} and resumes with
+// the one-line call `await window.__gcWishlistRun({})`. Options (object literal on the last line):
+//   callBudgetMs (35000)  maxMs (150000)  maxSteps (1000)  fresh (discard saved state)
+//   forceFileTransfer     pad a small result so the runtime returns it as a file (see references/claude-code.md)
 (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
-  // An unfocused or hidden pane throttles setTimeout to ~1 s (observed even with visibilityState "visible"),
-  // so calibrate once and, if throttled, wait by polling a MessageChannel instead.
-  let throttled = document.hidden;
-  const sleep = ms => new Promise(r => {
-    if (!throttled) return setTimeout(r, ms);
-    const end = performance.now() + ms, mc = new MessageChannel();
-    mc.port1.onmessage = () => { if (performance.now() >= end) { mc.port1.close(); r(); } else mc.port2.postMessage(0); };
-    mc.port2.postMessage(0);
-  });
-  { const c0 = performance.now(); await new Promise(r => setTimeout(r, 30)); throttled = throttled || performance.now() - c0 > 250; }
-  const SEL = '[data-rfd-drag-handle-draggable-id^="WishlistItem-"]';
-  if (location.protocol !== 'https:' || location.hostname !== 'store.steampowered.com' || !location.pathname.startsWith('/wishlist'))
-    throw new Error('Open the verified Steam Store wishlist first');
-  if (innerWidth < 1000) throw new Error(`Viewport ${innerWidth}px wide: Steam serves a reduced layout. Use resize_window width 1280 height 900, reload, retry`);
-
-  const bodyText = () => document.body.innerText;
-  const expected = (() => { const m = bodyText().match(/\b([\d,]+)\s+ITEMS\b/i); return m ? Number(m[1].replace(/,/g, '')) : null; })();
-
-  // Read one rendered row exactly as the bundled Codex collector does.
-  function readRows() {
-    const out = [];
-    for (const h of document.querySelectorAll(SEL)) {
+  function snapshotWishlist() {
+    if (location.protocol !== 'https:' || location.hostname !== 'store.steampowered.com' || !location.pathname.startsWith('/wishlist')) throw Error('Open the verified Steam Store wishlist');
+    const count = document.body.innerText.match(/\b([\d,]+)\s+ITEMS\b/i);
+    const rows = [];
+    for (const h of document.querySelectorAll('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]')) {
       const m = h.getAttribute('data-rfd-drag-handle-draggable-id').match(/^WishlistItem-(\d+)-(\d+)$/);
       const row = h.closest('.Panel');
       if (!m || !row) continue;
-      const link = [...row.querySelectorAll('a[href*="/app/"]')].find(a =>
-        a.innerText.trim() && /\/app\/(\d+)/.exec(a.href)?.[1] === m[1] && !/^[\p{Sc}]/u.test(a.innerText.trim()));
+      const link = [...row.querySelectorAll('a[href*="/app/"]')].find(a => a.innerText.trim() && /\/app\/(\d+)/.exec(a.href)?.[1] === m[1] && !/^[\p{Sc}]/u.test(a.innerText.trim()));
       const raw = row.innerText.trim();
-      out.push({appid: Number(m[1]), rank: Number(m[2]) + 1, name: link?.innerText.trim() || raw.split('\n')[0] || null,
+      rows.push({appid: Number(m[1]), rank: Number(m[2]) + 1, name: link?.innerText.trim() || raw.split('\n')[0] || null,
         pageText: raw, membershipSource: 'wishlist-row', complete: !!link});
     }
-    return out;
+    return {expected: count ? Number(count[1].replace(/,/g, '')) : null, rows};
   }
+  function mergeWishlistRow(rows, row) {
+    const next = {...row, complete: row.complete !== false}, old = rows.get(row.appid);
+    if (!old || (!old.complete && next.complete)) rows.set(row.appid, next);
+    return rows.get(row.appid);
+  }
+  function toWishlistRecords(rows) {
+    return [...rows.values()].sort((a, b) => a.rank - b.rank).map(({complete, ...record}) => record);
+  }
+  if (innerWidth < 1000) throw new Error(`Viewport ${innerWidth}px wide: Steam serves a reduced layout. Use resize_window width 1280 height 900, reload, retry`);
+  const cleanup = () => { delete window.__gcWishlist; delete window.__gcWishlistRun; };
+  try {
+    const callStart = Date.now();
+    const callBudget = opts.callBudgetMs ?? 35000, maxMs = opts.maxMs ?? 150000, maxSteps = opts.maxSteps ?? 1000;
+    const left = () => callStart + callBudget + 2000 - Date.now(); // absolute bound for every wait in this call
+    const sleep = ms => new Promise(r => setTimeout(r, Math.max(0, Math.min(ms, left()))));
 
-  // The wishlist scrolls inside its own container, not the document.
-  const first = document.querySelector(SEL);
-  if (!first) throw new Error('No wishlist rows rendered; verify sign-in, layout and that the page finished loading');
-  let box = first.parentElement;
-  while (box && box !== document.body && !(/(auto|scroll)/.test(getComputedStyle(box).overflowY) && box.scrollHeight > box.clientHeight + 4)) box = box.parentElement;
-  const scroller = (box && box !== document.body) ? box : document.scrollingElement;
+    // View evidence. Filters live in an Options panel this read-only collector does not open, so they stay unknown.
+    const viewInfo = () => {
+      const sortBtn = [...document.querySelectorAll('button')].find(b => /^Sort by:/i.test(b.innerText.trim()));
+      const box = document.querySelector('input[placeholder*="Search by name"]');
+      return {sort: sortBtn ? sortBtn.innerText.replace(/^Sort by:\s*/i, '').trim() : null,
+        search: box ? (box.value.trim() ? 'active' : 'empty') : 'unknown', filters: 'unknown'};
+    };
 
-  // State lives on the page so a run can span several tool calls (javascript_tool is cut off at 45 s).
-  const path = location.pathname.replace(/\/+$/, '');
-  let S = window.__gcWishlist;
-  if (!S || opts.fresh || S.path !== path || Date.now() - S.touched > 600000)
-    S = window.__gcWishlist = {path, startedAt, got: new Map(), skipped: new Set(), retries: {}, activeMs: 0, started: false,
-      stats: {steps: 0, waits: 0, settleTimeouts: 0, backtracks: 0, calls: 0}, futile: 0, lastSize: -1};
-  S.stats.calls++;
-  const {got, stats} = S, callStart = Date.now();
-  const callBudget = opts.callBudgetMs ?? 35000, maxMs = opts.maxMs ?? 150000, maxSteps = opts.maxSteps ?? 1000;
-  const outOfCall = () => Date.now() - callStart > callBudget;
-  const outOfTotal = () => S.activeMs + Date.now() - callStart > maxMs || stats.steps > maxSteps;
-  const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
-  const take = rows => { for (const r of rows) { const o = got.get(r.appid); if (!o || (!o.complete && r.complete)) got.set(r.appid, r); } };
-  // Wait until the rendered rows stop changing and every one has its real name (lazy rows start as placeholders).
-  async function settle(limit) {
-    let last = '', stable = 0;
-    for (let waited = 0; ; waited += 60) {
-      const rows = readRows(); take(rows);
-      const key = rows.map(r => r.rank).join();
-      stable = key === last ? stable + 1 : 0; last = key;
-      if (stable >= 1 && rows.every(r => r.complete)) return rows;
-      if (waited >= limit) { stats.settleTimeouts++; return rows; }
-      stats.waits++; await sleep(60);
+    // Waits are event driven: a MutationObserver resolves as soon as the list changes; setTimeout only bounds it.
+    // (Unfocused panes throttle timers to about 1 s, and a message-polling wait was measured as a busy loop.)
+    let scroller = null;
+    const nextMutation = limit => new Promise(res => {
+      const target = scroller && scroller !== document.scrollingElement ? scroller : document.body;
+      let t; const mo = new MutationObserver(() => done());
+      const done = () => { clearTimeout(t); mo.disconnect(); res(); };
+      mo.observe(target, {childList: true, subtree: true, characterData: true});
+      t = setTimeout(done, Math.max(0, Math.min(limit, left())));
+    });
+
+    let snap = snapshotWishlist();
+    for (let i = 0; !snap.rows.length && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotWishlist(); }
+    const view = viewInfo(), expected0 = snap.expected;
+    const sig = JSON.stringify([location.pathname.replace(/\/+$/, ''), location.search, expected0, view.sort, view.search]);
+    if (!snap.rows.length) {
+      if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
+      cleanup();
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-verified', view, stats: {}, activeMs: 0, calls: 1, warnings: []});
     }
-  }
-  const haveRanks = () => new Set([...got.values()].filter(r => r.complete).map(r => r.rank));
-  const nextNeeded = () => { const have = haveRanks(); for (let r = 1; r <= (expected ?? 0); r++) if (!have.has(r) && !S.skipped.has(r)) return r; return null; };
+    const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
+    let box = first.parentElement;
+    while (box && box !== document.body && !(/(auto|scroll)/.test(getComputedStyle(box).overflowY) && box.scrollHeight > box.clientHeight + 4)) box = box.parentElement;
+    scroller = (box && box !== document.body) ? box : document.scrollingElement;
 
-  const rankKey = rows => rows.map(r => r.rank).join();
-  // The virtualized list re-renders a moment after scrollTop changes (0.1-1.8 s observed): wait for the window to change.
-  async function untilWindowChanges(prevKey, limit) {
-    for (let waited = 0; waited < limit; waited += 50) { await sleep(50); if (rankKey(readRows()) !== prevKey) return true; }
-    return false;
-  }
-  if (!S.started) { scroller.scrollTop = 0; await untilWindowChanges('', 600); S.started = true; }
-  let finished = false;
-  while (!outOfTotal()) {
-    if (outOfCall()) { // hand control back before the tool's 45 s limit; the next run resumes here
-      S.activeMs += Date.now() - callStart; S.touched = Date.now();
-      return {inProgress: true, collected: got.size, expected, elapsedMs: S.activeMs, calls: stats.calls, hint: 'Run window.__gcWishlistRun({}) again to resume'};
+    // Resumable state, bound to the verified view. A different view or count discards it.
+    const fresh = () => ({sig, startedAt, got: new Map(), byRank: new Map(), skipped: new Set(), retries: {}, activeMs: 0, started: false,
+      stats: {steps: 0, waits: 0, settleTimeouts: 0, backtracks: 0, calls: 0, restarts: 0}, futile: 0, lastSize: -1, warnings: [], conflict: false});
+    let S = window.__gcWishlist;
+    if (S && (opts.fresh || S.sig !== sig || Date.now() - S.touched > 600000)) {
+      const stale = S; S = null;
+      window.__gcWishlist = fresh(); window.__gcWishlist.warnings.push(opts.fresh ? 'Discarded earlier collector state on request.' : stale.sig !== sig ? 'Discarded earlier collector state because the wishlist view or item count changed.' : 'Discarded abandoned collector state.');
     }
-    const rows = await settle(1200);
-    const need = nextNeeded();
-    if (need === null) { finished = true; break; }
-    const lo = Math.min(...rows.map(r => r.rank)), hi = Math.max(...rows.map(r => r.rank)), before = scroller.scrollTop;
-    if (rows.length && need >= lo && need <= hi) { // rendered but still a placeholder: wait, then give up on it
-      S.retries[need] = (S.retries[need] ?? 0) + 1;
-      if (S.retries[need] > 3) S.skipped.add(need); else await sleep(400 * S.retries[need]);
-      continue;
+    S = window.__gcWishlist ??= fresh();
+    S.stats.calls++;
+    const {got, stats} = S;
+    let expected = expected0;
+    const outOfCall = () => Date.now() - callStart > callBudget;
+    const outOfTotal = () => S.activeMs + Date.now() - callStart > maxMs || stats.steps > maxSteps;
+    const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
+    const noteRows = rows => { for (const r of rows) { mergeWishlistRow(got, r); const prior = S.byRank.get(r.rank); if (prior === undefined) S.byRank.set(r.rank, r.appid); else if (prior !== r.appid) S.conflict = true; } };
+    const viewChanged = s => S.conflict || (s.expected !== null && s.expected !== expected);
+
+    async function settle(limit) { // wait for placeholder rows to finish loading, bounded
+      const end = Date.now() + limit;
+      for (;;) {
+        const s = snapshotWishlist(); noteRows(s.rows);
+        if (s.rows.every(r => r.complete)) return s;
+        if (Date.now() >= end || left() <= 0) { stats.settleTimeouts++; return s; }
+        stats.waits++; await nextMutation(end - Date.now());
+      }
     }
-    S.futile = got.size === S.lastSize ? (S.futile) + 1 : 0; S.lastSize = got.size;
-    if (S.futile >= 4) break; // no progress after repeated seeks: report what we have
-    // Seek the lowest missing rank using the average row height; backtrack if the window overshot.
-    const rowH = scroller.scrollHeight / (expected || rows.length || 1);
-    const target = !rows.length ? before + step : need < lo ? before - (lo - need + 1) * rowH : before + Math.max(1, need - lo - 1) * rowH;
-    if (rows.length && need < lo) stats.backtracks++;
-    scroller.scrollTop = Math.max(0, target); stats.steps++;
-    await untilWindowChanges(rankKey(rows), 2500);
+    const rankKey = rows => rows.map(r => r.rank).join();
+    async function untilWindowChanges(prevKey, limit) { // the virtualized list re-renders 0.1-1.8 s after a scroll
+      const end = Date.now() + limit;
+      while (Date.now() < end && left() > 0) { if (rankKey(snapshotWishlist().rows) !== prevKey) return true; await nextMutation(end - Date.now()); }
+      return false;
+    }
+    const nextNeeded = () => { const have = new Set([...got.values()].filter(r => r.complete).map(r => r.rank)); for (let r = 1; r <= (expected ?? 0); r++) if (!have.has(r) && !S.skipped.has(r)) return r; return null; };
+
+    if (!S.started) { scroller.scrollTop = 0; await untilWindowChanges('', 600); S.started = true; }
+    let stopReason = null;
+    while (stopReason === null) {
+      if (outOfTotal()) { stopReason = 'budget'; break; }
+      if (outOfCall()) { // hand control back before the tool's 45 s limit; the next run resumes here
+        S.activeMs += Date.now() - callStart; S.touched = Date.now();
+        return {inProgress: true, collected: got.size, expected, elapsedMs: S.activeMs, calls: stats.calls, hint: 'Run window.__gcWishlistRun({}) again to resume'};
+      }
+      const s = await settle(1200), rows = s.rows;
+      if (viewChanged(s)) { // rows of a different view/membership would be mixed in: restart once, then stop with a warning
+        if (stats.restarts >= 1) { stopReason = 'view-changed'; break; }
+        stats.restarts++; S.warnings.push('The wishlist view or item count changed during collection; restarted once.');
+        got.clear(); S.byRank.clear(); S.skipped.clear(); S.retries = {}; S.conflict = false; S.futile = 0; S.lastSize = -1;
+        expected = s.expected ?? expected; scroller.scrollTop = 0; await untilWindowChanges('', 600); continue;
+      }
+      const need = nextNeeded();
+      if (need === null) { stopReason = S.skipped.size ? 'rows-missing' : 'complete'; break; }
+      const lo = Math.min(...rows.map(r => r.rank)), hi = Math.max(...rows.map(r => r.rank)), before = scroller.scrollTop;
+      if (rows.length && need >= lo && need <= hi) { // inside the rendered window but not loaded (placeholder or hole): wait, then give up on it
+        S.retries[need] = (S.retries[need] ?? 0) + 1;
+        if (S.retries[need] > 3) S.skipped.add(need); else await sleep(400 * S.retries[need]);
+        continue;
+      }
+      S.futile = got.size === S.lastSize ? S.futile + 1 : 0; S.lastSize = got.size;
+      if (S.futile >= 4) { stopReason = 'no-progress'; break; }
+      // Seek the lowest missing rank using the average row height; backtrack if the window overshot.
+      const rowH = scroller.scrollHeight / (expected || rows.length || 1);
+      const target = !rows.length ? before + step : need < lo ? before - (lo - need + 1) * rowH : before + Math.max(1, need - lo - 1) * rowH;
+      if (rows.length && need < lo) stats.backtracks++;
+      scroller.scrollTop = Math.max(0, target); stats.steps++;
+      await untilWindowChanges(rankKey(rows), 2500);
+    }
+    S.activeMs += Date.now() - callStart;
+    const records = toWishlistRecords(got), skipped = [...S.skipped];
+    cleanup();
+    return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
+      calls: stats.calls, warnings: S.warnings, skipped, incomplete: [...got.values()].filter(r => !r.complete).length});
+  } catch (error) { cleanup(); throw error; }
+
+  // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
+  async function envelopeOf(c) {
+    const ranks = c.records.map(r => r.rank), incomplete = c.incomplete ?? 0;
+    const contiguous = c.expected !== null && ranks.length === c.expected && ranks.every((r, i) => r === i + 1);
+    const done = (c.stopReason === 'complete' && contiguous && !incomplete && !(c.skipped?.length)) || c.stopReason === 'empty-verified';
+    const warnings = [...c.warnings];
+    if (c.expected !== null && c.records.length !== c.expected) warnings.push(`Displayed ${c.expected} items; collected ${c.records.length} unique AppIDs.`);
+    if (c.expected !== null && !contiguous && c.records.length) warnings.push('Observed wishlist positions do not cover all displayed ranks.');
+    if (incomplete) warnings.push(`${incomplete} rows were still placeholders after retries; their names and fields are unreliable.`);
+    if (c.skipped?.length) warnings.push(`Gave up waiting for lazy rows at ranks ${c.skipped.join(',')}.`);
+    if (!done) warnings.push(`Incomplete capture (stop reason: ${c.stopReason}); do not treat it as the full wishlist.`);
+    warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account and membership.');
+    warnings.push('Wishlist filters were not verified (only sort and search state were recorded); confirm them before treating this as the full wishlist.');
+    const bytes = new TextEncoder().encode(JSON.stringify(c.records));
+    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const envelope = {
+      format: 'game-curator-steam-export', version: 1, source: 'wishlist',
+      capturedAt: c.finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
+      diagnostics: {expectedCount: c.expected, uniqueCount: c.records.length, ranksObserved: ranks.length, ranksContiguous: contiguous,
+        placeholderNameRows: incomplete, complete: done, stopReason: c.stopReason, startedAt: c.startedAt, finishedAt: c.finishedAt,
+        elapsedMs: c.activeMs, calls: c.calls, viewportWidth: innerWidth, view: c.view, waitStrategy: 'mutation-observer',
+        scrollSteps: c.stats.steps ?? 0, backtracks: c.stats.backtracks ?? 0, restarts: c.stats.restarts ?? 0, settleWaits: c.stats.waits ?? 0,
+        settleTimeouts: c.stats.settleTimeouts ?? 0, reorderHandles: !!document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]'),
+        urlPath: location.pathname.replace(/\/+$/, ''), recordsSha256: sha, extraction: 'claude-code-page-script'},
+      accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
+      records: c.records,
+    };
+    // A small result is returned inline by the runtime and cannot be saved without retyping it. forceFileTransfer pads
+    // it past the runtime's inline limit so the runtime's own tool-result file is used; the saver strips the padding.
+    if (opts.forceFileTransfer) { const need = 80000 - JSON.stringify(envelope).length; if (need > 0) envelope.transportPadding = 'x'.repeat(need); }
+    return envelope;
   }
-  S.activeMs += Date.now() - callStart;
-  const timedOut = !finished && outOfTotal();
-  delete window.__gcWishlist;
-
-  const records = [...got.values()].sort((a, b) => a.rank - b.rank).map(({complete: _c, ...r}) => r);
-  const ranks = records.map(r => r.rank), incomplete = [...got.values()].filter(r => !r.complete).length;
-  const contiguous = expected !== null && ranks.length === expected && ranks.every((r, i) => r === i + 1);
-  const warnings = [];
-  if (expected !== null && records.length !== expected) warnings.push(`Displayed ${expected} items; collected ${records.length} unique AppIDs.`);
-  if (!contiguous) warnings.push('Observed wishlist positions do not cover all displayed ranks.');
-  if (incomplete) warnings.push(`${incomplete} rows still had placeholder names after retries; names fall back to the first text line.`);
-  if (timedOut) warnings.push(`Stopped at the ${maxMs} ms / ${maxSteps} step budget; coverage is incomplete.`);
-  if (S.skipped.size) warnings.push(`Gave up waiting for ${S.skipped.size} lazy rows (ranks ${[...S.skipped].join(',')}).`);
-  warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account, filters and membership.');
-  warnings.push('Default wishlist filters and sort were not inspected by this collector; verify them on the page.');
-
-  const finishedAt = new Date().toISOString();
-  const bytes = new TextEncoder().encode(JSON.stringify(records));
-  const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
-  return {
-    format: 'game-curator-steam-export', version: 1, source: 'wishlist',
-    capturedAt: finishedAt, method: 'browser-dom-claude-code',
-    coverage: 'partial', warnings,
-    diagnostics: {expectedCount: expected, uniqueCount: records.length, ranksObserved: ranks.length, ranksContiguous: contiguous,
-      placeholderNameRows: incomplete, startedAt: S.startedAt, finishedAt, elapsedMs: S.activeMs, calls: stats.calls, viewportWidth: innerWidth, pageHiddenAtEnd: document.hidden, timersThrottled: throttled,
-      scrollSteps: stats.steps, backtracks: stats.backtracks, settleWaits: stats.waits, settleTimeouts: stats.settleTimeouts,
-      reorderHandles: document.querySelectorAll(SEL).length > 0, urlPath: location.pathname.replace(/\/+$/, ''),
-      recordsSha256: sha, extraction: 'claude-code-page-script'},
-    accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
-    records,
-  };
 })({})

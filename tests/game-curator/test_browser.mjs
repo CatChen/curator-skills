@@ -29,6 +29,24 @@ assert.ok(partial.warnings.some(x=>x.includes('collected 1')));
 const rankGap=await collectWishlist(tabWith([{expected:2,rows:[{appid:1,rank:1},{appid:2,rank:3}]}]),{maxScrolls:1});
 assert.equal(rankGap.diagnostics.scrollSteps,1);
 assert.ok(rankGap.warnings.some(x=>x.includes('do not cover')));
+// Lazy placeholder rows (complete:false) never overwrite a loaded row and never count as loaded.
+const lazy=await collectWishlist(tabWith([
+  {expected:2,rows:[{appid:1,rank:1,name:'One',pageText:'One\nRELEASE DATE:\nJAN 1, 2020',complete:true},{appid:2,rank:2,name:'MY CATEGORIES:',pageText:'MY CATEGORIES:',complete:false}]},
+  {expected:2,rows:[{appid:1,rank:1,name:'MY CATEGORIES:',pageText:'MY CATEGORIES:',complete:false},{appid:2,rank:2,name:'Two',pageText:'Two\nRELEASE DATE:\nJAN 2, 2020',complete:true}]},
+]));
+assert.deepEqual(lazy.records.map(r=>r.name),['One','Two']);
+assert.ok(lazy.records.every(r=>!('complete' in r)&&r.pageText.includes('RELEASE DATE:')));
+assert.equal(lazy.diagnostics.placeholderNameRows,0);
+assert.equal(lazy.warnings.some(x=>x.includes('placeholders')),false);
+const stuck=await collectWishlist(tabWith([{expected:2,rows:[{appid:1,rank:1,name:'One',pageText:'One',complete:true},{appid:2,rank:2,name:'MY CATEGORIES:',pageText:'MY CATEGORIES:',complete:false}]}]),{maxScrolls:2});
+assert.equal(stuck.diagnostics.placeholderNameRows,1);
+assert.ok(stuck.warnings.some(x=>x.includes('placeholders')));
+assert.equal(stuck.records.length,2);
+// The shared row snapshot is the function handed to the host's read-only evaluate.
+let evaluated=null;
+await collectWishlist({playwright:{evaluate:async fn=>{evaluated=fn;return {expected:1,rows:[{appid:1,rank:1,name:'One'}]}}}});
+assert.equal(typeof evaluated,'function');
+assert.match(evaluated.toString(),/WishlistItem-/);
 const library=await collectLibrary(tabWith([{expected:2,records:[{appid:1,name:'One'}]}]));
 assert.ok(library.warnings.some(x=>x.includes('collected 1')));
 const libraryBatches=await collectLibrary(tabWith([

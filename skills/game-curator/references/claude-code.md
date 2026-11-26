@@ -1,63 +1,92 @@
 # Claude Code (desktop app): Steam wishlist collection
 
-Use this when the session has the built-in browser tools (`mcp__Claude_Browser__*`: `navigate`, `javascript_tool`, `resize_window`, ...). It is a tested path for the **wishlist only**. The bundled Codex collectors need a `tab.playwright.evaluate` object that this runtime does not provide, so they cannot run here. Library, reviews and Replay have no Claude Code collector yet; use [acquisition](acquisition.md#recovery) for them.
+Use this when the session has the built-in browser tools (`mcp__Claude_Browser__*`: `navigate`, `javascript_tool`, `resize_window`, ...). It is a tested path for the **wishlist only**; Library, Reviews and Replay have no Claude Code collector yet (see [acquisition](acquisition.md#recovery)). The Codex collectors need a `tab.playwright.evaluate` object that this runtime does not provide, so they cannot run here. Claude Code CLI and other runtimes are best-effort recovery, not supported targets.
 
-Tested collector: [`scripts/claude-code/steam-wishlist-page.js`](../scripts/claude-code/steam-wishlist-page.js) (page side) and [`scripts/claude-code/save-capture.mjs`](../scripts/claude-code/save-capture.mjs) (validate and save). Both are read-only on Steam and use no dependencies beyond Node built-ins.
+Files, all under `scripts/claude-code/` unless noted:
+
+| File | Role |
+| --- | --- |
+| `steam-wishlist-page.js` | **Generated.** The standalone expression you paste into `javascript_tool`. Do not edit; run `node build-page-script.mjs` |
+| `steam-wishlist-page.template.js` + `build-page-script.mjs` | Page orchestration (seek-scrolling, resume, bounds) and the generator that inlines the shared row code |
+| `../browser/wishlist-rows.mjs` | Shared, self-contained row extraction and merge semantics used by this script **and** by the Codex `collectWishlist` |
+| `save-capture.mjs` | Node saver: contract validation, cache policy, safe write and read-back |
 
 ## Procedure
 
-1. **Browser and pane.** Use the built-in browser. Open the pane for the user (`mcp__ccd_view__show_pane` with `pane: "preview"`; navigating alone does not reveal it). Navigate to `https://store.steampowered.com/wishlist/`. If the page shows a sign-in form, ask the user to sign in normally in the pane and wait; never ask for credentials.
-2. **Desktop layout.** The pane is about 700px wide by default and Steam then serves a reduced layout (no reorder handles, no labeled fields). Call `resize_window` with width 1280, height 900, then reload. The collector throws if `innerWidth < 1000`. The emulation can be cleared when a turn ends, so reapply it per session; reset with `preset: "desktop"` when done.
-3. **Verify identity.** The URL redirects to `/wishlist/id/<vanity>/` and a signed-in view shows reorder handles and the account menu. Confirm with the user which account they expect and, if they have not already given a local alias, ask for one. Do not infer `account` from the persona name.
-4. **Run the collector.** Read the page script and pass its **entire text** as `text` to `javascript_tool` (`action: "javascript_exec"`). It registers `window.__gcWishlistRun`. A 165-row list took 10-15 s (one call). If it returns `{inProgress: true, ...}` run `await window.__gcWishlistRun({})` (a one-line call) until it returns the envelope. Options go in the final `({})`: `callBudgetMs` (35000), `maxMs` (150000), `maxSteps` (1000), `fresh` (discard saved page state).
-5. **Bulk transfer.** The envelope is about 60 KB, larger than the tool-result limit, so the runtime writes it to a file and returns its path (JSON array of `{type,text}`). That is the supported transfer: do not copy the data through model context or retype it.
-6. **Validate and save.** Only with the user's cache authorization (`settings.json` has `steamCache: true`) run:
+1. **Consent first.** Raw cache writes need `steamCache: true` in the Curator Home `settings.json` ([persistence](persistence.md)); the saver checks it again and fails closed. Honor an explicit current instruction from the user over stored settings.
+2. **Browser and pane.** Use the built-in browser and reveal its pane for the user (`mcp__ccd_view__show_pane` with `pane: "preview"`; navigating alone does not show it). Open `https://store.steampowered.com/wishlist/`. If a sign-in page appears, follow the sign-in hand-off in [recovery](acquisition.md#recovery): the user signs in normally, you wait, then verify and resume. Never handle credentials.
+3. **Desktop layout.** The pane is about 700px wide by default and Steam then serves a reduced layout (no reorder handles or labeled fields). Call `resize_window` with width 1280, height 900, then reload. The script throws below 1000px. The emulation can be cleared when a turn ends; reset with `preset: "desktop"` when done.
+4. **Verify identity and view.** The URL redirects to `/wishlist/id/<vanity>/`. Confirm the account with the user and get their local alias; never infer it from the persona name. The script records the sort label and search-box state, but **not filters** (they sit in an Options panel it does not open), so `view.filters` is `unknown`. Before replacing an existing cache, confirm with the user or by looking at the page that the default sort ("Your Rank") is selected and no filters are applied; the header's displayed count versus the list count is supporting evidence only.
+5. **Run the collector.** Read `steam-wishlist-page.js` and pass its **entire text** as `text` to `javascript_tool` (`action: "javascript_exec"`). It registers `window.__gcWishlistRun` and runs. If it returns `{inProgress: true, ...}`, continue with the one-line call `await window.__gcWishlistRun({})` until the envelope arrives. Options go in the literal on the last line: `callBudgetMs` (35000), `maxMs` (150000), `maxSteps` (1000), `fresh`, `forceFileTransfer`.
+6. **Bulk transfer.** A full envelope is larger than the tool-result limit, so the runtime writes it to a file and returns its path (a JSON array of `{type,text}`). Pass that path to the saver; never copy data through model context or retype it. A small wishlist is returned inline, which cannot be saved without retyping: rerun with `forceFileTransfer: true`, which pads the result past the inline limit so the runtime's own file mechanism is used (the saver strips `transportPadding`). This uses the supported tool-result file; it does not bypass any restriction. The saver also reads `-` (stdin) for a user-supplied file.
+7. **Validate and save.**
 
    ```bash
-   node <skill>/scripts/claude-code/save-capture.mjs <tool-result-file> --account <alias> --access-scope signed-in --dry-run
+   node <skill>/scripts/claude-code/save-capture.mjs <result-file> --account <alias> --access-scope signed-in --view unfiltered --dry-run
    ```
 
-   Check the printed decision, then repeat without `--dry-run`. Add `--existing-account <alias>` only when the user has confirmed that an existing `wishlist.json` without an `account` field belongs to that alias. The script verifies format, source, contiguous ranks, unique AppIDs, no placeholder names and the page-computed SHA-256 of the records, then applies the replacement policy, reads the saved file back and prints its checksum. Delete the tool-result file afterwards.
-7. **Report** elapsed time, calls, `warnings`, `diagnostics` and the save decision. The collector returns `coverage: partial` even when counts match, as the Codex collector does.
+   Review the printed decision, then repeat without `--dry-run`. Pass `--view unfiltered` only after step 4's confirmation. `--existing-account <alias>` and `--existing-view unfiltered` apply only when the user confirmed that an existing `wishlist.json` lacking that evidence belongs to that alias and was unfiltered. `--keep-separate` honors a user's decision not to promote. Use `--dest` and `--settings` for a user-specified custom location. Then delete the tool-result file.
+8. **Report** elapsed time, tool calls, `warnings`, `diagnostics` and the save decision, distinguishing live results from tests.
 
-## Replacement policy implemented by `save-capture.mjs`
+## What the saver validates and decides
 
-A new capture becomes `wishlist.json` only if there is none, or the existing file is a valid wishlist envelope with the same verified `account` and `accessScope`, an older `capturedAt`, and no lower rate of labeled fields (`RELEASE DATE:`, `ENGLISH REVIEWS:`, `USER TAGS:`) per row. The old file is first preserved as `wishlist.superseded.<timestamp>.json`, and the new file is written to a private temporary file and renamed. In every other case (unknown or different account, different scope, older, poorer, malformed existing file) it writes `wishlist.partial.<timestamp>.json` with exclusive creation and leaves existing files untouched. It never merges wishlists.
+It **rejects** (saves nothing) input that is not a valid v1 wishlist envelope: unexpected envelope or record fields (nothing is silently stripped), invalid `capturedAt`, `coverage`, `method`, `warnings`, non-positive AppIDs, empty names or `pageText`, wrong `membershipSource`, duplicate AppIDs or ranks, inconsistent counts, missing placeholder diagnostics, a records checksum that does not match the page's, a `signed-in` claim without the owner-only reorder-handle evidence, and an empty wishlist without verified-empty evidence. It **keeps but never promotes** valid but incomplete captures (bounded stop, placeholder rows, missing ranks, count mismatch) as `wishlist.partial.<timestamp>.json`.
+
+A capture becomes `wishlist.json` only if none exists, or **all** hold: the existing file is a valid envelope; same verified account, access scope and coverage; strictly newer; the new capture recorded the default sort, an empty search and caller-confirmed no filters, and so did the existing one (or the user confirmed it); no retained AppID lost a labeled field (release date, reviews, user tags, categories are checked individually, so a gained field never offsets a lost one); fewer than 5 `wishlist.superseded.*` backups exist; and the existing file is byte-identical at commit time as at decision time. A legitimately smaller unfiltered wishlist, or one with removed games, replaces. Otherwise the capture is saved beside it with exclusive creation. The previous file is preserved as `wishlist.superseded.<timestamp>.json` before a replacement. A lock file prevents concurrent savers. Nothing is merged and **nothing is ever deleted automatically**; at the backup limit the user decides what to prune. The final rename is not an atomic compare-and-swap, so the check narrows but cannot eliminate a race with an external editor; if the file changed, the capture is kept separately.
 
 ## Output contract
 
-The envelope is `game-curator-steam-export` version 1 with the same record fields as the Codex collector (`appid`, `rank`, `name`, `pageText`, `membershipSource`). `method` is `browser-dom-claude-code`. `capturedAt` is the time the page script finished reading rows; `diagnostics.startedAt`/`finishedAt` bracket the acquisition. `account` and `accessScope` are added by the saver from verified values only. Extra diagnostics (`recordsSha256`, `scrollSteps`, `calls`, `timersThrottled`, `viewportWidth`, ...) are informational.
+`game-curator-steam-export` version 1 with the same record fields as the Codex collector (`appid`, `rank`, `name`, `pageText`, `membershipSource`). `method` is `browser-dom-claude-code`; `capturedAt` is when the page script finished reading rows; `diagnostics.startedAt`/`finishedAt` bracket the acquisition. `account` and `accessScope` come from verified inputs at save time. `diagnostics` adds `complete`, `stopReason` (`complete`, `empty-verified`, `budget`, `no-progress`, `rows-missing`, `view-changed`), `view` (`sort`, `search`, `filters`), `recordsSha256` and timing counters. Existing v1 caches stay readable, including ones without these fields.
+
+## Shared code with the Codex collector
+
+Row extraction (`snapshotWishlist`), merge (`mergeWishlistRow`: a loaded row is never replaced by a placeholder) and record shaping live in `scripts/browser/wishlist-rows.mjs`. They are self-contained functions because both hosts serialize them into a page: Codex passes the function to `evaluate`, and this runtime inlines its source into the generated script. Orchestration stays separate (Codex host-tab scrolling versus page-side seek, resume and file transfer). `collectWishlist` keeps its entry point and now reports placeholder rows instead of accepting them as loaded.
 
 ## Observed runtime behavior (Claude desktop app, built-in browser)
 
-Verified on the maintainer's signed-in wishlist (165 items), 2026-11-26:
+Verified live on a signed-in wishlist of about 165 items, 2026-11-26.
 
 | Capability | Result |
 | --- | --- |
-| `javascript_tool` runs async page code with loops, `await`, DOM reads and `crypto.subtle` | Verified |
-| Page state persists between calls in the same tab (`window.*`) | Verified |
-| Per-call time limit | Restriction: a 100 s wait was cut off at 45 s ("timed out"). The collector yields at 35 s and resumes |
-| Result size | A 71k-character result is written by the runtime to a tool-result file with its path returned. Keys in that file are alphabetized and a `(captured at origin ...)` line is appended, which the saver handles (key order is restored before checksum comparison) |
-| Pane default width | About 703px, which triggers Steam's reduced layout. Verified fix: `resize_window` 1280x900 + reload |
-| Timer throttling | `setTimeout(120)` took about 1 s each while the pane was unfocused, even with `visibilityState` "visible". The collector calibrates and then waits by polling a `MessageChannel` |
-| Wishlist list is virtualized | Only 14-26 rows exist at a time and a scroll takes 0.1-1.8 s to re-render. Fixed-step scrolling skipped ranks 15-35 in a test; the collector seeks the lowest missing rank and waits for the rendered window to change |
-| Lazy rows | Rows can show placeholder text (for example `MY CATEGORIES:`) before their data loads; the collector treats a row as complete only when its app link has text |
-| `tab.playwright.evaluate` object (needed by the Codex collectors) | Not provided in this runtime, so those collectors cannot run here |
-| Local Node process driving the browser; browser-initiated file download | No supported tool found / untested. The tool-result file is the verified transfer |
-| Claude in Chrome (`mcp__claude-in-chrome__*`) | Untested with this script |
+| `javascript_tool` runs async page code (loops, `await`, DOM reads, `crypto.subtle`, `MutationObserver`) | Verified |
+| Page state persists between calls in the same tab | Verified |
+| Per-call time limit | Restriction: a 100 s wait was cut off at 45 s. The script yields at 35 s plus bounded waits and resumes |
+| Large results | A 60-70k-character result is written to a tool-result file whose path is returned; keys are alphabetized and an origin line is appended (the saver restores order and checks the checksum) |
+| Pane default width | About 703px; Steam serves a reduced layout. Fix: `resize_window` 1280x900 and reload |
+| Timers in an unfocused pane | `setTimeout` and `scheduler.postTask` with delay ran about 8x slow (about 1 s per wait) even with `visibilityState` "visible". A `MessageChannel` wait was accurate but measured about 50,000 messages per second, a busy loop. The script therefore waits on a `MutationObserver` and uses timers only as deadlines |
+| Web Workers, `SharedArrayBuffer` | Blob Worker creation failed on this page; `SharedArrayBuffer` is undefined. Not used |
+| Virtualized list | 14-26 rows exist at a time and re-render 0.1-1.8 s after a scroll. A fixed-step scroller skipped ranks 15-35; the script seeks the lowest missing rank and waits for the window to change |
+| Lazy rows | Rows show placeholder text before loading; a row counts as loaded only when its app link has text |
+| `tab.playwright.evaluate` (Codex collectors) | Not provided here |
+| Local Node driving the browser; browser-initiated download | No supported tool found / untested. The tool-result file is the verified transfer |
+| Steam filters (Options panel) | Not opened; unknown by design. Sort and search state are read |
+| Verified-empty wishlist, signed-out page, Claude in Chrome | Not exercised live (simulated or untested) |
 
-## Benchmarks (165 rows, unfocused pane)
+## Results
 
-| Run | Calls | Elapsed in page | Scroll steps | Result |
-| --- | --- | --- | --- | --- |
-| Manual browser tool calls, previous session | not counted (about 5 min wall clock) | n/a | repeated manual scrolls | 165 rows after placeholder repair |
-| Final script, single call | 1 | 14.1 s | 7 | 165/165, 0 placeholders, contiguous ranks |
-| Final script, forced resume (3 s budget) | 3 | 10.8 s | 7 | identical records and checksum |
-| First fixed-step version, pane focused | 1 | 12.4 s | 42 | 165/165 |
-| First fixed-step version, pane unfocused | 2 | 42 s | 192 | **144/165, ranks 15-35 missing**: rejected by the saver |
+| Run | Type | Calls | Time | Steps | Result |
+| --- | --- | --- | --- | --- | --- |
+| Manual browser tool calls, earlier | live | not counted | about 5 min | repeated | complete after placeholder repair |
+| Final generated script | **live** | 1 | 19.6 s in page | 8 (1 backtrack) | 165/165, 0 placeholders, contiguous, checksum identical to earlier runs |
+| Earlier busy-wait version | live | 1 | 14.1 s | 7 | 165/165 (replaced: CPU polling) |
+| Earlier busy-wait version, forced resume | live | 3 | 10.8 s | 7 | identical records |
+| Fixed-step version, unfocused pane | live | 2 | 42 s | 192 | 144/165, ranks 15-35 missing, rejected by the saver |
+| Simulated virtualized page | test | n/a | n/a | n/a | placeholder-to-loaded, missing rank, stuck placeholder, resume, membership change at the same count, view-bound resume, step budget, verified empty, narrow viewport |
 
-Records from the successful runs were identical (same SHA-256), and identical to the saved cache. Remaining time is dominated by the page's own render latency, not by transfer or saving.
+Live resume was exercised on the earlier version; the final version's resume is covered by the simulated tests. Remaining time is dominated by the page's own render latency.
+
+## Tests
+
+```bash
+node tests/game-curator/test_browser.mjs              # Codex orchestration, incl. the placeholder regression
+node tests/game-curator/test_claude_code_page.mjs     # generated page script on a simulated DOM
+node tests/game-curator/test_claude_code.mjs          # saver, policy, settings, generated-file freshness
+```
+
+## Fresh-session acceptance (not yet run)
+
+In a new Claude Code session outside this repository with the skill installed: ask `Refresh my Steam wishlist and tell me what changed`. Pass if the agent loads this reference, shows the pane, fixes the viewport, hands sign-in to the user, runs the generated script, saves via the saver with consent and the right flags, reads the file back, and reports warnings and unverified filters without being told the steps. Record tool calls, time, and any deviation. This has not been executed.
 
 ## If this collector fails
 
-Treat it as an adapter failure, not a browser failure. Keep the browser session, inspect a representative row with `javascript_tool`, and follow the [recovery procedure](acquisition.md#recovery): adapt a temporary copy (selector, scroll container, waits), validate counts, contiguous ranks and names, and report. Do not edit the installed skill during ordinary curation; send a sanitized maintenance report instead. If `javascript_tool` is unavailable, use `read_page`/`get_page_text` with `computer` scrolling and the same validation, or an export.
+Treat it as an adapter failure, not a browser failure. Keep the session, inspect a representative row with `javascript_tool`, and follow the [recovery procedure](acquisition.md#recovery): adapt a temporary copy, validate counts, ranks and names, and preserve any partial capture (the saver keeps incomplete runs separately). Do not edit installed skill files during ordinary curation; report the failure instead. Without `javascript_tool`, use `read_page`/`get_page_text` with scrolling and the same validation, or an export.
