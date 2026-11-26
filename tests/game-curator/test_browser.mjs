@@ -56,6 +56,16 @@ const libraryBatches=await collectLibrary(tabWith([
   {expected:2,records:[{appid:1,name:'One',pageText:'One'}, {appid:2,name:'Two',pageText:'Two'}]},
 ]));
 assert.match(libraryBatches.records[0].pageText,/TOTAL PLAYED/);
+// The Codex library collector hands the shared, self-contained row snapshot to the host's read-only evaluate (the same source the Claude page script inlines).
+let libEvaluated=null;
+const libShared=await collectLibrary({playwright:{evaluate:async fn=>{libEvaluated=fn;return {expected:1,records:[{appid:1,name:'One',pageText:'One\nTOTAL PLAYED\n2 hours'}]}}}});
+assert.equal(typeof libEvaluated,'function'); assert.match(libEvaluated.toString(),/All Games/);
+assert.equal(libShared.records[0].hours,2); assert.equal(libShared.records[0].achievements,null); // absent label stays null, never 0
+const libGrow=await collectLibrary(tabWith([
+  {expected:2,records:[{appid:1,name:null,pageText:'One'}]},
+  {expected:2,records:[{appid:1,name:'One',pageText:'One\nTOTAL PLAYED\n1 hour'},{appid:2,name:'Two',pageText:'Two'}]},
+]));
+assert.equal(libGrow.records.find(r=>r.appid===1).name,'One'); assert.equal(libGrow.records.find(r=>r.appid===1).hours,1); assert.equal(libGrow.records.find(r=>r.appid===2).hours,null);
 const review=await collectReviews(tabWith([
   {url:'https://steamcommunity.com/id/example/recommended/',path:'/id/example/recommended/',expected:2,rows:[{appid:1,reviewUrl:'r1'}],links:['https://steamcommunity.com/id/example/recommended/?p=2']},
   {url:'https://steamcommunity.com/id/example/recommended/?p=2',path:'/id/example/recommended/',expected:2,rows:[{appid:2,reviewUrl:'r2'}],links:[]}

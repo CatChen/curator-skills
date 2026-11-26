@@ -1,6 +1,7 @@
 // Browser-runtime collectors. All page evaluation reads the DOM only.
 // The caller supplies a tab already opened on the verified account's source page.
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from './wishlist-rows.mjs';
+import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord} from './library-rows.mjs';
 
 const LIMIT = 80;
 
@@ -30,18 +31,7 @@ async function scroll(tab) {
   throw new Error('No supported browser scrolling operation');
 }
 
-// Parse only explicitly labeled English values; preserve the original row.
-export function normalizeLibraryRecord(record) {
-  const text = typeof record.pageText === 'string' ? record.pageText : '';
-  const play = text.match(/\bTOTAL\s+PLAYED\s*:?\s*([\d,.]+)\s*(hours?|hrs?|minutes?|mins?)\b/i);
-  const value = play ? Number(play[1].replace(/,/g,'')) : NaN;
-  const last = text.match(/\bLAST\s+PLAYED\s*:?\s*(.+?)(?=\s+(?:ACHIEVEMENTS|MY GAME|TOTAL PLAYED|DOWNLOAD)\b|$)/i);
-  const achievements = text.match(/\bACHIEVEMENTS\s*:?\s*(\d+)\s*\/\s*(\d+)/i);
-  return {...record, hours:Number.isFinite(value) ? (/^min/i.test(play[2]) ? value/60 : value) : null,
-    playtimeDisplay:play ? `${play[1]} ${play[2]}` : null,
-    lastPlayedDisplay:last ? last[1].trim() : null,
-    achievements:achievements ? {unlocked:Number(achievements[1]),total:Number(achievements[2])} : null};
-}
+export {normalizeLibraryRecord};
 
 export async function collectWishlist(tab, {maxScrolls=20} = {}) {
   if (!Number.isInteger(maxScrolls) || maxScrolls < 0 || maxScrolls > LIMIT) throw new Error('Invalid maxScrolls');
@@ -79,27 +69,12 @@ export async function collectLibrary(tab, {maxScrolls=40} = {}) {
   if (!Number.isInteger(maxScrolls) || maxScrolls < 0 || maxScrolls > LIMIT) throw new Error('Invalid maxScrolls');
   const records = new Map(), warnings = [];
   let expected = null, steps = 0, stagnant = 0;
-  async function batch() { return read(tab, () => {
-    if (location.protocol !== 'https:' || location.hostname !== 'steamcommunity.com' || !/\/games\/?$/.test(location.pathname)) throw Error('Open the verified Steam Community all-games page');
-    const count = document.body.innerText.match(/All Games\s*\(([\d,]+)\)/i);
-    const rows = new Map();
-    for (const a of document.querySelectorAll('a[href*="store.steampowered.com/app/"]')) {
-      const m = a.href.match(/\/app\/(\d+)/), row = a.closest('.Panel');
-      if (!m || !row || !row.innerText.trim()) continue;
-      const id = Number(m[1]), name = a.getAttribute('aria-label') || a.innerText.trim() || a.querySelector('img')?.alt || null;
-      if (!rows.has(id)) rows.set(id,{appid:id,name,pageText:row.innerText.trim(),membershipSource:'all-games-row'});
-      else if (!rows.get(id).name && name) rows.get(id).name = name;
-    }
-    return {expected:count ? Number(count[1].replace(/,/g,'')) : null, records:[...rows.values()]};
-  }); }
+  const batch = () => read(tab, snapshotLibrary);
   try {
     while (true) {
       const data = await batch(); expected = data.expected ?? expected;
       const before = records.size;
-      for (const row of data.records) {
-        const previous = records.get(row.appid);
-        if (!previous || (row.pageText?.length || 0) > (previous.pageText?.length || 0)) records.set(row.appid,row);
-      }
+      for (const row of data.records) mergeLibraryRow(records, row);
       stagnant = before === records.size ? stagnant + 1 : 0;
       if ((expected !== null && records.size >= expected) || steps >= maxScrolls || stagnant >= 3) break;
       await scroll(tab); await refresh(tab); steps++;

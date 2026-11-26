@@ -42,6 +42,20 @@ A capture becomes `wishlist.json`, by creation or replacement, only if its accou
 
 Row extraction (`snapshotWishlist`), merge (`mergeWishlistRow`: a loaded row is never replaced by a placeholder) and record shaping live in `scripts/browser/wishlist-rows.mjs`. They are self-contained functions because both hosts serialize them into a page: Codex passes the function to `evaluate`, and this runtime inlines its source into the generated script. Orchestration stays separate (Codex host-tab scrolling versus page-side seek, resume and file transfer). `collectWishlist` keeps its entry point and now reports placeholder rows instead of accepting them as loaded.
 
+## Library (built-in browser; Claude in Chrome differs only in delivery)
+
+Script: `scripts/claude-code/steam-library-page.js` (generated, with the shared row semantics from `scripts/browser/library-rows.mjs` and the shared page pieces from `page-common.mjs`). The Codex collector uses the same `snapshotLibrary`, `mergeLibraryRow` and `normalizeLibraryRecord`, so Steam-specific field rules have one source.
+
+1. Consent, pane, desktop-width viewport and account confirmation are as above. Open `https://steamcommunity.com/my/games/?tab=all` and check it is signed in as the expected account.
+2. Run the whole script with `javascript_tool` (it starts with `await`). In a measured session the 795 rows rendered progressively in about 2 s with no scrolling; the script waits (event driven) until the displayed "All Games (N)" count is reached and nothing changed for a quiet period (`quietMs`, 800 ms), and scrolls only if rendering stalls for `stallMs` (1500 ms), at most four times. Options: `callBudgetMs`, `maxMs`, `maxSteps`, `quietMs`, `stallMs`, `fresh`, `deliver`, `retainMs`. If it returns `{inProgress: true}`, resume with `await window.__gcLibraryRun({})`.
+3. Save with `--provenance tool-result` (the result file) and `--account`/`--access-scope signed-in`. There is **no** `--view` for the library: its view evidence (`tab=all`, empty search) is observed. The saver writes `library.json`, `library.partial.*` or `library.superseded.*` with the same consent, replacement, field-loss and concurrency rules as the wishlist.
+4. **Missing-value semantics.** Playtime, last played and achievements are parsed only from labels present in a row's own text by the one shared parser; the saver recomputes them from `pageText` and rejects any disagreement. An absent label is `null`, never `0`, and does not show that a game was unplayed (the page omits achievements for games without them, and the collector reports `rowsWithPlaytime`, `rowsWithLastPlayed`, `rowsWithAchievements` as informational counts). Labels are English only; a non-English page is warned about and, if its count cannot be read, the capture is not complete.
+5. **Settling and views.** The collector counts a row as changed only when a game appears or its name, playtime, last played or achievements change; volatile client text (install size, `DOWNLOAD`/`UNINSTALL`/`UPDATE`) never resets the quiet period. The view (tab, search, count) is checked before any rows are merged: rows from a different view are never added to the batches already collected. After a second change the envelope keeps only the coherent batches and describes *them* (`view`, `expectedCount`, and `ownerControls` computed from the retained rows), while `diagnostics.viewAtStop` records where the page was; the capture is incomplete. A change of text inside an already active search is not observable.
+6. **Older baselines stay separate.** A library cache written by the Codex collector (or any earlier capture) records no `account` and no `diagnostics.view`. The saver does not guess either, and the library has no attestation route for the view, so a new capture is saved as `library.partial.<time>.json` beside it until the baseline has that evidence (for example, after the Codex collector records the same view diagnostics). Passing `--existing-account <alias>` is only for a baseline the user has confirmed. In acceptance testing the new 795/795 capture was kept separate for exactly this reason and the existing `library.json` stayed byte-identical.
+7. `pageText` also contains install state and sizes (`DOWNLOAD`, `UNINSTALL`, `UPDATE`, sizes), which change without any change to the library; do not treat them as data.
+
+Live results (795 games): built-in browser 1 call, 0.9 s, 0 scroll steps, 795/795 through the native result file; the saver restored nested key order (the result file alphabetizes keys, including inside `achievements`, which first broke the records checksum). Compared with the Codex library cache from the previous day: 795/795 AppIDs, 0 added or removed, 0 differences in name, hours, playtime display, last played or achievements; `pageText` differed on 80 rows, 79 of them only in install size or button text. Live resume of the library was exercised with a forced two-call test (a 250 ms call budget, then `await window.__gcLibraryRun({})`), not with a collection that naturally exceeds the 45 s limit, since the page renders in about 2 s; longer resumes are covered by simulated tests.
+
 ## Observed runtime behavior (Claude desktop app, built-in browser)
 
 Verified live on a signed-in wishlist of about 165 items, 2026-11-26.
@@ -81,7 +95,8 @@ Live resume was exercised on an earlier version; the final version's resume, vie
 
 ```bash
 node tests/game-curator/test_browser.mjs              # Codex orchestration, incl. the placeholder regression
-node tests/game-curator/test_claude_code_page.mjs     # generated page script on a simulated DOM
+node tests/game-curator/test_claude_code_page.mjs     # generated wishlist page script on a simulated DOM
+node tests/game-curator/test_claude_code_library.mjs  # generated library page script on a simulated All Games page
 node tests/game-curator/test_claude_code.mjs          # saver, policy, settings, end-to-end page -> saver, generated-file freshness
 ```
 
