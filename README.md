@@ -58,7 +58,7 @@ Install the independent skill from a published revision with `npx skills add Cat
 
 Try “I liked these books for their explanations, but I only have a few hours. What should I read next?” The skill can use conversation alone, or normalize a user-supplied Goodreads CSV with Python 3. The importer is synthetic-tested and was exercised against one authenticated Goodreads export; its shelf totals matched the visible counts, while broader export coverage remains unverified. Authenticated Kindle for Web, its notes view, and Amazon content management were inspected, including separate personal documents; no Kindle collector or complete coverage is verified. See the [Goodreads export workflow](skills/book-curator/references/acquisition.md#goodreads-official-export-workflow), [identity and data](skills/book-curator/references/data.md), and [persistence](skills/book-curator/references/persistence.md). Run synthetic tests with `python3 -m unittest discover -s tests/book-curator`.
 
-Book Curator's optional profile and feedback, and separately authorized raw caches, use their own user-controlled home. Settings-based discovery is instruction-driven and fresh-session behavior has not been independently verified. Neither persistence nor an account is required.
+Book Curator's optional profile and feedback, and separately authorized raw caches, use their own user-controlled home. A maintainer reported worktree-based cross-session reuse of saved feedback and cache; installed-skill discovery and the fresh first-use and separate opt-in boundaries remain unverified. Persistence is instruction-driven. Neither persistence nor an account is required.
 
 ## Privacy and contributions
 
