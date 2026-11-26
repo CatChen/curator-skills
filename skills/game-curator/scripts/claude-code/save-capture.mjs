@@ -42,7 +42,7 @@ import crypto from 'node:crypto';
 import {normalizeLibraryRecord} from '../browser/library-rows.mjs';
 
 export const MAX_BACKUPS = 5; // bounded retention: at the limit new captures are kept separately; nothing is auto-deleted
-const ENVELOPE_ORDER = ['format', 'version', 'source', 'capturedAt', 'method', 'coverage', 'warnings', 'diagnostics', 'account', 'accessScope', 'records'];
+const ENVELOPE_ORDER = ['format', 'version', 'source', 'capturedAt', 'method', 'coverage', 'warnings', 'diagnostics', 'account', 'accessScope', 'diagnosticsScope', 'records'];
 const DEFAULT_SORT = 'Your Rank';
 const isPlainObject = o => !!o && typeof o === 'object' && !Array.isArray(o);
 
@@ -154,6 +154,47 @@ const SOURCES = {
       return losses;
     },
   },
+  // Replay: one record per annual report ({year, semanticText, apps}), keyed by year, not AppID. A page capture holds every year it reached;
+  // the saver splits it into per-year files (replay/<year>.json) that keep the original capture's metadata and say so (diagnosticsScope).
+  replay: {
+    file: 'replay', recordOrder: ['year', 'semanticText', 'apps'], nestedOrder: {apps: ['appid', 'name', 'source']}, rankBased: false, requiredDiagnostics: ['years', 'yearsPending', 'yearAttempts'],
+    keyLabel: 'year', keyOf: r => r.year, pendingKey: 'yearsPending', pendingLabel: 'annual reports',
+    validateKey(r, i, errors) { if (!Number.isInteger(r.year) || r.year < 2000 || r.year > 2099) errors.push(`record ${i} has an invalid year`); },
+    validateRecord(r, i, errors) {
+      if (typeof r.semanticText !== 'string' || !r.semanticText.trim() || /^LOADING\.\.\.$/i.test(r.semanticText.trim())) errors.push(`record ${i} has empty or placeholder semanticText`);
+      if (!Array.isArray(r.apps)) return errors.push(`record ${i} apps must be an array`);
+      const seen = new Set();
+      r.apps.forEach((a, j) => {
+        if (!isPlainObject(a) || Object.keys(a).some(k => !['appid', 'name', 'source'].includes(k))) return errors.push(`record ${i} app ${j} is malformed`);
+        if (!Number.isSafeInteger(a.appid) || a.appid <= 0) errors.push(`record ${i} app ${j} has an invalid appid`);
+        if (seen.has(a.appid)) errors.push(`record ${i} repeats appid ${a.appid}`); seen.add(a.appid);
+        if (!(a.name === null || (typeof a.name === 'string' && a.name.trim()))) errors.push(`record ${i} app ${j} has an invalid name`);
+        if (!['app-link', 'image-asset'].includes(a.source)) errors.push(`record ${i} app ${j} has an unexpected source`);
+      });
+    },
+    validateDiagnostics(d, recs, errors, env) {
+      const count = n => Number.isSafeInteger(n) && n >= 0;
+      if (!Array.isArray(d.years) || !d.years.every(y => Number.isInteger(y) && y >= 2000 && y <= 2099) || new Set(d.years).size !== d.years.length) errors.push('diagnostics.years must be distinct years');
+      for (const k of ['yearsPending', 'yearAttempts']) if (!count(d[k])) errors.push(`diagnostics.${k} must be a non-negative integer`);
+      if (Array.isArray(d.years)) {
+        if (env.diagnosticsScope === undefined && JSON.stringify(d.years) !== JSON.stringify(recs.map(r => r.year))) errors.push('diagnostics.years disagrees with the records');
+        if (env.diagnosticsScope !== undefined && recs.length === 1 && !d.years.includes(recs[0].year)) errors.push('the annual record is not among the original capture\'s years');
+        if (count(d.yearsPending) && d.expectedCount !== d.years.length + d.yearsPending) errors.push('diagnostics.expectedCount disagrees with the discovered years');
+        if (count(d.yearAttempts) && d.yearAttempts < d.years.length) errors.push('year attempts are inconsistent with the visited years');
+      }
+    },
+    incompleteReasons: recs => (recs.some(r => typeof r?.semanticText === 'string' && /(^|\n)\s*LOADING\.\.\.\s*(\n|$)/i.test(r.semanticText)) ? ['a report still contained a LOADING... placeholder, so its text may be partial'] : []),
+    ownerEvidence: d => d?.ownerControls === true, ownerLabel: 'owner-only evidence (the page visibility control on every report)',
+    viewOk: e => e?.diagnostics?.view?.kind === 'annual-report',
+    viewConflict: e => { const v = e?.diagnostics?.view; return !!v && v.kind != null && v.kind !== 'annual-report'; },
+    viewAttestable: false, viewSummaryKeys: ['kind', 'language'],
+    viewMessage: 'annual Replay reports (the annual-report view)',
+    fieldLosses(existing, next) { // one record per file: a retained game reference must not lose a name it had
+      const losses = {}, now = new Map((next.records[0]?.apps ?? []).map(a => [a.appid, a]));
+      for (const old of existing.records[0]?.apps ?? []) if (now.has(old.appid) && old.name && !now.get(old.appid).name) losses.name = (losses.name ?? 0) + 1;
+      return losses;
+    },
+  },
 };
 export const SOURCE_NAMES = Object.keys(SOURCES);
 const cfgOf = e => SOURCES[e?.source] ?? SOURCES.wishlist;
@@ -202,7 +243,8 @@ export function canonicalize(env) {
     ? rest.records.map(r => { // restore record and known nested key order (the harness alphabetizes every object, which changes JSON.stringify and the records checksum)
         const cfg = cfgOf(rest), order = cfg.recordOrder, nested = cfg.nestedOrder ?? {};
         if (!r || typeof r !== 'object') return r;
-        const fixed = Object.fromEntries(Object.entries(r).map(([f, v]) => [f, nested[f] && isPlainObject(v) ? {...Object.fromEntries(nested[f].filter(k => k in v).map(k => [k, v[k]])), ...Object.fromEntries(Object.entries(v).filter(([k]) => !nested[f].includes(k)))} : v]));
+        const order1 = (v, keys) => ({...Object.fromEntries(keys.filter(k => k in v).map(k => [k, v[k]])), ...Object.fromEntries(Object.entries(v).filter(([k]) => !keys.includes(k)))});
+        const fixed = Object.fromEntries(Object.entries(r).map(([f, v]) => [f, nested[f] && isPlainObject(v) ? order1(v, nested[f]) : nested[f] && Array.isArray(v) ? v.map(x => (isPlainObject(x) ? order1(x, nested[f]) : x)) : v]));
         return {...Object.fromEntries(order.filter(f => f in fixed).map(f => [f, fixed[f]])), ...Object.fromEntries(Object.entries(fixed).filter(([f]) => !order.includes(f)))};
       })
     : rest[k];
@@ -231,13 +273,33 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
   recs.forEach((r, i) => {
     if (!r || typeof r !== 'object') return errors.push(`record ${i} is not an object`);
     for (const k of Object.keys(r)) if (!allowed.has(k)) errors.push(`record ${i} has unexpected field ${k}`);
-    if (!Number.isSafeInteger(r.appid) || r.appid <= 0) errors.push(`record ${i} has an invalid appid`);
-    if (ids.has(r.appid)) errors.push(`duplicate appid ${r.appid}`); ids.add(r.appid);
+    if (rules.validateKey) rules.validateKey(r, i, errors);
+    else if (!Number.isSafeInteger(r.appid) || r.appid <= 0) errors.push(`record ${i} has an invalid appid`);
+    const key = rules.keyOf ? rules.keyOf(r) : r.appid;
+    if (ids.has(key)) errors.push(`duplicate ${rules.keyLabel ?? 'appid'} ${key}`); ids.add(key);
     rules.validateRecord(r, i, errors, env);
     if (rules.rankBased) { if (ranks.has(r.rank)) errors.push(`duplicate rank ${r.rank}`); ranks.add(r.rank); }
   });
   if (rules.rankBased && !recs.every((r, i) => r?.rank === i + 1)) incomplete.push('ranks are not contiguous 1..n');
-  if (isPlainObject(d)) {
+  // A per-year file split from a multi-year Replay capture keeps the ORIGINAL capture's diagnostics (counts and checksum describe the whole
+  // capture), says so with diagnosticsScope, and binds its single record by a checksum the saver recorded when it split the capture.
+  const annual = env.diagnosticsScope !== undefined;
+  if (annual) {
+    if (incoming) errors.push('a page transfer must not carry diagnosticsScope');
+    if (env.source !== 'replay' || env.diagnosticsScope !== 'original-multi-year-capture') errors.push('unsupported diagnosticsScope');
+    if (recs.length !== 1) errors.push('a per-year file must hold exactly one record');
+    const sp = d?.attestations?.split;
+    if (!(isPlainObject(sp) && recs.length === 1 && sp.year === recs[0].year && sp.recordSha256 === sha256(JSON.stringify(recs[0])) && Number.isSafeInteger(sp.originalRecords) && sp.originalRecords >= 1)) errors.push('a per-year file lacks a matching split attestation for its record');
+  }
+  incomplete.push(...(rules.incompleteReasons?.(recs) ?? []));
+  if (isPlainObject(d) && annual) {
+    if (typeof d.recordsSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.recordsSha256)) errors.push('the original capture\'s records checksum is missing');
+    if (!Number.isSafeInteger(d.uniqueCount) || d.uniqueCount < 1) errors.push('diagnostics.uniqueCount is invalid');
+    if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
+    rules.validateDiagnostics?.(d, recs, errors, env);
+    if (Number.isSafeInteger(d.yearsPending) && d.yearsPending > 0) incomplete.push(`${d.yearsPending} ${rules.pendingLabel} were not visited`);
+    if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
+  } else if (isPlainObject(d)) {
     if (d.uniqueCount !== recs.length) errors.push('diagnostics.uniqueCount disagrees with the records');
     if (rules.rankBased && d.ranksObserved !== recs.length) errors.push('diagnostics.ranksObserved disagrees with the records');
     if (!(d.expectedCount === null || Number.isSafeInteger(d.expectedCount))) errors.push('diagnostics.expectedCount is invalid');
@@ -246,12 +308,13 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
       else if (d.placeholderNameRows > 0) incomplete.push(`${d.placeholderNameRows} placeholder-name rows`);
     }
     if (typeof d.recordsSha256 !== 'string' || sha256(JSON.stringify(rules.observedRecords ? rules.observedRecords(recs) : recs)) !== d.recordsSha256) errors.push('records checksum mismatch (page vs transferred)');
-    if (Number.isSafeInteger(d.pagesPending) && d.pagesPending > 0) incomplete.push(`${d.pagesPending} review pages were not visited`);
+    const pend = d[rules.pendingKey ?? 'pagesPending'];
+    if (Number.isSafeInteger(pend) && pend > 0) incomplete.push(`${pend} ${rules.pendingLabel ?? 'review pages'} were not visited`);
     if (d.expectedCount !== null && d.expectedCount !== recs.length) incomplete.push(`displayed ${d.expectedCount} items but ${recs.length} records`);
     if (d.expectedCount === null) incomplete.push('the displayed count was not available, so coverage cannot be verified');
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
     if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
-    rules.validateDiagnostics?.(d, recs, errors);
+    rules.validateDiagnostics?.(d, recs, errors, env);
     // A transfer from a page is observation only: it may not carry attestations (those are added here, by the caller's verified inputs)
     // and, for reviews, may not carry names (a name only ever comes from the enrichment step that verifies it).
     if (incoming && 'attestations' in d) errors.push('a page transfer must not carry diagnostics.attestations');
@@ -276,6 +339,10 @@ function validExisting(e, source) {
   if (!e || typeof e !== 'object' || e.format !== 'game-curator-steam-export' || e.version !== 1 || e.source !== source) return false;
   if (!isIso(e.capturedAt) || typeof e.method !== 'string' || !e.method || !['partial', 'complete'].includes(e.coverage)) return false;
   if (!Array.isArray(e.warnings) || !e.diagnostics || typeof e.diagnostics !== 'object' || Array.isArray(e.diagnostics) || !Array.isArray(e.records)) return false;
+  if (source === 'replay') { // one annual report per file; legacy-tolerant (older files carry no account, view or attestations)
+    const r = e.records[0];
+    return e.records.length === 1 && Number.isInteger(r?.year) && typeof r.semanticText === 'string' && Array.isArray(r.apps) && r.apps.every(a => isPlainObject(a) && Number.isSafeInteger(a.appid) && a.appid > 0);
+  }
   const ids = new Set(), ranks = new Set(); // legacy-tolerant: no new diagnostics required, but no contradictions
   for (const r of e.records) {
     if (!r || !Number.isSafeInteger(r.appid) || r.appid <= 0 || !(typeof r.name === 'string' || (source === 'library' && r.name === null) || (source === 'reviews' && r.name === undefined)) || (source !== 'reviews' && typeof r.pageText !== 'string')) return false;
@@ -329,8 +396,9 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
   // Main creation and promotion both need an established identity, scope and view; otherwise keep it separate.
   if (!established(next)) return {action: 'separate', reason: 'account identity or access scope is not established (signed-in or public with a verified account)', notes};
   if (!cfg.viewOk(next)) return {action: 'separate', reason: `capture is not verified as ${cfg.viewMessage}`, notes};
-  if (!existing) return {action: 'create', reason: `no existing ${cfg.file}.json; established account and scope, verified view`, notes};
+  if (!existing) return {action: 'create', reason: `no existing ${next.source === 'replay' ? `replay/${next.records[0].year}` : cfg.file}.json; established account and scope, verified view`, notes};
   if (!validExisting(existing, next.source)) return {action: 'separate', reason: `existing file is not a valid ${next.source} envelope; preserved untouched`, notes};
+  if (next.source === 'replay' && existing.records[0].year !== next.records[0].year) return {action: 'separate', reason: 'existing file holds a different year; preserved untouched', notes};
   if ((existing.account ?? existingAccount) !== next.account) return {action: 'separate', reason: 'account identity differs or is unknown', notes};
   if (existing.accessScope !== next.accessScope) return {action: 'separate', reason: 'access scope differs or is not established', notes};
   if (existing.coverage !== next.coverage) return {action: 'separate', reason: 'coverage differs', notes};
@@ -371,8 +439,8 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
   if (fs.readFileSync(file, 'utf8') !== text) throw new Error(`read-back mismatch for ${file}`);
 }
 
-export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent, ...policy} = {}) {
-  const stem = cfgOf(env).file, main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
+export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent, stem: stemOverride, ...policy} = {}) {
+  const stem = stemOverride ?? cfgOf(env).file, main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
   const decisionBytes = readIfExists(main);
   let existing = null;
   if (decisionBytes) { try { existing = JSON.parse(decisionBytes.toString('utf8')); } catch { existing = {malformed: true}; } }
@@ -414,6 +482,15 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
     if (lockHeld) try { fs.unlinkSync(lock); } catch {}
   }
   return result;
+}
+
+// Split a validated multi-year Replay capture into one envelope per year, in year order. Each keeps the capture's metadata (account, access
+// scope, warnings, observed diagnostics and attestations), is labeled as carrying the ORIGINAL multi-year capture's diagnostics, and records a
+// checksum of its own record so the per-year file stays verifiable without the original.
+export function splitReplay(env) {
+  const {records, ...rest} = env, n = records.length;
+  return [...records].sort((a, b) => a.year - b.year).map(r => canonicalize({...rest, diagnosticsScope: 'original-multi-year-capture', records: [r],
+    diagnostics: {...env.diagnostics, attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(r)), originalRecords: n}}}}));
 }
 
 // True only when this file is the process entry point, including when invoked through a symlink or a path
@@ -477,6 +554,7 @@ if (isMain()) {
     let toSave = env;
     const namesFrom = opt('--names-from'), libraryAccount = opt('--library-account');
     if (libraryAccount !== undefined && namesFrom === undefined) throw new Error('--library-account applies only with --names-from');
+    if (namesFrom !== undefined && env.source !== 'reviews') throw new Error('--names-from applies only to a reviews capture');
     if (namesFrom !== undefined) { // read-only use of the user's library cache, inside the same consent scope; the file is never modified
       if (libraryAccount !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(libraryAccount)) throw new Error('unsafe --library-account alias');
       let libBytes, library; try { libBytes = fs.readFileSync(namesFrom); library = JSON.parse(libBytes.toString('utf8')); } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
@@ -488,9 +566,21 @@ if (isMain()) {
     env = toSave;
     env.diagnostics = {...env.diagnostics, attestations};
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
-    const result = save(canonicalize(env), dest, {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
+    const policy = {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
-      recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))});
-    console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun}, null, 2));
+      recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))};
+    if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
+      const outcomes = [];
+      for (const annual of splitReplay(canonicalize(env))) {
+        const year = annual.records[0].year;
+        try { const r = save(annual, path.join(dest, 'replay'), {...policy, stem: String(year)}); outcomes.push({year, action: r.action, reason: r.reason, notes: r.notes, target: r.target, backup: r.backup, bytes: r.bytes, sha256: r.sha256}); }
+        catch (e) { outcomes.push({year, error: String(e.message ?? e)}); }
+      }
+      console.log(JSON.stringify({source: 'replay', capturedAt: env.capturedAt, records: env.records.length, years: outcomes, dryRun}, null, 2));
+      if (outcomes.some(o => o.error)) process.exit(1);
+    } else {
+      const result = save(canonicalize(env), dest, policy);
+      console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun}, null, 2));
+    }
   } catch (e) { console.error(String(e.message ?? e)); process.exit(1); }
 }
