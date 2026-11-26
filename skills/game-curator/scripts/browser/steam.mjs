@@ -3,6 +3,7 @@
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from './wishlist-rows.mjs';
 import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord} from './library-rows.mjs';
 import {snapshotReviews} from './review-rows.mjs';
+import {snapshotReplay, replayLoading, dedupeReplayApps} from './replay-rows.mjs';
 
 const LIMIT = 80;
 
@@ -148,38 +149,20 @@ export async function collectReplay(tab, {maxYears=20} = {}) {
   while (attempts < maxYears) {
     try {
       attempts++;
-      const extract = () => read(tab, () => {
-        if (location.protocol !== 'https:' || location.hostname !== 'store.steampowered.com') throw Error('Open a verified Steam Replay page');
-        const m = location.pathname.match(/^(\/replay\/[^/]+)\/(20\d{2})\/?$/);
-        if (!m) throw Error('Open an annual Steam Replay page');
-        const content = document.querySelector('.responsive_page_template_content');
-        const text = content?.innerText.trim() || '';
-        const links = [...document.querySelectorAll('a[href]')].map(a=>a.href).filter(h=>{try{let u=new URL(h);return u.origin===location.origin && u.pathname.startsWith(m[1]+'/') && /\/20\d{2}\/?$/.test(u.pathname)}catch{return false}});
-        const apps = [...content?.querySelectorAll('a[href*="/app/"]') || []].map(a=>{const id=a.href.match(/\/app\/(\d+)/);return id?{appid:Number(id[1]),name:a.innerText.trim()||a.querySelector('img')?.alt||null,source:'app-link'}:null}).filter(Boolean);
-        for (const img of content?.querySelectorAll('img[src]') || []) {
-          const id=(img.getAttribute('src')||'').match(/\/steam\/apps\/(\d+)\//);
-          if (id) apps.push({appid:Number(id[1]),name:img.alt?.trim()||null,source:'image-asset'});
-        }
-        return {year:Number(m[2]), accountPath:m[1], text, links, apps};
-      });
+      const extract = () => read(tab, snapshotReplay);
       let data = await extract();
-      for (let attempt=0; attempt<8 && (!data.text || /^(LOADING\.\.\.)$/i.test(data.text)); attempt++) {
+      for (let attempt=0; attempt<8 && replayLoading(data.text); attempt++) {
         await new Promise(resolve=>setTimeout(resolve,500));
         data = await extract();
       }
       if (accountPath !== null && data.accountPath !== accountPath) throw Error('Replay account changed');
-      if (!data.text || /^(LOADING\.\.\.)$/i.test(data.text)) throw Error('Replay report did not finish loading');
+      if (replayLoading(data.text)) throw Error('Replay report did not finish loading');
       if (requestedYear !== null && data.year !== requestedYear) {
         warnings.push(`Replay navigation did not reach requested year ${requestedYear}; preserving partial records.`); break;
       }
       if (visited.has(data.year)) { warnings.push('Replay navigation returned a previously visited year; preserving partial records.'); break; }
       accountPath = data.accountPath; visited.add(data.year);
-      const apps = new Map();
-      for (const app of data.apps) {
-        const prior = apps.get(app.appid);
-        if (!prior || (prior.source === 'image-asset' && app.source === 'app-link')) apps.set(app.appid,app);
-      }
-      records.push({year:data.year,semanticText:data.text,apps:[...apps.values()]});
+      records.push({year:data.year,semanticText:data.text,apps:dedupeReplayApps(data.apps)});
       for (const link of data.links) {const year=Number(new URL(link).pathname.match(/\/(20\d{2})\/?$/)?.[1]);if(year&&!visited.has(year)&&!pending.some(x=>x.year===year))pending.push({year,link});}
       if (!pending.length) break;
       const next = pending.shift(); requestedYear = next.year; await tab.goto(next.link); await refresh(tab);
