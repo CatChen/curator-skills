@@ -2,7 +2,7 @@
 
 ## Status and organization
 
-Game Curator is implemented with conversational curation and experimental partial Steam page collectors that return versioned records. Initial authenticated Chrome and IAB tests exercised collection; coverage and compatibility remain subject to runtime permissions and Steam changes. There is no automated multi-capture archive or historical-format importer; see [data and tools](../skills/game-curator/references/data.md). Book Curator is planned; Kindle and Goodreads are intended sources whose availability and reliability require investigation.
+Game Curator is implemented with conversational curation and experimental partial Steam page collectors that return versioned records. Initial authenticated Chrome and IAB tests exercised collection; coverage and compatibility remain subject to runtime permissions and Steam changes. There is no automated multi-capture archive or historical-format importer; see [data and tools](../skills/game-curator/references/data.md). Book Curator supports conversational curation and Goodreads CSV normalization tested with synthetic data and one authenticated export. Kindle browser collection, comprehensive Goodreads coverage, and cross-session persistence remain unverified; see [acquisition](../skills/book-curator/references/acquisition.md).
 
 Each skill lives in `skills/<skill-name>/` and is independently installable and self-contained. Follow the [Agent Skills specification](https://agentskills.io/specification): a valid `SKILL.md` is the entry point, with optional `references/`, `scripts/`, and useful `assets/`. Keep core instructions concise and load supporting material as needed. Do not create empty skills simply to represent plans.
 
