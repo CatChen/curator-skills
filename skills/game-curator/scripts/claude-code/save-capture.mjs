@@ -4,12 +4,26 @@
 //
 //   node save-capture.mjs <file | -> --account <alias> --access-scope signed-in|public|unknown
 //        [--dest <cache/steam dir>] [--settings <settings.json>] [--view unfiltered]
-//        [--existing-account <alias>] [--existing-view unfiltered] [--keep-separate] [--dry-run]
+//        [--existing-account <alias>] [--existing-view unfiltered] [--keep-separate] [--provenance tool-result|download] [--page-summary '<json>'] [--source-sha256 <64 hex>] [--expect-bytes <n>] [--dry-run]
 // (--view / --existing-view / --existing-account are confirmations by the user or caller, not observations.)
 //
 // Input is the file Claude Code writes when a javascript_tool result is too large (a JSON array of
-// {type,text}), a plain JSON envelope file, or "-" for stdin for a file the user supplies. The model must not
-// retype or reconstruct data; a result returned inline has no supported route to disk (report that blocker).
+// {type,text}: the runtime's own transfer), a plain JSON envelope file (for example a browser download), or "-"
+// for stdin for a file the user supplies. The model must not retype or reconstruct data; a result returned
+// inline has no supported route to disk (report that blocker).
+//
+// Transfer evidence (verification levels, not one mechanism). Provenance is declared by the caller, never inferred
+// from the file's shape; without --provenance a capture is kept as a separate snapshot.
+//   --provenance tool-result  the caller received this exact file from the runtime's own tool-result mechanism for
+//                             this run (the file must have that structure, which is necessary but not sufficient).
+//   --provenance download     the caller verified the actual downloaded file for this run and passes the page's own
+//                             summary with --page-summary. The saver then checks the file name, byte count, capture
+//                             time, source, record count, expected count, completeness, stop reason and view against
+//                             the received file; any mismatch rejects the file as not the one the page produced.
+// --source-sha256 is OPTIONAL STRONGER evidence and must be a digest obtained independently at the source. A digest
+// computed only after receipt proves nothing about source-to-destination transfer; it is recorded as a local
+// fingerprint. When no source digest exists the saver records that and never claims exact end-to-end byte equality.
+// The envelope's own records checksum is always recomputed; it covers the records, not the surrounding metadata.
 //
 // Cache policy (persistence.md "Freshness, refresh and safe replacement"). Nothing is merged and nothing is
 // deleted. A capture becomes wishlist.json (created or replacing) only when its account and scope are established
@@ -45,6 +59,27 @@ export function parseToolResult(raw) {
   const end = value.search(/\n\n\(captured at origin /);
   return JSON.parse(end >= 0 ? value.slice(0, end) : value);
 }
+
+// Check the page's own summary (from the tool result) against the file actually received. Returns the list of
+// mismatches; an empty list means every available non-filtered summary fact agrees.
+export function checkPageSummary(summary, env, receivedBytes, fileName) {
+  const bad = [], d = env.diagnostics ?? {};
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return ['page summary is not an object'];
+  if (summary.downloadInitiated !== true) bad.push('summary does not report a download');
+  if (summary.source !== env.source) bad.push('source differs');
+  if (summary.capturedAt !== env.capturedAt) bad.push('capture time differs');
+  if (summary.bytes !== receivedBytes) bad.push(`byte count differs (summary ${summary.bytes}, received ${receivedBytes})`);
+  if (summary.records !== env.records.length) bad.push('record count differs');
+  if (summary.expected !== d.expectedCount) bad.push('displayed count differs');
+  if (summary.complete !== d.complete) bad.push('completeness differs');
+  if (summary.stopReason !== d.stopReason) bad.push('stop reason differs');
+  if (JSON.stringify([summary.view?.sort, summary.view?.search, summary.view?.filters]) !== JSON.stringify([d.view?.sort, d.view?.search, d.view?.filters])) bad.push('view differs');
+  if (typeof summary.file !== 'string' || summary.file !== fileName) bad.push(`file name differs (summary ${JSON.stringify(summary.file)}, received ${JSON.stringify(fileName)}); a renamed or duplicate-named copy is ambiguous`);
+  else if (summary.file !== `gc-wishlist-${String(env.capturedAt).replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`) bad.push('file name does not match the capture time');
+  return bad;
+}
+
+export function isToolResult(raw) { try { return Array.isArray(JSON.parse(raw)); } catch { return false; } }
 
 // Restore the collector's key order (the harness alphabetizes keys) without dropping anything: unknown fields
 // are kept so validate() can reject them instead of silently stripping evidence.
@@ -140,10 +175,11 @@ export function fieldLosses(existing, next) {
 }
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'separate', reason, notes}.
-export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = []} = {}) {
+export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
   const notes = [];
   if (keepSeparate) return {action: 'separate', reason: 'user asked to keep this capture separate', notes};
   if (incomplete.length) return {action: 'separate', reason: `incomplete capture: ${incomplete.join('; ')}`, notes};
+  if (!transferVerified) return {action: 'separate', reason: 'transfer not verified: provenance was not established by the caller (--provenance tool-result, or --provenance download with a matching --page-summary)', notes};
   // Main creation and promotion both need an established identity, scope and view; otherwise keep it separate.
   if (!established(next)) return {action: 'separate', reason: 'account identity or access scope is not established (signed-in or public with a verified account)', notes};
   if (!unfiltered(viewOf(next))) return {action: 'separate', reason: 'capture is not verified as default sort, empty search and unfiltered; a filtered list can omit wishlist members', notes};
@@ -242,22 +278,49 @@ function isMain() {
 }
 
 if (isMain()) {
-  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view'];
-  const opt = n => { const i = args.indexOf(n); return i < 0 ? undefined : args[i + 1]; };
+  const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view', '--source-sha256', '--expect-bytes', '--provenance', '--page-summary'];
+  const opt = n => { // a flag that needs a value must have one: never silently skip a given safeguard
+    const i = args.indexOf(n);
+    if (i < 0) return undefined;
+    if (i + 1 >= args.length || args[i + 1].startsWith('--')) throw new Error(`${n} needs a value`);
+    return args[i + 1];
+  };
   const file = args.find((a, i) => (!a.startsWith('--') || a === '-') && !valued.includes(args[i - 1]));
   if (!file) { console.error('usage: save-capture.mjs <file | -> --account <alias> --access-scope <scope> [options]'); process.exit(2); }
   try {
     const dryRun = args.includes('--dry-run');
     const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
     checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
-    const raw = file === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(file, 'utf8');
+    const rawBytes = file === '-' ? fs.readFileSync(0) : fs.readFileSync(file); // Buffer: hash the exact received bytes, before decoding
+    const sourceSha = opt('--source-sha256'), expectBytes = opt('--expect-bytes'), provenanceArg = opt('--provenance'), summaryArg = opt('--page-summary');
+    if (sourceSha !== undefined && !/^[0-9a-fA-F]{64}$/.test(sourceSha)) throw new Error('--source-sha256 must be exactly 64 hexadecimal characters');
+    if (expectBytes !== undefined && !/^\d+$/.test(expectBytes)) throw new Error('--expect-bytes must be a non-negative integer');
+    if (provenanceArg !== undefined && !['tool-result', 'download'].includes(provenanceArg)) throw new Error('--provenance must be tool-result or download');
+    if (sourceSha !== undefined && sha256(rawBytes) !== sourceSha.toLowerCase()) throw new Error('Received file does not match --source-sha256 (incomplete, changed, or not the expected file)');
+    if (expectBytes !== undefined && rawBytes.length !== Number(expectBytes)) throw new Error(`Received file is ${rawBytes.length} bytes, expected ${expectBytes}`);
+    const raw = rawBytes.toString('utf8');
+    if (provenanceArg === 'tool-result' && !isToolResult(raw)) throw new Error('--provenance tool-result was declared but the file does not have the runtime tool-result structure');
+    if (provenanceArg === 'download' && isToolResult(raw)) throw new Error('--provenance download was declared but the file is a tool-result file');
     const env = canonicalize(parseToolResult(raw));
+    let summaryChecks = null;
+    if (summaryArg !== undefined) {
+      let summary; try { summary = JSON.parse(summaryArg); } catch { throw new Error('--page-summary is not valid JSON'); }
+      if (provenanceArg !== 'download') throw new Error('--page-summary applies only with --provenance download');
+      const bad = checkPageSummary(summary, env, rawBytes.length, file === '-' ? undefined : path.basename(file));
+      if (bad.length) throw new Error(`The received file does not match the page's summary, so it is not the file this run produced:\n- ${bad.join('\n- ')}`);
+      summaryChecks = ['file name', 'byte count', 'capture time', 'source', 'record count', 'displayed count', 'completeness', 'stop reason', 'view'];
+    }
+    // Verified means the caller established it: a declared tool-result file, or a download whose page summary matched every fact.
+    const transferVerified = (provenanceArg === 'tool-result') || (provenanceArg === 'download' && summaryChecks !== null);
+    const level = provenanceArg === 'tool-result' ? 'runtime-tool-result' : transferVerified ? (sourceSha !== undefined ? 'download-summary-and-source-digest' : 'download-summary-verified') : 'unverified';
     const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
     const {errors, incomplete} = validate(env, {account, accessScope});
     if (errors.length) { console.error('Rejected (not a valid wishlist envelope):\n- ' + errors.join('\n- ')); process.exit(1); }
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
-    const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope};
+    const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope,
+      transfer: {provenance: provenanceArg ?? 'unspecified', level, receivedBytes: rawBytes.length, localSha256Fingerprint: sha256(rawBytes), sourceDigest: sourceSha !== undefined ? 'matched' : 'unavailable',
+        pageSummaryChecks: summaryChecks ?? [], note: sourceSha !== undefined ? 'An independently obtained source digest matched the received bytes.' : 'No independent whole-file source digest was available; the local fingerprint only identifies the received file. Exact end-to-end byte equality is not claimed.'}};
     if (account) { env.account = account; attestations.account = account; }
     env.accessScope = accessScope; attestations.accessScope = accessScope;
     if (opt('--view') === 'unfiltered') { // the caller confirmed the page showed the default sort with no filters
@@ -266,7 +329,7 @@ if (isMain()) {
       attestations.filters = 'none';
     }
     env.diagnostics = {...env.diagnostics, attestations};
-    const result = save(canonicalize(env), dest, {dryRun, incomplete, existingAccount: opt('--existing-account'),
+    const result = save(canonicalize(env), dest, {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
       recheckConsent: () => checkCacheAuthorized(dest, opt('--settings'))});
     console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun}, null, 2));

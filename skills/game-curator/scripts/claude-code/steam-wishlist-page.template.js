@@ -3,15 +3,22 @@
 //
 // Run the WHOLE generated file as the `text` of mcp__Claude_Browser__javascript_tool (action javascript_exec)
 // on the verified signed-in https://store.steampowered.com/wishlist/... tab. It is one async expression that
-// registers itself as window.__gcWishlistRun and runs once. Read-only: it reads the DOM and scrolls the
+// registers itself as window.__gcWishlistRun and runs once. The leading `await` matters: Claude in Chrome's tool
+// does not await a trailing promise (it returns {}), while REPL top-level await works in both browsers' tools. Read-only: it reads the DOM and scrolls the
 // wishlist's own scroll container; no requests, no clicks, no internal page state. Its only page state is
 // window.__gcWishlist (its own rows) and window.__gcWishlistRun, both removed when the run ends or fails.
 //
 // javascript_tool is cut off at 45 s per call, so a long run returns {inProgress:true,...} and resumes with
 // the one-line call `await window.__gcWishlistRun({})`. Options (object literal on the last line):
 //   callBudgetMs (35000, per call)  maxMs (150000)  maxSteps (1000)  fresh (discard saved state)
-// maxMs and maxSteps are remembered across resume calls; the rest apply to the call they are passed to.
-(window.__gcWishlistRun = async (opts = {}) => {
+//   deliver: 'return' (default) returns the envelope as the tool result. 'download' makes the page start a local
+//   file download (a Blob, no network) and returns only a small summary that reports INITIATION, not receipt: the
+//   browser may block, hold or relocate the file, so confirm it on disk. Use it only where the host permits downloads
+//   and the user has authorized it (see references/claude-in-chrome.md). The finished envelope is then kept in
+//   collector-owned page state for retainMs (default 10 minutes) so an authorized retry needs no rescrape:
+//   window.__gcWishlistRedeliver() starts the download again, window.__gcWishlistRelease() discards it.
+// maxMs, maxSteps, deliver and retainMs are remembered across resume calls; the rest apply to the call they are passed to.
+await (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   /*@@SHARED@@*/
   const cleanup = () => { delete window.__gcWishlist; delete window.__gcWishlistRun; };
@@ -49,7 +56,7 @@
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: []});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, retainMs: opts.retainMs});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -66,7 +73,7 @@
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    for (const k of ['maxMs', 'maxSteps', 'deliver', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
@@ -134,7 +141,7 @@
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: S.opts.deliver, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
@@ -154,8 +161,8 @@
     warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account and membership.');
     warnings.push('Consistency was checked for observed rows and the displayed count, sort and search only; changes confined to unobserved ranks cannot be detected.');
     warnings.push('Wishlist filters were not verified (only sort and search state were recorded); confirm them before treating this as the full wishlist.');
-    const bytes = new TextEncoder().encode(JSON.stringify(c.records));
-    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const sha256Hex = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const sha = await sha256Hex(new TextEncoder().encode(JSON.stringify(c.records)));
     const envelope = {
       format: 'game-curator-steam-export', version: 1, source: 'wishlist',
       capturedAt: c.finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
@@ -168,6 +175,27 @@
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
+    if (c.deliver === 'download') { // initiation only; the envelope is retained (bounded) until the caller releases it or it expires
+      const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
+      const file = `gc-wishlist-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
+      const retainMs = Math.min(Math.max(Number(c.retainMs) || 600000, 1000), 3600000), expiresAt = Date.now() + retainMs;
+      window.__gcWishlistRelease?.(); // a new delivery replaces and releases any earlier retained one (timer and state)
+      const start = () => {
+        const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+        a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      };
+      const release = () => { clearTimeout(window.__gcWishlistExpiry); delete window.__gcWishlistRedeliver; delete window.__gcWishlistRelease; delete window.__gcWishlistExpiry; return 'released'; };
+      // Timers can be delayed in background tabs, so redelivery checks the absolute expiry as well as the timer.
+      window.__gcWishlistRedeliver = () => { if (Date.now() > expiresAt) { release(); return {expired: true, retry: false}; } start(); return {downloadInitiated: true, retry: true, file, bytes}; };
+      window.__gcWishlistRelease = release;
+      window.__gcWishlistExpiry = setTimeout(release, retainMs);
+      start();
+      const d = envelope.diagnostics;
+      return {downloadInitiated: true, source: 'wishlist', capturedAt: envelope.capturedAt, file, bytes, retainedForMs: retainMs, records: c.records.length, expected: d.expectedCount,
+        complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view,
+        note: 'Initiation only. Confirm the file exists with the reported byte count before using it.'};
+    }
     return envelope;
   }
 })({})

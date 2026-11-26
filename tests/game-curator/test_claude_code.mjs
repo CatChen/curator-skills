@@ -4,12 +4,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {parseToolResult, canonicalize, validate, decide, fieldLosses, checkCacheAuthorized, save, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {parseToolResult, canonicalize, validate, decide as decideRaw, fieldLosses, checkCacheAuthorized, save as saveRaw, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 import {spawnSync} from 'node:child_process';
 import {makeWishlistPage} from './fake-wishlist-dom.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+// Policy tests assume verified transfer unless a case says otherwise (the default is fail-closed).
+const decide = (o, n, c = {}) => decideRaw(o, n, {transferVerified: true, ...c});
+const save = (e, d, c = {}) => saveRaw(e, d, {transferVerified: true, ...c});
 const row = (i, {labels = ['RELEASE DATE:', 'ENGLISH REVIEWS:', 'USER TAGS:', 'MY CATEGORIES:'], base = 1000} = {}) => ({appid: base + i, rank: i, name: `Game ${i}`,
   pageText: `Game ${i}\n${labels.map(l => `${l}\nx`).join('\n')}\n$9.99`, membershipSource: 'wishlist-row'});
 function make(n, {at = '2026-11-26T02:37:30.226Z', account, accessScope = 'signed-in', view = {sort: 'Your Rank', search: 'empty', filters: 'none'}, records, diag = {}} = {}) {
@@ -70,6 +73,8 @@ const U = {sort: 'Your Rank', search: 'empty', filters: 'none'};
 const old = make(4, {account: 'me', at: '2026-11-25T00:00:00Z'});
 const next = make(3, {account: 'me', at: '2026-11-26T03:00:00Z'});
 assert.equal(decide(null, next).action, 'create');
+assert.match(decideRaw(null, next).reason, /transfer not verified/); // fail closed unless the caller establishes verified transfer
+assert.equal(decideRaw(null, next, {transferVerified: true}).action, 'create');
 assert.equal(decide(old, next).action, 'replace'); // a legitimately smaller unfiltered wishlist replaces
 assert.match(decide(old, next).notes.join(), /1 removed/);
 const reason = (o, n, ctx) => decide(o, n, ctx).reason;
@@ -221,7 +226,7 @@ fs.rmSync(tmp, {recursive: true});
   assert.deepEqual(fs.readdirSync(cache), []);
   fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
   // complete capture with confirmed view -> main file; observed evidence and attestations stay separate
-  let r = run(good, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered');
+  let r = run(good, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered', '--provenance', 'tool-result');
   assert.equal(r.status, 0, r.stderr); assert.equal(JSON.parse(r.stdout).action, 'create');
   const saved = JSON.parse(fs.readFileSync(path.join(cache, 'wishlist.json'), 'utf8'));
   assert.equal(saved.accessScope, 'signed-in'); assert.equal(saved.account, 'me');
@@ -250,6 +255,75 @@ fs.rmSync(tmp, {recursive: true});
   const eout = JSON.parse(r.stdout); assert.equal(eout.action, 'separate');
   assert.equal(JSON.parse(fs.readFileSync(eout.target, 'utf8')).records.length, 0);
   assert.notEqual(run(empty, '--account', 'me', '--access-scope', 'signed-in').status, 0); // signed-in claim has no owner evidence
+  // Verification levels. Provenance is declared by the caller, never inferred from file shape.
+  const U2 = {sort: 'Your Rank', search: 'empty', filters: 'unknown'}; // as a real page reports it: filters unobserved
+  const dl = make(5, {view: U2, at: '2026-11-26T04:30:00.000Z', diag: {}});
+  const dlName = 'gc-wishlist-20261126T043000Z.json';
+  const dlFile = path.join(home2, dlName); fs.writeFileSync(dlFile, JSON.stringify(dl, null, 2) + '\n');
+  const dlBytes = fs.statSync(dlFile).size;
+  const summary = {downloadInitiated: true, source: 'wishlist', capturedAt: dl.capturedAt, file: dlName, bytes: dlBytes, records: 5, expected: 5, complete: true, stopReason: 'complete', view: U2};
+  const baseFlags = ['--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered', '--dry-run'];
+  const ok = r2 => { assert.equal(r2.status, 0, r2.stderr); return JSON.parse(r2.stdout); };
+  // missing provenance or missing summary: kept separate
+  for (const extra of [[], ['--provenance', 'download']]) {
+    const d = ok(run(dlFile, ...baseFlags, ...extra)); assert.equal(d.action, 'separate'); assert.match(d.reason, /provenance was not established/);
+  }
+  // verified download: provenance + a page summary that agrees on every fact -> eligible under the ordinary policy
+  const sumArg = JSON.stringify(summary);
+  assert.doesNotMatch(ok(run(dlFile, ...baseFlags, '--provenance', 'download', '--page-summary', sumArg)).reason, /provenance|transfer not verified/);
+  // each mismatching fact rejects the file as not the one the page produced
+  for (const [label, patch, re] of [['bytes', {bytes: dlBytes + 1}, /byte count differs/], ['records', {records: 4}, /record count differs/], ['capturedAt', {capturedAt: '2026-11-26T04:31:00.000Z'}, /capture time differs/],
+    ['stopReason', {stopReason: 'budget'}, /stop reason differs/], ['complete', {complete: false}, /completeness differs/], ['expected', {expected: 6}, /displayed count differs/],
+    ['view', {view: {...U2, sort: 'Name'}}, /view differs/], ['source', {source: 'library'}, /source differs/], ['not a download', {downloadInitiated: false}, /does not report a download/],
+    ['renamed copy', {file: 'gc-wishlist-20261126T043000Z (1).json'}, /file name differs/]]) {
+    const r2 = run(dlFile, ...baseFlags, '--provenance', 'download', '--page-summary', JSON.stringify({...summary, ...patch}));
+    assert.notEqual(r2.status, 0, `${label} mismatch must be rejected`); assert.match(r2.stderr, re, label);
+  }
+  // a duplicate-named copy of the right bytes is ambiguous and rejected
+  const dup = path.join(home2, 'gc-wishlist-20261126T043000Z (1).json'); fs.copyFileSync(dlFile, dup);
+  let r3 = run(dup, ...baseFlags, '--provenance', 'download', '--page-summary', sumArg); assert.notEqual(r3.status, 0); assert.match(r3.stderr, /file name differs/);
+  // a file renamed to the right name but with the wrong capture stamp is rejected too
+  const stamped = {...dl, capturedAt: '2026-11-26T04:30:01.000Z'}; fs.writeFileSync(path.join(home2, 'x.json'), JSON.stringify(stamped));
+  // malformed arguments are errors, never silently skipped
+  for (const [label, args2, re] of [['summary not JSON', ['--provenance', 'download', '--page-summary', '{nope'], /not valid JSON/], ['summary without download provenance', ['--page-summary', sumArg], /applies only with --provenance download/],
+    ['unknown provenance', ['--provenance', 'trust-me'], /must be tool-result or download/], ['missing provenance value', ['--provenance'], /needs a value/], ['missing summary value', ['--provenance', 'download', '--page-summary'], /needs a value/]]) {
+    const r2 = run(dlFile, ...baseFlags, ...args2); assert.notEqual(r2.status, 0, label); assert.match(r2.stderr, re, label);
+  }
+  // an array-shaped file does not by itself establish tool-result provenance
+  const shaped = path.join(home2, 'array-shaped.json'); fs.writeFileSync(shaped, harness(dl));
+  let d2 = ok(run(shaped, ...baseFlags)); assert.equal(d2.action, 'separate'); assert.match(d2.reason, /provenance was not established/);
+  r3 = run(shaped, ...baseFlags, '--provenance', 'download'); assert.notEqual(r3.status, 0); assert.match(r3.stderr, /is a tool-result file/);
+  r3 = run(dlFile, ...baseFlags, '--provenance', 'tool-result'); assert.notEqual(r3.status, 0); assert.match(r3.stderr, /tool-result structure/);
+  assert.doesNotMatch(ok(run(shaped, ...baseFlags, '--provenance', 'tool-result')).reason, /provenance|transfer not verified/); // the caller declared it for this run
+  // optional stronger evidence: an independently obtained SOURCE digest; strictly formatted, matched against the exact received bytes
+  const exactSha = crypto.createHash('sha256').update(fs.readFileSync(dlFile)).digest('hex');
+  assert.equal(ok(run(dlFile, ...baseFlags, '--provenance', 'download', '--page-summary', sumArg, '--source-sha256', exactSha)).action !== undefined, true);
+  for (const [label, extra, re] of [['mismatching digest', ['--source-sha256', '0'.repeat(64)], /does not match --source-sha256/], ['missing value', ['--source-sha256'], /needs a value/],
+    ['flag followed by flag', ['--source-sha256', '--dry-run'], /needs a value|64 hexadecimal/], ['grouped digest', ['--source-sha256', exactSha.match(/.{8}/g).join(' ')], /64 hexadecimal/],
+    ['short digest', ['--source-sha256', exactSha.slice(0, 40)], /64 hexadecimal/], ['non-hex digest', ['--source-sha256', 'z'.repeat(64)], /64 hexadecimal/],
+    ['bad byte count', ['--expect-bytes', 'abc'], /non-negative integer/], ['wrong byte count', ['--expect-bytes', '1'], /expected 1/], ['missing byte value', ['--expect-bytes'], /needs a value/]]) {
+    const r2 = run(dlFile, ...baseFlags, ...extra); assert.notEqual(r2.status, 0, `${label} must be rejected, not skipped`); assert.match(r2.stderr, re, label);
+  }
+  // hashing covers the raw received bytes before decoding: a file containing an invalid UTF-8 byte
+  const baseBuf = Buffer.from(JSON.stringify(dl));
+  const withBadByte = Buffer.concat([baseBuf.subarray(0, baseBuf.length - 1), Buffer.from([0x20, 0xff, 0x20]), baseBuf.subarray(baseBuf.length - 1)]);
+  const badFile = path.join(home2, 'badbyte.json'); fs.writeFileSync(badFile, withBadByte);
+  const rawSha = crypto.createHash('sha256').update(withBadByte).digest('hex'), decodedSha = crypto.createHash('sha256').update(withBadByte.toString('utf8')).digest('hex');
+  assert.notEqual(rawSha, decodedSha, 'fixture must distinguish raw-byte from decoded-string hashing');
+  r3 = run(badFile, ...baseFlags, '--source-sha256', decodedSha); assert.notEqual(r3.status, 0); assert.match(r3.stderr, /does not match --source-sha256/);
+  r3 = run(badFile, ...baseFlags, '--source-sha256', rawSha); assert.doesNotMatch(r3.stderr, /does not match/); // the exact-byte digest passes the digest check
+  // what is recorded: a real save writes the transfer level, a local fingerprint and the unavailable source digest (never "byte-identical")
+  {
+    const homeB = path.join(home2, 'homeB'), cacheB = path.join(homeB, 'cache', 'steam'); fs.mkdirSync(cacheB, {recursive: true});
+    fs.writeFileSync(path.join(homeB, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+    const real = spawnSync(process.execPath, [cli, dlFile, '--dest', cacheB, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered', '--provenance', 'download', '--page-summary', sumArg], {encoding: 'utf8'});
+    assert.equal(real.status, 0, real.stderr); assert.equal(JSON.parse(real.stdout).action, 'create');
+    const t = JSON.parse(fs.readFileSync(path.join(cacheB, 'wishlist.json'), 'utf8')).diagnostics.attestations.transfer;
+    assert.equal(t.provenance, 'download'); assert.equal(t.level, 'download-summary-verified'); assert.equal(t.sourceDigest, 'unavailable');
+    assert.equal(t.localSha256Fingerprint, exactSha); assert.match(t.note, /Exact end-to-end byte equality is not claimed/); assert.equal(t.pageSummaryChecks.length, 9);
+  }
+  // the runtime's own tool-result file, declared by the caller, is verified provenance without a digest
+  const q = run(good, ...baseFlags, '--provenance', 'tool-result'); assert.equal(q.status, 0, q.stderr); assert.doesNotMatch(JSON.parse(q.stdout).reason, /provenance|transfer not verified/);
   // revoked consent stops the CLI
   fs.writeFileSync(path.join(home2, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":false}}');
   assert.notEqual(run(good, '--account', 'me', '--access-scope', 'signed-in', '--dry-run').status, 0);
@@ -267,7 +341,7 @@ fs.rmSync(tmp, {recursive: true});
   fs.writeFileSync(path.join(home3, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
   const input = path.join(root, 'result file.json');
   fs.writeFileSync(input, harness(make(5, {view: {...U, filters: 'unknown'}}))); // as a real page reports it: filters unobserved
-  const args = [input, '--dest', cache3, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered'];
+  const args = [input, '--dest', cache3, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered', '--provenance', 'tool-result'];
   const usage = spawnSync(process.execPath, [cli], {encoding: 'utf8'});
   assert.equal(usage.status, 2); assert.match(usage.stderr, /usage/); // the CLI really ran (it used to exit 0 silently)
   const dry = spawnSync(process.execPath, [cli, ...args, '--dry-run'], {encoding: 'utf8'});
@@ -285,7 +359,7 @@ fs.rmSync(tmp, {recursive: true});
   }
   // Without the filters attestation the same capture is kept as a separate snapshot, never promoted.
   fs.rmSync(path.join(cache3, 'wishlist.json'));
-  const unattested = spawnSync(process.execPath, [cli, input, '--dest', cache3, '--account', 'me', '--access-scope', 'signed-in', '--dry-run'], {encoding: 'utf8'});
+  const unattested = spawnSync(process.execPath, [cli, input, '--dest', cache3, '--account', 'me', '--access-scope', 'signed-in', '--provenance', 'tool-result', '--dry-run'], {encoding: 'utf8'});
   const u = JSON.parse(unattested.stdout); assert.equal(u.action, 'separate'); assert.match(u.reason, /not verified as default sort/);
   fs.rmSync(root, {recursive: true});
 }
@@ -293,5 +367,9 @@ fs.rmSync(tmp, {recursive: true});
 // The committed page script must be the generated output of the template plus the shared row code, and stay read-only.
 const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-wishlist-page.js', import.meta.url), 'utf8');
 assert.equal(generated, buildPageScript(), 'steam-wishlist-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs');
-assert.ok(!/\bfetch\s*\(|XMLHttpRequest|localStorage|document\.cookie|\.click\(|dispatchEvent|\.submit\(/.test(generated), 'page script must stay read-only');
+const dl0 = generated.indexOf("if (c.deliver === 'download')"), dl1 = generated.indexOf('return envelope;', dl0);
+assert.ok(dl0 > 0 && dl1 > dl0, 'download delivery block not found');
+const outsideDownload = generated.slice(0, dl0) + generated.slice(dl1);
+assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie|\.click\(|dispatchEvent|\.submit\(/.test(outsideDownload), 'page script must stay read-only on the page');
+assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie/.test(generated.slice(dl0, dl1)), 'the download block must be local only (Blob + anchor), with no network or storage');
 console.log('Claude Code collector checks passed');

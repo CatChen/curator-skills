@@ -167,4 +167,71 @@ const sha = recs => crypto.createHash('sha256').update(JSON.stringify(recs)).dig
   const f = j(await makeWishlistPage({n: 12, search: 'zzz'}).run());
   assert.equal(f.diagnostics.view.search, 'active');
 }
+// 10. deliver:'download' (for tools that truncate results at ~1 KB): the page STARTS a local download and reports initiation only,
+// returns a small summary, and keeps the finished envelope in bounded collector-owned state for an authorized retry.
+{
+  const plain = j(await makeWishlistPage({n: 80}).run());
+  const p = makeWishlistPage({n: 80});
+  let r = j(await p.run({deliver: 'download', callBudgetMs: 60}));
+  let calls = 1;
+  while (r.inProgress && calls < 60) { r = j(await p.run({callBudgetMs: 60})); calls++; } // deliver is remembered across resume
+  assert.ok(calls > 1);
+  assert.equal(r.downloadInitiated, true);
+  assert.equal(r.delivered, undefined, 'a download must be reported as initiated, never as delivered');
+  assert.match(r.note, /Initiation only/);
+  assert.equal(JSON.stringify(r).match(/[0-9a-f]{40,}/), null, 'no digest in the summary: a filtered value is not worked around');
+  assert.ok(JSON.stringify(r).length < 900, `summary must fit a ~1 KB truncation, was ${JSON.stringify(r).length}`);
+  assert.equal(p.state.downloads.length, 1);
+  const text = await p.state.downloads[0].blob.text();
+  assert.equal(p.state.downloads[0].name, r.file); assert.match(r.file, /^gc-wishlist-\d{8}T\d{6}Z\.json$/);
+  assert.equal(Buffer.byteLength(text), r.bytes);
+  assert.equal(JSON.parse(text).diagnostics.recordsSha256, plain.diagnostics.recordsSha256); // same records as the return path
+  assert.equal(r.complete, true); assert.equal(r.records, 80);
+  // retained for a retry without rescraping; the retry sends identical bytes; release removes the state
+  assert.equal(typeof p.ctx.window.__gcWishlistRedeliver, 'function');
+  const retry = j(p.ctx.window.__gcWishlistRedeliver());
+  assert.equal(retry.retry, true); assert.equal(p.state.downloads.length, 2);
+  assert.equal(await p.state.downloads[1].blob.text(), text);
+  assert.equal(p.ctx.window.__gcWishlistRelease(), 'released');
+  assert.equal(p.ctx.window.__gcWishlistRedeliver, undefined); assert.equal(p.ctx.window.__gcWishlistExpiry, undefined);
+  // retention is bounded: it expires on its own
+  const q = makeWishlistPage({n: 12});
+  const sum = j(await q.run({deliver: 'download', retainMs: 1000}));
+  assert.equal(sum.retainedForMs, 1000); assert.equal(typeof q.ctx.window.__gcWishlistRedeliver, 'function');
+  await new Promise(res => setTimeout(res, 1300));
+  assert.equal(q.ctx.window.__gcWishlistRedeliver, undefined, 'retained envelope must expire');
+  // incomplete runs are delivered too (and say so) so partial evidence is not lost
+  const z = makeWishlistPage({n: 30, neverLoad: new Set([7])});
+  const partial = j(await z.run({deliver: 'download'}));
+  assert.equal(partial.complete, false); assert.equal(partial.stopReason, 'rows-missing');
+  assert.equal(JSON.parse(await z.state.downloads[0].blob.text()).records.length, 29);
+  z.ctx.window.__gcWishlistRelease();
+}
+// 10b. Retained delivery: a new delivery replaces and releases the earlier one; redelivery checks an absolute expiry.
+{
+  const p = makeWishlistPage({n: 12});
+  const cleared = []; const origClear = p.ctx.clearTimeout; p.ctx.clearTimeout = id => { cleared.push(id); return origClear(id); };
+  const first = j(await p.run({deliver: 'download', retainMs: 600000}));
+  const firstTimer = p.ctx.window.__gcWishlistExpiry;
+  assert.ok(firstTimer !== undefined);
+  assert.equal(first.source, 'wishlist'); assert.match(first.capturedAt, /^\d{4}-\d\d-\d\dT/); // non-filtered summary facts for the saver to check
+  const second = j(await p.run({deliver: 'download', retainMs: 700000}));
+  assert.ok(cleared.includes(firstTimer), 'the earlier retained delivery timer must be cleared when replaced');
+  assert.notEqual(p.ctx.window.__gcWishlistExpiry, firstTimer);
+  assert.equal(second.retainedForMs, 700000);
+  assert.equal(p.state.downloads.length, 2);
+  p.ctx.window.__gcWishlistRelease();
+  // background tabs can delay timers: redelivery must not trust the timer alone
+  const q = makeWishlistPage({n: 12});
+  q.ctx.setTimeout = (fn, ms, ...a) => (ms === 1234 ? 0 : setTimeout(fn, ms, ...a)); // drop only the expiry timer, as a stalled timer would
+  const sum = j(await q.run({deliver: 'download', retainMs: 1234}));
+  assert.equal(sum.retainedForMs, 1234);
+  assert.equal(typeof q.ctx.window.__gcWishlistRedeliver, 'function');
+  const before = q.state.downloads.length;
+  await new Promise(res => setTimeout(res, 1400));
+  assert.equal(typeof q.ctx.window.__gcWishlistRedeliver, 'function', 'timer never fired, so the function is still present');
+  const late = j(q.ctx.window.__gcWishlistRedeliver());
+  assert.equal(late.expired, true); assert.equal(q.state.downloads.length, before, 'an expired retained envelope must not be re-downloaded');
+  assert.equal(q.ctx.window.__gcWishlistRedeliver, undefined, 'expired state is released');
+}
 console.log('Claude Code page script behavior checks passed');
