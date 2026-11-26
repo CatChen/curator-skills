@@ -21,6 +21,7 @@
 // wishlist.partial.<timestamp>.json. The previous file is first preserved as wishlist.superseded.<timestamp>.json.
 // Caller-attested values are recorded in diagnostics.attestations, separate from the page's observed evidence.
 import fs from 'node:fs';
+import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -234,7 +235,13 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
   return result;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// True only when this file is the process entry point, including when invoked through a symlink or a path
+// with spaces (import.meta.url is the resolved file URL, argv[1] may be a symlinked path). Importing is side-effect free.
+function isMain() {
+  try { return !!process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href; } catch { return false; }
+}
+
+if (isMain()) {
   const args = process.argv.slice(2), valued = ['--account', '--access-scope', '--dest', '--settings', '--view', '--existing-account', '--existing-view'];
   const opt = n => { const i = args.indexOf(n); return i < 0 ? undefined : args[i + 1]; };
   const file = args.find((a, i) => (!a.startsWith('--') || a === '-') && !valued.includes(args[i - 1]));

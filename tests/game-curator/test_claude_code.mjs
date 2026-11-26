@@ -256,6 +256,40 @@ fs.rmSync(tmp, {recursive: true});
   fs.rmSync(home2, {recursive: true});
 }
 
+// Invocation through a symlinked skill directory whose path has spaces (how an installed skill is reached).
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gc link test-'));
+  const link = path.join(root, 'installed skill'); // symlink -> the real skill directory
+  fs.symlinkSync(new URL('../../skills/game-curator', import.meta.url).pathname, link);
+  const cli = path.join(link, 'scripts', 'claude-code', 'save-capture.mjs');
+  const home3 = path.join(root, 'home dir'), cache3 = path.join(home3, 'cache', 'steam');
+  fs.mkdirSync(cache3, {recursive: true});
+  fs.writeFileSync(path.join(home3, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+  const input = path.join(root, 'result file.json');
+  fs.writeFileSync(input, harness(make(5, {view: {...U, filters: 'unknown'}}))); // as a real page reports it: filters unobserved
+  const args = [input, '--dest', cache3, '--account', 'me', '--access-scope', 'signed-in', '--view', 'unfiltered'];
+  const usage = spawnSync(process.execPath, [cli], {encoding: 'utf8'});
+  assert.equal(usage.status, 2); assert.match(usage.stderr, /usage/); // the CLI really ran (it used to exit 0 silently)
+  const dry = spawnSync(process.execPath, [cli, ...args, '--dry-run'], {encoding: 'utf8'});
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.equal(JSON.parse(dry.stdout).action, 'create'); assert.equal(JSON.parse(dry.stdout).dryRun, true);
+  assert.deepEqual(fs.readdirSync(cache3), []); // a dry run writes nothing
+  const real = spawnSync(process.execPath, [cli, ...args], {encoding: 'utf8'});
+  assert.equal(real.status, 0, real.stderr);
+  const saved3 = JSON.parse(fs.readFileSync(path.join(cache3, 'wishlist.json'), 'utf8'));
+  assert.equal(saved3.records.length, 5); assert.equal(saved3.diagnostics.attestations.filters, 'none');
+  // Importing the modules must not run anything or print anything.
+  for (const f of ['save-capture.mjs', 'build-page-script.mjs']) {
+    const imp = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(path.join(link, 'scripts', 'claude-code', f))})`], {encoding: 'utf8'});
+    assert.equal(imp.status, 0, imp.stderr); assert.equal(imp.stdout, '');
+  }
+  // Without the filters attestation the same capture is kept as a separate snapshot, never promoted.
+  fs.rmSync(path.join(cache3, 'wishlist.json'));
+  const unattested = spawnSync(process.execPath, [cli, input, '--dest', cache3, '--account', 'me', '--access-scope', 'signed-in', '--dry-run'], {encoding: 'utf8'});
+  const u = JSON.parse(unattested.stdout); assert.equal(u.action, 'separate'); assert.match(u.reason, /not verified as default sort/);
+  fs.rmSync(root, {recursive: true});
+}
+
 // The committed page script must be the generated output of the template plus the shared row code, and stay read-only.
 const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-wishlist-page.js', import.meta.url), 'utf8');
 assert.equal(generated, buildPageScript(), 'steam-wishlist-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs');
