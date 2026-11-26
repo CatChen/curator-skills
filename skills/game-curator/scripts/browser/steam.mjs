@@ -3,7 +3,7 @@
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from './wishlist-rows.mjs';
 import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord} from './library-rows.mjs';
 import {snapshotReviews} from './review-rows.mjs';
-import {snapshotReplay, replayLoading, dedupeReplayApps} from './replay-rows.mjs';
+import {snapshotReplay, replayLoading, dedupeReplayApps, replayYears} from './replay-rows.mjs';
 
 const LIMIT = 80;
 
@@ -169,18 +169,26 @@ export async function collectReviews(tab, {maxPages=20, library=null, verifiedSa
   return envelope('reviews',[...records.values()],warnings,{expectedCount:expected,uniqueCount:records.size,pagesVisited:visited.size,pagesPending:unvisited.length,pageAttempts:attempts});
 }
 
-export async function collectReplay(tab, {maxYears=20} = {}) {
+export async function collectReplay(tab, {maxYears=20, settleMs=1200, settleCapMs=10000} = {}) {
   if (!Number.isInteger(maxYears) || maxYears < 1 || maxYears > LIMIT) throw new Error('Invalid maxYears');
-  const records = [], visited = new Set(), pending = [], warnings = [];
+  if (!Number.isFinite(settleMs) || !Number.isFinite(settleCapMs) || settleMs < 0 || settleCapMs < settleMs || settleCapMs > 30000) throw new Error('Invalid Replay settling limits');
+  const records = [], visited = new Set(), pending = [], warnings = [], unsettledYears = [];
   let accountPath = null, attempts = 0, requestedYear = null;
   while (attempts < maxYears) {
     try {
       attempts++;
       const extract = () => read(tab, snapshotReplay);
       let data = await extract();
-      for (let attempt=0; attempt<8 && replayLoading(data.text); attempt++) {
-        await new Promise(resolve=>setTimeout(resolve,500));
+      const placeholder = text => /(^|\n)\s*LOADING\.\.\.\s*(\n|$)/i.test(text || '');
+      const signature = d => d.text + '\u0000' + JSON.stringify(dedupeReplayApps(d.apps));
+      const start = Date.now(); let stableSince = start, last = signature(data);
+      let settled = false;
+      for (;;) {
+        if (!replayLoading(data.text) && !placeholder(data.text) && Date.now()-stableSince >= settleMs) { settled = true; break; }
+        if (Date.now()-start >= settleCapMs) break;
+        await new Promise(resolve=>setTimeout(resolve,Math.min(250, Math.max(1,settleMs), settleCapMs-(Date.now()-start))));
         data = await extract();
+        const current = signature(data); if (current !== last) { last = current; stableSince = Date.now(); }
       }
       if (accountPath !== null && data.accountPath !== accountPath) throw Error('Replay account changed');
       if (replayLoading(data.text)) throw Error('Replay report did not finish loading');
@@ -188,9 +196,13 @@ export async function collectReplay(tab, {maxYears=20} = {}) {
         warnings.push(`Replay navigation did not reach requested year ${requestedYear}; preserving partial records.`); break;
       }
       if (visited.has(data.year)) { warnings.push('Replay navigation returned a previously visited year; preserving partial records.'); break; }
+      if (!settled) {
+        unsettledYears.push(data.year);
+        warnings.push(`The ${data.year} report did not settle before the time limit${placeholder(data.text) ? ' and still showed a LOADING... placeholder' : ''}, so its text and game references may be partial.`);
+      }
       accountPath = data.accountPath; visited.add(data.year);
       records.push({year:data.year,semanticText:data.text,apps:dedupeReplayApps(data.apps)});
-      for (const link of data.links) {const year=Number(new URL(link).pathname.match(/\/(20\d{2})\/?$/)?.[1]);if(year&&!visited.has(year)&&!pending.some(x=>x.year===year))pending.push({year,link});}
+      for (const year of replayYears(data.links, accountPath)) if (!visited.has(year) && !pending.some(x=>x.year===year)) pending.push({year,link:`https://store.steampowered.com${accountPath}/${year}`});
       if (!pending.length) break;
       const next = pending.shift(); requestedYear = next.year; await tab.goto(next.link); await refresh(tab);
     } catch (error) {
@@ -201,5 +213,5 @@ export async function collectReplay(tab, {maxYears=20} = {}) {
   const missedYear = requestedYear !== null && !visited.has(requestedYear) && !pending.some(x=>x.year===requestedYear) ? 1 : 0;
   if (pending.length || missedYear) warnings.push('Year discovery stopped with unvisited reports.');
   warnings.push('Image-asset AppIDs are possible game references, not proof of annual play; semantic text is unstructured. Verify metrics and do not convert percentages to hours.');
-  return envelope('replay',records,warnings,{years:records.map(r=>r.year),yearsPending:pending.length+missedYear,yearAttempts:attempts});
+  return envelope('replay',records,warnings,{years:records.map(r=>r.year),yearsPending:pending.length+missedYear,yearAttempts:attempts,unsettledYears});
 }

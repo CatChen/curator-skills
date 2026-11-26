@@ -123,8 +123,27 @@ assert.equal(redirectedReplay.records[0].apps.length,1);
 assert.ok(redirectedReplay.warnings.some(x=>x.includes('requested year')));
 let reads=0;
 const loadingTab={playwright:{evaluate:async()=>({year:2025,accountPath:'/replay/example',text:++reads===1?'LOADING...':'activity',apps:[],links:[]})}};
-assert.deepEqual((await collectReplay(loadingTab)).diagnostics.years,[2025]);
-assert.equal(reads,2);
+assert.deepEqual((await collectReplay(loadingTab,{settleMs:1,settleCapMs:10})).diagnostics.years,[2025]);
+assert.ok(reads>=2);
+let stage=0;
+const stagedTab={playwright:{evaluate:async()=>({year:2025,accountPath:'/replay/example',text:++stage===1?'Activity\nLOADING...':'Activity\nComplete',apps:stage<2?[]:[{appid:42,source:'image-asset'}],links:[]})}};
+const settled=await collectReplay(stagedTab,{settleMs:1,settleCapMs:20});
+assert.equal(settled.records[0].apps.length,1);
+assert.equal(settled.records[0].semanticText,'Activity\nComplete');
+const stuckReplay=await collectReplay({playwright:{evaluate:async()=>({year:2025,accountPath:'/replay/example',text:'Activity\nLOADING...\nMore',apps:[],links:[]})}},{settleMs:1,settleCapMs:5});
+assert.deepEqual(stuckReplay.diagnostics.unsettledYears,[2025]);
+assert.ok(stuckReplay.warnings.some(x=>x.includes('did not settle')));
+// Changes hidden by the old length/tail/count signature must reset the stable window.
+let revisions=0;
+const changing=await collectReplay({playwright:{evaluate:async()=>{revisions++; return {year:2025,accountPath:'/replay/example',text:(revisions===1?'A':'B')+'x'.repeat(250),apps:[{appid:revisions<3?1:2,source:'image-asset'}],links:[]};}}},{settleMs:5,settleCapMs:60});
+assert.ok(revisions>=4);
+assert.equal(changing.records[0].semanticText[0],'B');
+assert.equal(changing.records[0].apps[0].appid,2);
+assert.deepEqual(changing.diagnostics.unsettledYears,[]);
+const interruptedReplay=await collectReplay({playwright:{evaluate:async()=>({year:2025,accountPath:'/replay/example',text:'activity',apps:[],links:['https://store.steampowered.com/replay/example/2024']})},goto:async()=>{throw Error('synthetic failure')}},{settleMs:0,settleCapMs:1});
+assert.equal(interruptedReplay.records.length,1);
+assert.equal(interruptedReplay.diagnostics.yearsPending,1);
+assert.ok(interruptedReplay.warnings.some(x=>x.includes('interrupted')));
 
 // Exercise the actual read-only DOM extraction callback with synthetic elements.
 const oldDocument=globalThis.document, oldLocation=globalThis.location;

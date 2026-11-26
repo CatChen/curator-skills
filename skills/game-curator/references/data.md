@@ -13,6 +13,8 @@ For each source verify the account, source identity, representative records, obs
 
 The Codex wishlist collector uses small browser scrolls, bounded retries for lazy rows and missing-rank seeking. Check `missingRanks`, placeholder warnings and the partial coverage label; a stalled or interrupted run retains the records already observed.
 
+The Codex Replay collector waits for the report text and deduplicated game references to stabilize and records `unsettledYears` if an embedded loading placeholder remains or the report does not settle within its time limit. Stability does not guarantee that every section has rendered; check the captured evidence and warnings.
+
 ## Running from a supported browser runtime
 
 The collectors below need a tab object with `playwright.evaluate`, as in Codex. In Claude Code's built-in browser follow [Claude Code](claude-code.md) instead; it produces the same envelope. In Codex's computer-use JavaScript runtime, first create or select a tab in the user's chosen browser, navigate to the source page, and verify the account and the page. `skillPath` is the absolute path of the loaded `SKILL.md`; resolve scripts relative to it, not a hardcoded checkout. For example:
