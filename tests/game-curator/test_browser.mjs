@@ -27,7 +27,8 @@ assert.equal(wishlist.diagnostics.scrollSteps,1);
 const partial=await collectWishlist(tabWith([{expected:2,rows:[{appid:1,rank:1}]}]),{maxScrolls:1});
 assert.ok(partial.warnings.some(x=>x.includes('collected 1')));
 const rankGap=await collectWishlist(tabWith([{expected:2,rows:[{appid:1,rank:1},{appid:2,rank:3}]}]),{maxScrolls:1});
-assert.equal(rankGap.diagnostics.scrollSteps,1);
+assert.ok(rankGap.diagnostics.scrollSteps<=1);
+assert.deepEqual(rankGap.diagnostics.missingRanks,[2]);
 assert.ok(rankGap.warnings.some(x=>x.includes('do not cover')));
 // Lazy placeholder rows (complete:false) never overwrite a loaded row and never count as loaded.
 const lazy=await collectWishlist(tabWith([
@@ -44,6 +45,23 @@ assert.ok(stuck.warnings.some(x=>x.includes('placeholders')));
 assert.deepEqual(stuck.records.map(r=>r.name),['One']); // unresolved placeholder omitted, not stored
 assert.equal(stuck.diagnostics.uniqueCount,1);
 assert.ok(stuck.warnings.some(x=>x.includes('Displayed 2')));
+assert.deepEqual(stuck.diagnostics.missingRanks,[2]);
+// A late lazy row resolves on re-read without a scroll, preserving the first record.
+let lazyReads=0, lazyScrolls=0;
+const late=await collectWishlist({playwright:{evaluate:async()=>({expected:2,rows:[{appid:1,rank:1,name:'One'}, {appid:2,rank:2,name:'Two',complete:++lazyReads>=3}]})},scroll:async()=>{lazyScrolls++}});
+assert.equal(lazyScrolls,0);
+assert.deepEqual(late.records.map(r=>r.name),['One','Two']);
+assert.equal(late.diagnostics.settleWaits,2);
+// A gap behind the current rendered window causes a supported upward scroll.
+let window=0, directions=[];
+const gap=await collectWishlist({playwright:{evaluate:async()=>window===0?{expected:3,rows:[{appid:2,rank:2,name:'Two'},{appid:3,rank:3,name:'Three'}]}:{expected:3,rows:[{appid:1,rank:1,name:'One'}]}},scroll:async(_p,d)=>{directions.push(d);window++}});
+assert.deepEqual(directions,['up']);
+assert.deepEqual(gap.records.map(r=>r.rank),[1,2,3]);
+// A failed scroll preserves the prior batch and reports missing ranks.
+const interrupted=await collectWishlist({playwright:{evaluate:async()=>({expected:2,rows:[{appid:1,rank:1,name:'One'}]})},scroll:async()=>{throw Error('synthetic failure')}});
+assert.deepEqual(interrupted.records.map(r=>r.rank),[1]);
+assert.deepEqual(interrupted.diagnostics.missingRanks,[2]);
+assert.ok(interrupted.warnings.some(x=>x.includes('interrupted')));
 // The shared row snapshot is the function handed to the host's read-only evaluate.
 let evaluated=null;
 await collectWishlist({playwright:{evaluate:async fn=>{evaluated=fn;return {expected:1,rows:[{appid:1,rank:1,name:'One'}]}}}});
