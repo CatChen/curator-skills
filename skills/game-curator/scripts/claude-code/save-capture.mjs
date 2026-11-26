@@ -39,13 +39,82 @@ import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import {normalizeLibraryRecord} from '../browser/library-rows.mjs';
 
 export const MAX_BACKUPS = 5; // bounded retention: at the limit new captures are kept separately; nothing is auto-deleted
 const ENVELOPE_ORDER = ['format', 'version', 'source', 'capturedAt', 'method', 'coverage', 'warnings', 'diagnostics', 'account', 'accessScope', 'records'];
-const RECORD_ORDER = ['appid', 'rank', 'name', 'pageText', 'membershipSource'];
 const DEFAULT_SORT = 'Your Rank';
-// Field groups whose availability is compared per retained AppID. Review labels vary by game (English vs overall).
+const isPlainObject = o => !!o && typeof o === 'object' && !Array.isArray(o);
+
+// Per-source rules. Everything source-specific lives here; the policy in decide()/save() is shared. Add a source by adding
+// an entry, not by branching the policy.
+//   file          cache file stem (wishlist.json, library.json); partial and superseded snapshots derive from it
+//   recordOrder   canonical key order (allowed keys), matching what the Codex collector emits
+//   validateRecord(r, i, errors) per-record contract checks
+//   rankBased     records carry a contiguous displayed rank 1..n
+//   ownerEvidence(d) owner-only evidence that justifies a signed-in scope claim
+//   viewOk(e) / viewConflict(e)  evidence that the capture shows the full source (default view, no filter), and evidence that it does not
+//   viewAttestable whether a caller may attest filters (the library page has no filter panel to inspect)
+//   fieldLosses(existing, next)  per retained AppID, a field that existed and is now absent
 const FIELD_GROUPS = {releaseDate: /RELEASE DATE:/, reviews: /(ENGLISH|OVERALL) REVIEWS:/, userTags: /USER TAGS:/, myCategories: /MY CATEGORIES:/};
+const wishlistView = e => { const d = e?.diagnostics, v = d?.view; return v ? {...v, filters: d.attestations?.filters ?? v.filters} : null; };
+const SOURCES = {
+  wishlist: {
+    file: 'wishlist', recordOrder: ['appid', 'rank', 'name', 'pageText', 'membershipSource'], rankBased: true, requiredDiagnostics: ['ranksObserved', 'placeholderNameRows'],
+    validateRecord(r, i, errors) {
+      if (!Number.isSafeInteger(r.rank) || r.rank <= 0) errors.push(`record ${i} has an invalid rank`);
+      if (typeof r.name !== 'string' || !r.name.trim()) errors.push(`record ${i} has an empty name`);
+      if (typeof r.pageText !== 'string' || !r.pageText.trim()) errors.push(`record ${i} has empty pageText`);
+      if (r.membershipSource !== 'wishlist-row') errors.push(`record ${i} has an unexpected membershipSource`);
+    },
+    ownerEvidence: d => d?.reorderHandles === true, ownerLabel: 'owner-only evidence (reorder handles)',
+    viewOk: e => { const v = wishlistView(e); return v?.filters === 'none' && v?.sort === DEFAULT_SORT && v?.search === 'empty'; },
+    viewConflict: e => { const v = wishlistView(e); return !!v && (v.filters === 'active' || (v.sort != null && v.sort !== DEFAULT_SORT) || v.search === 'active'); },
+    viewAttestable: true, viewSummaryKeys: ['sort', 'search', 'filters'],
+    viewMessage: 'default sort, empty search and unfiltered; a filtered list can omit wishlist members',
+    fieldLosses(existing, next) {
+      const newer = new Map(next.records.map(r => [r.appid, r])), losses = {};
+      for (const old of existing.records) {
+        const now = newer.get(old.appid);
+        if (!now) continue;
+        for (const [group, re] of Object.entries(FIELD_GROUPS)) if (re.test(old.pageText) && !re.test(now.pageText)) losses[group] = (losses[group] ?? 0) + 1;
+        if (old.name && !now.name) losses.name = (losses.name ?? 0) + 1;
+      }
+      return losses;
+    },
+  },
+  library: {
+    file: 'library', nestedOrder: {achievements: ['unlocked', 'total']}, recordOrder: ['appid', 'name', 'pageText', 'membershipSource', 'hours', 'playtimeDisplay', 'lastPlayedDisplay', 'achievements'], rankBased: false, requiredDiagnostics: [],
+    validateRecord(r, i, errors) {
+      if (!(r.name === null || (typeof r.name === 'string' && r.name.trim()))) errors.push(`record ${i} has an invalid name`);
+      if (typeof r.pageText !== 'string' || !r.pageText.trim()) errors.push(`record ${i} has empty pageText`);
+      if (r.membershipSource !== 'all-games-row') errors.push(`record ${i} has an unexpected membershipSource`);
+      // Missing-value semantics: every labeled value must equal what the single shared parser derives from the row's own
+      // text, so an absent label is null, never 0, and nothing is invented.
+      if (typeof r.pageText === 'string') {
+        const expected = normalizeLibraryRecord({appid: r.appid, name: r.name, pageText: r.pageText, membershipSource: r.membershipSource});
+        for (const k of ['hours', 'playtimeDisplay', 'lastPlayedDisplay', 'achievements']) if (JSON.stringify(r[k]) !== JSON.stringify(expected[k])) errors.push(`record ${i} field ${k} disagrees with its own page text`);
+      }
+    },
+    ownerEvidence: d => d?.ownerControls === true, ownerLabel: 'owner-only evidence (download controls)',
+    viewOk: e => { const v = e?.diagnostics?.view; return v?.tab === 'all' && v?.search === 'empty'; },
+    viewConflict: e => { const v = e?.diagnostics?.view; return !!v && ((v.tab != null && v.tab !== 'all') || v.search === 'active'); },
+    viewAttestable: false, viewSummaryKeys: ['tab', 'search', 'language'],
+    viewMessage: 'the "All Games" tab with an empty search',
+    fieldLosses(existing, next) {
+      const newer = new Map(next.records.map(r => [r.appid, r])), losses = {};
+      for (const old of existing.records) {
+        const now = newer.get(old.appid);
+        if (!now) continue;
+        for (const k of ['hours', 'lastPlayedDisplay', 'achievements']) if (old[k] != null && now[k] == null) losses[k] = (losses[k] ?? 0) + 1;
+        if (old.name && !now.name) losses.name = (losses.name ?? 0) + 1;
+      }
+      return losses;
+    },
+  },
+};
+export const SOURCE_NAMES = Object.keys(SOURCES);
+const cfgOf = e => SOURCES[e?.source] ?? SOURCES.wishlist;
 
 const sha256 = s => crypto.createHash('sha256').update(s).digest('hex');
 const stamp = iso => iso.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
@@ -73,9 +142,9 @@ export function checkPageSummary(summary, env, receivedBytes, fileName) {
   if (summary.expected !== d.expectedCount) bad.push('displayed count differs');
   if (summary.complete !== d.complete) bad.push('completeness differs');
   if (summary.stopReason !== d.stopReason) bad.push('stop reason differs');
-  if (JSON.stringify([summary.view?.sort, summary.view?.search, summary.view?.filters]) !== JSON.stringify([d.view?.sort, d.view?.search, d.view?.filters])) bad.push('view differs');
+  if (JSON.stringify(cfgOf(env).viewSummaryKeys.map(k => summary.view?.[k])) !== JSON.stringify(cfgOf(env).viewSummaryKeys.map(k => d.view?.[k]))) bad.push('view differs');
   if (typeof summary.file !== 'string' || summary.file !== fileName) bad.push(`file name differs (summary ${JSON.stringify(summary.file)}, received ${JSON.stringify(fileName)}); a renamed or duplicate-named copy is ambiguous`);
-  else if (summary.file !== `gc-wishlist-${String(env.capturedAt).replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`) bad.push('file name does not match the capture time');
+  else if (summary.file !== `gc-${env.source}-${String(env.capturedAt).replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`) bad.push('file name does not match the capture time');
   return bad;
 }
 
@@ -88,116 +157,109 @@ export function canonicalize(env) {
   const known = ENVELOPE_ORDER.filter(k => k in rest), extra = Object.keys(rest).filter(k => !ENVELOPE_ORDER.includes(k));
   const out = {};
   for (const k of [...known, ...extra]) out[k] = k === 'records' && Array.isArray(rest.records)
-    ? rest.records.map(r => r && typeof r === 'object' ? {...Object.fromEntries(RECORD_ORDER.filter(f => f in r).map(f => [f, r[f]])), ...Object.fromEntries(Object.entries(r).filter(([f]) => !RECORD_ORDER.includes(f)))} : r)
+    ? rest.records.map(r => { // restore record and known nested key order (the harness alphabetizes every object, which changes JSON.stringify and the records checksum)
+        const cfg = cfgOf(rest), order = cfg.recordOrder, nested = cfg.nestedOrder ?? {};
+        if (!r || typeof r !== 'object') return r;
+        const fixed = Object.fromEntries(Object.entries(r).map(([f, v]) => [f, nested[f] && isPlainObject(v) ? {...Object.fromEntries(nested[f].filter(k => k in v).map(k => [k, v[k]])), ...Object.fromEntries(Object.entries(v).filter(([k]) => !nested[f].includes(k)))} : v]));
+        return {...Object.fromEntries(order.filter(f => f in fixed).map(f => [f, fixed[f]])), ...Object.fromEntries(Object.entries(fixed).filter(([f]) => !order.includes(f)))};
+      })
     : rest[k];
   return out;
 }
 
-// Contract validation. `errors` mean the input is not a valid v1 wishlist envelope (nothing is saved).
-// `incomplete` reasons mean it is valid but not a full wishlist: it is preserved as a partial snapshot, never promoted.
+// Contract validation. `errors` mean the input is not a valid v1 envelope for its source (nothing is saved).
+// `incomplete` reasons mean it is valid but not a full capture: it is preserved as a partial snapshot, never promoted.
 export function validate(env, {account, accessScope} = {}) {
   const errors = [], incomplete = [];
   const known = new Set(ENVELOPE_ORDER);
-  if (!env || typeof env !== 'object' || Array.isArray(env)) return {errors: ['not an object'], incomplete};
+  if (!isPlainObject(env)) return {errors: ['not an object'], incomplete};
   for (const k of Object.keys(env)) if (!known.has(k)) errors.push(`unexpected envelope field: ${k}`);
   if (env.format !== 'game-curator-steam-export' || env.version !== 1) errors.push('unsupported format/version');
-  if (env.source !== 'wishlist') errors.push('source is not wishlist');
+  const cfg = SOURCES[env.source];
+  if (!cfg) errors.push(`unsupported source: ${JSON.stringify(env.source)} (supported: ${SOURCE_NAMES.join(', ')})`);
+  const rules = cfg ?? SOURCES.wishlist;
   if (typeof env.method !== 'string' || !env.method) errors.push('missing method');
   if (!isIso(env.capturedAt)) errors.push('invalid capturedAt timestamp');
   if (!['partial', 'complete'].includes(env.coverage)) errors.push('invalid coverage');
   if (!Array.isArray(env.warnings) || !env.warnings.every(w => typeof w === 'string')) errors.push('warnings must be an array of strings');
   const d = env.diagnostics;
-  if (!d || typeof d !== 'object' || Array.isArray(d)) errors.push('missing diagnostics');
+  if (!isPlainObject(d)) errors.push('missing diagnostics');
   const recs = Array.isArray(env.records) ? env.records : (errors.push('records must be an array'), []);
-  const allowed = new Set(RECORD_ORDER), ids = new Set(), ranks = new Set();
+  const allowed = new Set(rules.recordOrder), ids = new Set(), ranks = new Set();
   recs.forEach((r, i) => {
     if (!r || typeof r !== 'object') return errors.push(`record ${i} is not an object`);
     for (const k of Object.keys(r)) if (!allowed.has(k)) errors.push(`record ${i} has unexpected field ${k}`);
     if (!Number.isSafeInteger(r.appid) || r.appid <= 0) errors.push(`record ${i} has an invalid appid`);
-    if (!Number.isSafeInteger(r.rank) || r.rank <= 0) errors.push(`record ${i} has an invalid rank`);
-    if (typeof r.name !== 'string' || !r.name.trim()) errors.push(`record ${i} has an empty name`);
-    if (typeof r.pageText !== 'string' || !r.pageText.trim()) errors.push(`record ${i} has empty pageText`);
-    if (r.membershipSource !== 'wishlist-row') errors.push(`record ${i} has an unexpected membershipSource`);
     if (ids.has(r.appid)) errors.push(`duplicate appid ${r.appid}`); ids.add(r.appid);
-    if (ranks.has(r.rank)) errors.push(`duplicate rank ${r.rank}`); ranks.add(r.rank);
+    rules.validateRecord(r, i, errors);
+    if (rules.rankBased) { if (ranks.has(r.rank)) errors.push(`duplicate rank ${r.rank}`); ranks.add(r.rank); }
   });
-  if (!recs.every((r, i) => r?.rank === i + 1)) incomplete.push('ranks are not contiguous 1..n');
-  if (d && typeof d === 'object') {
+  if (rules.rankBased && !recs.every((r, i) => r?.rank === i + 1)) incomplete.push('ranks are not contiguous 1..n');
+  if (isPlainObject(d)) {
     if (d.uniqueCount !== recs.length) errors.push('diagnostics.uniqueCount disagrees with the records');
-    if (d.ranksObserved !== recs.length) errors.push('diagnostics.ranksObserved disagrees with the records');
+    if (rules.rankBased && d.ranksObserved !== recs.length) errors.push('diagnostics.ranksObserved disagrees with the records');
     if (!(d.expectedCount === null || Number.isSafeInteger(d.expectedCount))) errors.push('diagnostics.expectedCount is invalid');
-    if (!Number.isSafeInteger(d.placeholderNameRows)) errors.push('missing diagnostics.placeholderNameRows');
-    else if (d.placeholderNameRows > 0) incomplete.push(`${d.placeholderNameRows} placeholder-name rows`);
+    if (rules.requiredDiagnostics.includes('placeholderNameRows')) {
+      if (!Number.isSafeInteger(d.placeholderNameRows)) errors.push('missing diagnostics.placeholderNameRows');
+      else if (d.placeholderNameRows > 0) incomplete.push(`${d.placeholderNameRows} placeholder-name rows`);
+    }
     if (typeof d.recordsSha256 !== 'string' || sha256(JSON.stringify(recs)) !== d.recordsSha256) errors.push('records checksum mismatch (page vs transferred)');
     if (d.expectedCount !== null && d.expectedCount !== recs.length) incomplete.push(`displayed ${d.expectedCount} items but ${recs.length} records`);
+    if (d.expectedCount === null) incomplete.push('the displayed count was not available, so coverage cannot be verified');
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
-    if (d.view !== undefined && !(d.view && typeof d.view === 'object')) errors.push('diagnostics.view is invalid');
+    if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
   }
-  if (!recs.length) { // an empty page is preserved as an uncertain observation, never as a verified empty wishlist
-    if (d?.stopReason === 'empty-observed' && d?.expectedCount === 0) incomplete.push('empty wishlist observed but owner, account and filter state were not independently verified');
+  if (!recs.length) { // an empty page is preserved as an uncertain observation, never as a verified empty source
+    if (d?.stopReason === 'empty-observed' && d?.expectedCount === 0) incomplete.push('empty source observed but owner, account and view were not independently verified');
     else errors.push('no records and no empty-page observation');
   }
   if (account !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(account)) errors.push('unsafe account alias');
   if (!['signed-in', 'public', 'unknown'].includes(accessScope)) errors.push('invalid access scope');
-  if (accessScope === 'signed-in' && d?.reorderHandles !== true) errors.push('signed-in scope claimed without owner-only evidence (reorder handles)');
+  if (accessScope === 'signed-in' && !rules.ownerEvidence(d)) errors.push(`signed-in scope claimed without ${rules.ownerLabel}`);
   return {errors, incomplete};
 }
 
 // Is this a structurally valid wishlist envelope that can serve as the comparison baseline?
-function validExisting(e) {
-  if (!e || typeof e !== 'object' || e.format !== 'game-curator-steam-export' || e.version !== 1 || e.source !== 'wishlist') return false;
+function validExisting(e, source) {
+  if (!e || typeof e !== 'object' || e.format !== 'game-curator-steam-export' || e.version !== 1 || e.source !== source) return false;
   if (!isIso(e.capturedAt) || typeof e.method !== 'string' || !e.method || !['partial', 'complete'].includes(e.coverage)) return false;
   if (!Array.isArray(e.warnings) || !e.diagnostics || typeof e.diagnostics !== 'object' || Array.isArray(e.diagnostics) || !Array.isArray(e.records)) return false;
   const ids = new Set(), ranks = new Set(); // legacy-tolerant: no new diagnostics required, but no contradictions
   for (const r of e.records) {
-    if (!r || !Number.isSafeInteger(r.appid) || r.appid <= 0 || typeof r.name !== 'string' || typeof r.pageText !== 'string') return false;
+    if (!r || !Number.isSafeInteger(r.appid) || r.appid <= 0 || !(typeof r.name === 'string' || (source === 'library' && r.name === null)) || typeof r.pageText !== 'string') return false;
     if (ids.has(r.appid)) return false; ids.add(r.appid);
     if (r.rank !== undefined) { if (!Number.isSafeInteger(r.rank) || r.rank <= 0 || ranks.has(r.rank)) return false; ranks.add(r.rank); }
   }
   return true;
 }
-const viewOf = e => { const d = e?.diagnostics, v = d?.view; return v ? {...v, filters: d.attestations?.filters ?? v.filters} : null; };
-const unfiltered = v => v?.filters === 'none' && v?.sort === DEFAULT_SORT && v?.search === 'empty';
-// A user confirmation may fill evidence that is missing; it never overrides explicitly conflicting recorded evidence.
-const conflicting = v => !!v && (v.filters === 'active' || (v.sort != null && v.sort !== DEFAULT_SORT) || v.search === 'active');
 const established = e => !!e.account && ['signed-in', 'public'].includes(e.accessScope);
 
 // Per retained AppID, a field that existed and is now absent counts as a loss. Returns {group: count}.
-export function fieldLosses(existing, next) {
-  const newer = new Map(next.records.map(r => [r.appid, r])), losses = {};
-  for (const old of existing.records) {
-    const now = newer.get(old.appid);
-    if (!now) continue;
-    for (const [group, re] of Object.entries(FIELD_GROUPS)) if (re.test(old.pageText) && !re.test(now.pageText)) losses[group] = (losses[group] ?? 0) + 1;
-    if (old.name && !now.name) losses.name = (losses.name ?? 0) + 1;
-  }
-  return losses;
-}
+export function fieldLosses(existing, next) { return cfgOf(next).fieldLosses(existing, next); }
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'separate', reason, notes}.
 export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
-  const notes = [];
+  const notes = [], cfg = cfgOf(next);
   if (keepSeparate) return {action: 'separate', reason: 'user asked to keep this capture separate', notes};
   if (incomplete.length) return {action: 'separate', reason: `incomplete capture: ${incomplete.join('; ')}`, notes};
   if (!transferVerified) return {action: 'separate', reason: 'transfer not verified: provenance was not established by the caller (--provenance tool-result, or --provenance download with a matching --page-summary)', notes};
   // Main creation and promotion both need an established identity, scope and view; otherwise keep it separate.
   if (!established(next)) return {action: 'separate', reason: 'account identity or access scope is not established (signed-in or public with a verified account)', notes};
-  if (!unfiltered(viewOf(next))) return {action: 'separate', reason: 'capture is not verified as default sort, empty search and unfiltered; a filtered list can omit wishlist members', notes};
-  if (!existing) return {action: 'create', reason: 'no existing wishlist.json; established account and scope, default view', notes};
-  if (!validExisting(existing)) return {action: 'separate', reason: 'existing file is not a valid wishlist envelope; preserved untouched', notes};
+  if (!cfg.viewOk(next)) return {action: 'separate', reason: `capture is not verified as ${cfg.viewMessage}`, notes};
+  if (!existing) return {action: 'create', reason: `no existing ${cfg.file}.json; established account and scope, verified view`, notes};
+  if (!validExisting(existing, next.source)) return {action: 'separate', reason: `existing file is not a valid ${next.source} envelope; preserved untouched`, notes};
   if ((existing.account ?? existingAccount) !== next.account) return {action: 'separate', reason: 'account identity differs or is unknown', notes};
   if (existing.accessScope !== next.accessScope) return {action: 'separate', reason: 'access scope differs or is not established', notes};
   if (existing.coverage !== next.coverage) return {action: 'separate', reason: 'coverage differs', notes};
   if (!(Date.parse(next.capturedAt) > Date.parse(existing.capturedAt))) return {action: 'separate', reason: 'new capture is not newer', notes};
-  const ev = viewOf(existing);
-  if (conflicting(ev)) return {action: 'separate', reason: 'existing capture recorded a non-default sort, active search or active filter', notes};
-  if (!(unfiltered(ev) || existingViewUnfiltered)) return {action: 'separate', reason: 'existing capture has no filter/sort evidence and the user has not confirmed it was unfiltered', notes};
-  const losses = fieldLosses(existing, next);
+  if (cfg.viewConflict(existing)) return {action: 'separate', reason: 'existing capture recorded a non-default view (sort, search, tab or filter)', notes};
+  if (!(cfg.viewOk(existing) || (cfg.viewAttestable && existingViewUnfiltered))) return {action: 'separate', reason: 'existing capture has no view evidence and the user has not confirmed it was unfiltered', notes};
+  const losses = cfg.fieldLosses(existing, next);
   if (Object.keys(losses).length) return {action: 'separate', reason: `retained AppIDs lose fields: ${JSON.stringify(losses)}`, notes};
   if (backupCount >= MAX_BACKUPS) return {action: 'separate', reason: `${backupCount} superseded backups already exist (limit ${MAX_BACKUPS}); prune them to allow replacement`, notes};
   const now = new Set(next.records.map(r => r.appid)), before = new Set(existing.records.map(r => r.appid));
   notes.push(`membership: ${[...before].filter(a => !now.has(a)).length} removed, ${[...now].filter(a => !before.has(a)).length} added`);
-  return {action: 'replace', reason: 'same established account, scope and coverage; newer; default view and unfiltered on both; no retained field lost', notes};
+  return {action: 'replace', reason: 'same established account, scope and coverage; newer; verified view on both; no retained field lost', notes};
 }
 
 // Persistence consent: strict settings.json v1 (persistence.md "Durable scope record"). Fails closed.
@@ -227,14 +289,14 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
 }
 
 export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent, ...policy} = {}) {
-  const main = path.join(destDir, 'wishlist.json'), lock = path.join(destDir, '.wishlist.lock');
+  const stem = cfgOf(env).file, main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
   const decisionBytes = readIfExists(main);
   let existing = null;
   if (decisionBytes) { try { existing = JSON.parse(decisionBytes.toString('utf8')); } catch { existing = {malformed: true}; } }
-  const backups = fs.existsSync(destDir) ? fs.readdirSync(destDir).filter(f => /^wishlist\.superseded\..+\.json$/.test(f)) : [];
+  const backups = fs.existsSync(destDir) ? fs.readdirSync(destDir).filter(f => f.startsWith(`${stem}.superseded.`) && f.endsWith('.json')) : [];
   let decision = decide(existing, env, {...policy, backupCount: backups.length, incomplete});
   const text = JSON.stringify(env, null, 2) + '\n', ts = stamp(env.capturedAt);
-  const partial = path.join(destDir, `wishlist.partial.${ts}.json`);
+  const partial = path.join(destDir, `${stem}.partial.${ts}.json`);
   const result = {...decision, target: decision.action === 'separate' ? partial : main, backup: null, bytes: Buffer.byteLength(text), sha256: sha256(text)};
   if (dryRun) return result;
 
@@ -245,18 +307,18 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
     recheckConsent?.(); // consent may have been revoked since the CLI started
     fs.writeFileSync(lock, `${process.pid} ${new Date().toISOString()}\n`, {flag: 'wx', mode: 0o600}); lockHeld = true; // concurrent savers
     if (decision.action === 'replace') {
-      const backup = path.join(destDir, `wishlist.superseded.${stamp(existing.capturedAt)}.json`);
+      const backup = path.join(destDir, `${stem}.superseded.${stamp(existing.capturedAt)}.json`);
       try { fs.copyFileSync(main, backup, fs.constants.COPYFILE_EXCL); }
       catch (e) { if (e.code !== 'EEXIST') throw e; } // a retry may find its own earlier backup; it must be identical
       if (sha256(fs.readFileSync(backup)) !== sha256(decisionBytes)) throw new Error('backup does not match the existing file');
-      tmp = path.join(destDir, `.wishlist.${process.pid}.tmp`);
+      tmp = path.join(destDir, `.${stem}.${process.pid}.tmp`);
       writeNew(tmp, text);
       hooks.beforeCommit?.(); // test seam for the decision-to-commit window
       recheckConsent?.();
       const now = readIfExists(main); // the file the decision was based on must still be the one being replaced
       if (!now || sha256(now) !== sha256(decisionBytes)) {
         fs.unlinkSync(tmp); tmp = null;
-        Object.assign(result, {action: 'separate', reason: 'existing wishlist.json changed during the save; kept this capture separately', target: partial});
+        Object.assign(result, {action: 'separate', reason: `existing ${stem}.json changed during the save; kept this capture separately`, target: partial});
         writeNew(partial, text);
       } else { fs.renameSync(tmp, main); tmp = null; result.backup = backup; }
     } else if (decision.action === 'create') {
@@ -315,7 +377,7 @@ if (isMain()) {
     const level = provenanceArg === 'tool-result' ? 'runtime-tool-result' : transferVerified ? (sourceSha !== undefined ? 'download-summary-and-source-digest' : 'download-summary-verified') : 'unverified';
     const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
     const {errors, incomplete} = validate(env, {account, accessScope});
-    if (errors.length) { console.error('Rejected (not a valid wishlist envelope):\n- ' + errors.join('\n- ')); process.exit(1); }
+    if (errors.length) { console.error('Rejected (not a valid Steam export envelope for its source):\n- ' + errors.join('\n- ')); process.exit(1); }
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
     const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope,
@@ -324,6 +386,7 @@ if (isMain()) {
     if (account) { env.account = account; attestations.account = account; }
     env.accessScope = accessScope; attestations.accessScope = accessScope;
     if (opt('--view') === 'unfiltered') { // the caller confirmed the page showed the default sort with no filters
+      if (!SOURCES[env.source].viewAttestable) { console.error(`--view unfiltered does not apply to the ${env.source} source: its view evidence is observed by the collector, not attested`); process.exit(1); }
       const v = env.diagnostics.view;
       if (v?.sort !== DEFAULT_SORT || v?.search !== 'empty') { console.error(`--view unfiltered refused: the page recorded sort=${v?.sort} search=${v?.search}`); process.exit(1); }
       attestations.filters = 'none';

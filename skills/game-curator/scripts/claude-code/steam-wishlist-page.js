@@ -16,7 +16,7 @@
 //   browser may block, hold or relocate the file, so confirm it on disk. Use it only where the host permits downloads
 //   and the user has authorized it (see references/claude-in-chrome.md). The finished envelope is then kept in
 //   collector-owned page state for retainMs (default 10 minutes) so an authorized retry needs no rescrape:
-//   window.__gcWishlistRedeliver() starts the download again, window.__gcWishlistRelease() discards it.
+//   window.__gcRedeliver() starts the download again, window.__gcRelease() discards it.
 // maxMs, maxSteps, deliver and retainMs are remembered across resume calls; the rest apply to the call they are passed to.
 await (window.__gcWishlistRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
@@ -43,13 +43,48 @@ await (window.__gcWishlistRun = async (opts = {}) => {
   function toWishlistRecords(rows) {
     return [...rows.values()].filter(r => r.complete).sort((a, b) => a.rank - b.rank).map(({complete, ...record}) => record);
   }
+  async function sha256Hex(bytes) {
+    return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  function makeWaiter(callBudget) {
+    const callStart = Date.now();
+    const left = () => callStart + callBudget + 2000 - Date.now();
+    const sleep = ms => new Promise(r => setTimeout(r, Math.max(0, Math.min(ms, left()))));
+    const outOfCall = () => Date.now() - callStart > callBudget;
+    const nextMutation = (target, limit) => new Promise(res => {
+      let t; const mo = new MutationObserver(() => done());
+      const done = () => { clearTimeout(t); mo.disconnect(); res(); };
+      mo.observe(target, {childList: true, subtree: true, characterData: true});
+      t = setTimeout(done, Math.max(0, Math.min(limit, left())));
+    });
+    return {callStart, left, sleep, outOfCall, nextMutation};
+  }
+  async function deliverEnvelope(envelope, o) {
+    if (o.deliver !== 'download') return envelope;
+    const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
+    const file = `${o.filePrefix}-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
+    const retainMs = Math.min(Math.max(Number(o.retainMs) || 600000, 1000), 3600000), expiresAt = Date.now() + retainMs;
+    window.__gcRelease?.();
+    const start = () => {
+      const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+      a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    };
+    const release = () => { clearTimeout(window.__gcExpiry); delete window.__gcRedeliver; delete window.__gcRelease; delete window.__gcExpiry; return 'released'; };
+    window.__gcRedeliver = () => { if (Date.now() > expiresAt) { release(); return {expired: true, retry: false}; } start(); return {downloadInitiated: true, retry: true, file, bytes}; };
+    window.__gcRelease = release;
+    window.__gcExpiry = setTimeout(release, retainMs);
+    start();
+    const d = envelope.diagnostics;
+    return {downloadInitiated: true, source: envelope.source, capturedAt: envelope.capturedAt, file, bytes, retainedForMs: retainMs, records: envelope.records.length,
+      expected: d.expectedCount, complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view,
+      note: 'Initiation only. Confirm the file exists with the reported byte count before using it.'};
+  }
   const cleanup = () => { delete window.__gcWishlist; delete window.__gcWishlistRun; };
   try {
     if (innerWidth < 1000) throw new Error(`Viewport ${innerWidth}px wide: Steam serves a reduced layout. Use resize_window width 1280 height 900, reload, retry`);
-    const callStart = Date.now();
     const callBudget = opts.callBudgetMs ?? 35000;
-    const left = () => callStart + callBudget + 2000 - Date.now(); // absolute bound for every wait in this call
-    const sleep = ms => new Promise(r => setTimeout(r, Math.max(0, Math.min(ms, left()))));
+    const {callStart, left, sleep, outOfCall, nextMutation: waitMutation} = makeWaiter(callBudget); // every wait in this call is bounded
 
     // View evidence. Filters live in an Options panel this read-only collector does not open, so they stay unknown.
     const viewInfo = () => {
@@ -59,16 +94,9 @@ await (window.__gcWishlistRun = async (opts = {}) => {
         search: box ? (box.value.trim() ? 'active' : 'empty') : 'unknown', filters: 'unknown'};
     };
 
-    // Waits are event driven: a MutationObserver resolves as soon as the list changes; setTimeout only bounds it.
-    // (Unfocused panes throttle timers to about 1 s, and a message-polling wait was measured as a busy loop.)
+    // Waits are event driven (see makeWaiter): a MutationObserver resolves as soon as the list changes.
     let scroller = null;
-    const nextMutation = limit => new Promise(res => {
-      const target = scroller && scroller !== document.scrollingElement ? scroller : document.body;
-      let t; const mo = new MutationObserver(() => done());
-      const done = () => { clearTimeout(t); mo.disconnect(); res(); };
-      mo.observe(target, {childList: true, subtree: true, characterData: true});
-      t = setTimeout(done, Math.max(0, Math.min(limit, left())));
-    });
+    const nextMutation = limit => waitMutation(scroller && scroller !== document.scrollingElement ? scroller : document.body, limit);
 
     let snap = snapshotWishlist();
     for (let i = 0; !snap.rows.length && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotWishlist(); }
@@ -99,7 +127,6 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
-    const outOfCall = () => Date.now() - callStart > callBudget;
     const outOfTotal = () => S.activeMs + Date.now() - callStart > maxMs || stats.steps > maxSteps;
     const step = Math.max(200, Math.floor(scroller.clientHeight * 0.7));
     const noteRows = rows => { for (const r of rows) { mergeWishlistRow(got, r); const prior = S.byRank.get(r.rank); if (prior === undefined) S.byRank.set(r.rank, r.appid); else if (prior !== r.appid) S.conflict = true;
@@ -183,7 +210,6 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     warnings.push('Rank is a displayed row position, not verified global priority. DOM rows are partial; verify account and membership.');
     warnings.push('Consistency was checked for observed rows and the displayed count, sort and search only; changes confined to unobserved ranks cannot be detected.');
     warnings.push('Wishlist filters were not verified (only sort and search state were recorded); confirm them before treating this as the full wishlist.');
-    const sha256Hex = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
     const sha = await sha256Hex(new TextEncoder().encode(JSON.stringify(c.records)));
     const envelope = {
       format: 'game-curator-steam-export', version: 1, source: 'wishlist',
@@ -197,27 +223,6 @@ await (window.__gcWishlistRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
-    if (c.deliver === 'download') { // initiation only; the envelope is retained (bounded) until the caller releases it or it expires
-      const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
-      const file = `gc-wishlist-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
-      const retainMs = Math.min(Math.max(Number(c.retainMs) || 600000, 1000), 3600000), expiresAt = Date.now() + retainMs;
-      window.__gcWishlistRelease?.(); // a new delivery replaces and releases any earlier retained one (timer and state)
-      const start = () => {
-        const a = document.createElement('a'), url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
-        a.href = url; a.download = file; document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 10000);
-      };
-      const release = () => { clearTimeout(window.__gcWishlistExpiry); delete window.__gcWishlistRedeliver; delete window.__gcWishlistRelease; delete window.__gcWishlistExpiry; return 'released'; };
-      // Timers can be delayed in background tabs, so redelivery checks the absolute expiry as well as the timer.
-      window.__gcWishlistRedeliver = () => { if (Date.now() > expiresAt) { release(); return {expired: true, retry: false}; } start(); return {downloadInitiated: true, retry: true, file, bytes}; };
-      window.__gcWishlistRelease = release;
-      window.__gcWishlistExpiry = setTimeout(release, retainMs);
-      start();
-      const d = envelope.diagnostics;
-      return {downloadInitiated: true, source: 'wishlist', capturedAt: envelope.capturedAt, file, bytes, retainedForMs: retainMs, records: c.records.length, expected: d.expectedCount,
-        complete: d.complete, stopReason: d.stopReason, elapsedMs: d.elapsedMs, calls: d.calls, scrollSteps: d.scrollSteps, view: d.view,
-        note: 'Initiation only. Confirm the file exists with the reported byte count before using it.'};
-    }
-    return envelope;
+    return deliverEnvelope(envelope, {deliver: c.deliver, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
   }
 })({})

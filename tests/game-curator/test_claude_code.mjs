@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 import {parseToolResult, canonicalize, validate, decide as decideRaw, fieldLosses, checkCacheAuthorized, save as saveRaw, MAX_BACKUPS} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 import {spawnSync} from 'node:child_process';
 import {makeWishlistPage} from './fake-wishlist-dom.mjs';
+import {makeLibraryPage} from './fake-library-dom.mjs';
+import {normalizeLibraryRecord} from '../../skills/game-curator/scripts/browser/library-rows.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
@@ -102,12 +104,12 @@ assert.match(reason({...old, records: [{appid: 'x'}]}, next), /not a valid wishl
 for (const view of [{...U, filters: 'unknown'}, {...U, filters: 'active'}, {...U, sort: 'Name'}, {...U, search: 'active'}, null])
   assert.match(reason(old, make(3, {account: 'me', at: '2026-11-26T03:00:00Z', view})), /not verified as default sort/);
 const legacy = {...old, diagnostics: {expectedCount: 4}}; // an older capture with no view evidence
-assert.match(reason(legacy, next), /no filter\/sort evidence/);
+assert.match(reason(legacy, next), /no view evidence/);
 assert.equal(decide(legacy, next, {existingViewUnfiltered: true}).action, 'replace');
 // --existing-view only fills missing evidence; it never overrides explicitly conflicting recorded evidence.
 for (const view of [{...U, filters: 'active'}, {...U, sort: 'Name'}, {...U, search: 'active'}]) {
   const conflicted = {...old, diagnostics: {...old.diagnostics, view}};
-  assert.match(reason(conflicted, next, {existingViewUnfiltered: true}), /non-default sort, active search or active filter/);
+  assert.match(reason(conflicted, next, {existingViewUnfiltered: true}), /non-default view/);
 }
 assert.equal(decide({...old, diagnostics: {...old.diagnostics, view: {...U, filters: 'unknown'}}}, next, {existingViewUnfiltered: true}).action, 'replace'); // unknown filters: user may fill
 // Existing files must be structurally sound but need no new diagnostics (historical v1 data stays usable).
@@ -366,10 +368,99 @@ fs.rmSync(tmp, {recursive: true});
 
 // The committed page script must be the generated output of the template plus the shared row code, and stay read-only.
 const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-wishlist-page.js', import.meta.url), 'utf8');
-assert.equal(generated, buildPageScript(), 'steam-wishlist-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs');
-const dl0 = generated.indexOf("if (c.deliver === 'download')"), dl1 = generated.indexOf('return envelope;', dl0);
-assert.ok(dl0 > 0 && dl1 > dl0, 'download delivery block not found');
-const outsideDownload = generated.slice(0, dl0) + generated.slice(dl1);
-assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie|\.click\(|dispatchEvent|\.submit\(/.test(outsideDownload), 'page script must stay read-only on the page');
-assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie/.test(generated.slice(dl0, dl1)), 'the download block must be local only (Blob + anchor), with no network or storage');
+// ---- Library source: the same saver, source-specific rules ----
+{
+  const lrow = (i, extra = '') => normalizeLibraryRecord({appid: 3000 + i, name: `Lib ${i}`, pageText: `Lib ${i}\n${extra}My Game Stats\nDOWNLOAD`, membershipSource: 'all-games-row'});
+  const lib = (n, {at = '2026-11-26T05:00:00.000Z', account, accessScope = 'signed-in', view = {tab: 'all', search: 'empty', language: 'en'}, records, diag = {}} = {}) => {
+    records ??= Array.from({length: n}, (_, i) => lrow(i + 1, i % 2 ? 'TOTAL PLAYED\n2.5 hours\nLAST PLAYED\nMay 1, 2025\nACHIEVEMENTS\n3/10\n' : ''));
+    const env = {format: 'game-curator-steam-export', version: 1, source: 'library', capturedAt: at, method: 'browser-dom-claude-code', coverage: 'partial', warnings: ['w'],
+      diagnostics: {expectedCount: records.length, uniqueCount: records.length, complete: true, stopReason: 'complete', ownerControls: true, view, recordsSha256: sha(JSON.stringify(records)), ...diag}, accessScope, records};
+    if (account) env.account = account;
+    return env;
+  };
+  // validation: shape, missing-value semantics, nested key order from the harness
+  const good = lib(6);
+  assert.deepEqual(validate(good, {accessScope: 'signed-in'}), {errors: [], incomplete: []});
+  assert.deepEqual(Object.keys(canonicalize(good).records[0]), ['appid', 'name', 'pageText', 'membershipSource', 'hours', 'playtimeDisplay', 'lastPlayedDisplay', 'achievements']);
+  const viaHarness = canonicalize(parseToolResult(harness(good))); // the harness alphabetizes keys, including inside achievements
+  assert.deepEqual(Object.keys(viaHarness.records[1].achievements), ['unlocked', 'total']);
+  assert.deepEqual(validate(viaHarness, {accessScope: 'signed-in'}), {errors: [], incomplete: []});
+  const libBad = (env, re, o = {accessScope: 'signed-in'}) => assert.ok(validate(env, o).errors.some(e => re.test(e)), `expected library error ${re}`);
+  { const e = lib(4); e.records[0].hours = 0; e.diagnostics.recordsSha256 = sha(JSON.stringify(e.records)); libBad(e, /field hours disagrees/); } // zero must not be invented for a missing label
+  { const e = lib(4); e.records[1].achievements = null; e.diagnostics.recordsSha256 = sha(JSON.stringify(e.records)); libBad(e, /field achievements disagrees/); } // nor dropped when present
+  { const e = lib(4); e.records[0].extra = 1; libBad(e, /unexpected field extra/); }
+  { const e = lib(4); e.records[0].membershipSource = 'wishlist-row'; libBad(e, /membershipSource/); }
+  { const e = lib(4); e.records[0].pageText = ' '; libBad(e, /empty pageText/); }
+  { const e = lib(4); e.records[0].name = ''; libBad(e, /invalid name/); }
+  { const e = lib(4); e.records[0].name = null; e.diagnostics.recordsSha256 = sha(JSON.stringify(e.records)); assert.deepEqual(validate(e, {accessScope: 'signed-in'}).errors, []); } // an unnamed row is data, not an error
+  { const e = lib(4); e.records.push({...e.records[0]}); e.diagnostics.uniqueCount = 5; e.diagnostics.recordsSha256 = sha(JSON.stringify(e.records)); libBad(e, /duplicate appid/); }
+  { const e = lib(4); e.diagnostics.ownerControls = false; libBad(e, /signed-in scope claimed without owner-only evidence/); }
+  { const e = lib(4); e.diagnostics.ownerControls = false; assert.deepEqual(validate(e, {accessScope: 'public'}).errors, []); }
+  assert.ok(validate(lib(4, {diag: {expectedCount: 9}}), {accessScope: 'signed-in'}).incomplete.some(r => /9 items/.test(r)));
+  assert.ok(validate(lib(4, {diag: {expectedCount: null}}), {accessScope: 'signed-in'}).incomplete.some(r => /count was not available/.test(r)));
+  assert.ok(validate(lib(4, {diag: {complete: false, stopReason: 'no-progress'}}), {accessScope: 'signed-in'}).incomplete.some(r => /no-progress/.test(r)));
+  { const e = lib(0, {records: [], diag: {expectedCount: 0, stopReason: 'empty-observed', complete: false}}); assert.ok(validate(e, {accessScope: 'unknown'}).incomplete.some(r => /empty source observed/.test(r))); }
+  assert.ok(validate({...lib(2), source: 'reviews'}, {accessScope: 'signed-in'}).errors.some(e => /unsupported source/.test(e)));
+  // policy: view evidence is observed (tab all, empty search); no attestation exists for the library
+  const lnext = lib(4, {account: 'me', at: '2026-11-27T00:00:00.000Z'});
+  assert.equal(decide(null, lnext).action, 'create');
+  for (const view of [{tab: 'completed', search: 'empty'}, {tab: 'all', search: 'active'}, {tab: null, search: 'empty'}, {tab: 'all', search: 'unknown'}])
+    assert.match(decideRaw(null, lib(4, {account: 'me', view}), {transferVerified: true}).reason, /not verified as the "All Games" tab/);
+  const lold = lib(5, {account: 'me', at: '2026-11-26T00:00:00.000Z'});
+  assert.equal(decide(lold, lnext).action, 'replace'); // fewer games (a removal or refund) still replaces
+  assert.match(reason({...lold, account: 'other'}, lnext), /account/);
+  assert.match(reason({...lold, diagnostics: {...lold.diagnostics, view: {tab: 'completed', search: 'empty'}}}, lnext), /non-default view/);
+  assert.match(reason({...lold, diagnostics: {...lold.diagnostics, view: undefined}}, lnext), /no view evidence/);
+  assert.match(reason({...lold, diagnostics: {...lold.diagnostics, view: undefined}}, lnext, {existingViewUnfiltered: true}), /no view evidence/); // the library has no attestation route
+  assert.match(reason({...lold, source: 'wishlist'}, lnext), /not a valid library envelope/);
+  // field loss: playtime, last played and achievements that existed must not vanish for a retained game
+  { const a = lib(0, {account: 'me', at: '2026-11-26T00:00:00.000Z', records: [lrow(1, 'TOTAL PLAYED\n9 hours\nLAST PLAYED\nMay 1, 2025\nACHIEVEMENTS\n1/2\n'), lrow(2)]});
+    const b = lib(0, {account: 'me', at: '2026-11-27T00:00:00.000Z', records: [lrow(1, 'TOTAL PLAYED\n9 hours\n'), lrow(2, 'TOTAL PLAYED\n1 hours\nLAST PLAYED\nMay 2, 2025\nACHIEVEMENTS\n1/2\n')]});
+    assert.deepEqual(fieldLosses(a, b), {lastPlayedDisplay: 1, achievements: 1}); assert.match(reason(a, b), /lose fields/); // a gained field on another game does not offset them
+    assert.equal(decide(b, a).action !== undefined, true); }
+  // files: each source has its own cache file, snapshots and lock; a library save never touches wishlist.json
+  const rootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-lib-')), dest2 = path.join(rootTmp, 'game-curator', 'cache', 'steam');
+  fs.mkdirSync(dest2, {recursive: true}); fs.writeFileSync(path.join(rootTmp, 'game-curator', 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+  const wl = make(3, {account: 'me', at: '2026-11-26T01:00:00.000Z'});
+  assert.equal(save(wl, dest2).target, path.join(dest2, 'wishlist.json'));
+  const wlBefore = fs.readFileSync(path.join(dest2, 'wishlist.json'), 'utf8');
+  const l1 = save(lold, dest2); assert.equal(l1.action, 'create'); assert.equal(l1.target, path.join(dest2, 'library.json'));
+  const l2 = save(lnext, dest2); assert.equal(l2.action, 'replace'); assert.match(path.basename(l2.backup), /^library\.superseded\.20261126T000000Z\.json$/);
+  const l3 = save(lib(4, {account: 'me', at: '2026-11-28T00:00:00.000Z', view: {tab: 'all', search: 'active'}}), dest2); assert.equal(l3.action, 'separate'); assert.match(path.basename(l3.target), /^library\.partial\.20261128T000000Z\.json$/);
+  assert.equal(fs.readFileSync(path.join(dest2, 'wishlist.json'), 'utf8'), wlBefore);
+  assert.equal(fs.readdirSync(dest2).filter(f => f.startsWith('.')).length, 0);
+  fs.rmSync(rootTmp, {recursive: true});
+  // end to end: simulated page -> tool-result file and -> download with a page summary -> CLI
+  {
+    const cli = new URL('../../skills/game-curator/scripts/claude-code/save-capture.mjs', import.meta.url).pathname;
+    const home4 = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-lib-e2e-')), cache4 = path.join(home4, 'cache', 'steam'); fs.mkdirSync(cache4, {recursive: true});
+    fs.writeFileSync(path.join(home4, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
+    const fast = {quietMs: 100, stallMs: 150}, plain = async () => JSON.parse(JSON.stringify(await makeLibraryPage({n: 40, chunk: 20}).run(fast)));
+    const trFile = path.join(home4, 'tool-result.json'); fs.writeFileSync(trFile, harness(await plain()));
+    const run4 = (file, ...a) => spawnSync(process.execPath, [cli, file, '--dest', cache4, '--account', 'me', '--access-scope', 'signed-in', ...a], {encoding: 'utf8'});
+    let r4 = run4(trFile, '--provenance', 'tool-result'); assert.equal(r4.status, 0, r4.stderr); assert.equal(JSON.parse(r4.stdout).action, 'create');
+    const saved4 = JSON.parse(fs.readFileSync(path.join(cache4, 'library.json'), 'utf8'));
+    assert.equal(saved4.records.length, 40); assert.equal(saved4.source, 'library'); assert.equal(saved4.diagnostics.attestations.transfer.level, 'runtime-tool-result');
+    assert.equal(run4(trFile, '--provenance', 'tool-result', '--view', 'unfiltered').status === 0, false); // no attestation exists for the library
+    const pg = makeLibraryPage({n: 40, chunk: 20}); const summary = JSON.parse(JSON.stringify(await pg.run({...fast, deliver: 'download'})));
+    const dlText = await pg.state.downloads[0].blob.text(); const dlPath = path.join(home4, summary.file); fs.writeFileSync(dlPath, dlText);
+    r4 = run4(dlPath, '--provenance', 'download', '--page-summary', JSON.stringify(summary), '--dry-run'); assert.equal(r4.status, 0, r4.stderr);
+    assert.doesNotMatch(JSON.parse(r4.stdout).reason, /provenance|transfer not verified/);
+    r4 = run4(dlPath, '--provenance', 'download', '--page-summary', JSON.stringify({...summary, view: {...summary.view, tab: 'completed'}}), '--dry-run'); assert.notEqual(r4.status, 0); assert.match(r4.stderr, /view differs/);
+    pg.ctx.window.__gcRelease();
+    fs.rmSync(home4, {recursive: true});
+  }
+}
+
+// The page scripts only read the page; the one local write path is the Blob download inside deliverEnvelope (shared by every source).
+const delivery = fn => { const i = generated.indexOf(`function ${fn}(`); return i; };
+for (const name of ['wishlist', 'library']) {
+  const src = fs.readFileSync(new URL(`../../skills/game-curator/scripts/claude-code/steam-${name}-page.js`, import.meta.url), 'utf8');
+  assert.equal(src, buildPageScript(name), `steam-${name}-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs`);
+  const d0 = src.indexOf('async function deliverEnvelope('), d1 = src.indexOf('\n  }\n', d0);
+  assert.ok(d0 > 0 && d1 > d0, `${name}: deliverEnvelope not found`);
+  const outside = src.slice(0, d0) + src.slice(d1);
+  assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie|\.click\(|dispatchEvent|\.submit\(/.test(outside), `${name}: page script must stay read-only on the page`);
+  assert.ok(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|localStorage|document\.cookie/.test(src.slice(d0, d1)), `${name}: the download block must be local only (Blob + anchor)`);
+}
 console.log('Claude Code collector checks passed');
