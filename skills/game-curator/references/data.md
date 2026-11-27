@@ -17,6 +17,8 @@ The Codex Replay collector waits for the report text and deduplicated game refer
 
 ## Running from a supported browser runtime
 
+Account identity in a Codex runtime: `collectIdentity(tab, {salt})` from `scripts/steam-identity.mjs` (or `{candidate: true}` for a first binding) returns the same salted fingerprints through the same narrow read, or `{available: false}` when page evaluation is absent or refused, which is treated as unobserved and falls back to manual confirmation ([account identity](identity.md)). The Codex DOM collectors still do not emit the owner, view or completeness evidence the saver needs for promotion; an identity match alone does not change that.
+
 The collectors below need a tab object with `playwright.evaluate`, as in Codex. In Claude Code's built-in browser follow [Claude Code](claude-code.md) instead; it produces the same envelope. In Codex's computer-use JavaScript runtime, first create or select a tab in the user's chosen browser, navigate to the source page, and verify the account and the page. `skillPath` is the absolute path of the loaded `SKILL.md`; resolve scripts relative to it, not a hardcoded checkout. For example:
 
 ```js

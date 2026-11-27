@@ -57,6 +57,115 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     }
     return pending;
   }
+  function b64uEncode(bytes) {
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64uDecode(text) {
+    if (typeof text !== 'string' || !/^[A-Za-z0-9_-]+$/.test(text) || text.length % 4 === 1) return null;
+    try {
+      const bin = atob(text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - text.length % 4) % 4));
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return b64uEncode(out) === text ? out : null;
+    } catch { return null; }
+  }
+  function canonicalSteamId64(value) {
+    if (typeof value !== 'string' || !/^[1-9][0-9]{16}$/.test(value)) return null;
+    const n = BigInt(value);
+    const base = 76561197960265728n; // individual-account base; a constant local to the function so the inlined page text stays self-contained
+    return n >= base && n <= base + 4294967295n ? value : null;
+  }
+  function accountIdMatches(steamid64, accountid) {
+    const id = canonicalSteamId64(steamid64);
+    if (!id) return false;
+    const a = typeof accountid === 'number' ? (Number.isSafeInteger(accountid) && accountid >= 0 ? BigInt(accountid) : null)
+      : typeof accountid === 'string' && /^(?:0|[1-9][0-9]{0,9})$/.test(accountid) ? BigInt(accountid) : null;
+    return a !== null && BigInt(id) - 76561197960265728n === a;
+  }
+  function fingerprintBytes(saltBytes, steamid64) {
+    const enc = new TextEncoder(), head = enc.encode('curator/steam-account/v1'), id = enc.encode(steamid64);
+    const out = new Uint8Array(head.length + 1 + saltBytes.length + 1 + id.length);
+    out.set(head, 0); out[head.length] = 0; out.set(saltBytes, head.length + 1); out[head.length + 1 + saltBytes.length] = 0; out.set(id, head.length + 2 + saltBytes.length);
+    return out;
+  }
+  async function sha256HexOf(bytes) {
+    return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  function readSessionSources(win = window, doc = document) {
+    const out = [];
+    const take = (name, raw, requireAccountId) => {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { out.push({name, state: 'malformed'}); return; }
+      let lg, steamid, accountid;
+      try { lg = raw.logged_in; steamid = raw.steamid; accountid = raw.accountid; } catch { out.push({name, state: 'unreadable'}); return; } // a throwing field getter is an unreadable marker; its message is never surfaced
+      out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid, accountid, requireAccountId});
+    };
+    let uc, ucState = 'ok';
+    try { uc = win.UserConfig; } catch { ucState = 'unreadable'; }
+    if (ucState === 'unreadable') out.push({name: 'user-config', state: 'unreadable'});
+    else if (uc !== undefined) take('user-config', uc, true);
+    let attr = null, attrState = 'ok';
+    try { attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo') ?? null; } catch { attrState = 'unreadable'; }
+    if (attrState === 'unreadable') out.push({name: 'userinfo-attr', state: 'unreadable'});
+    else if (attr !== null) {
+      let parsed, ok = true;
+      try { parsed = JSON.parse(attr); } catch { ok = false; } // the parsed object is discarded after the three fields are copied
+      if (ok) take('userinfo-attr', parsed, true); else out.push({name: 'userinfo-attr', state: 'malformed'});
+    }
+    let g, gState = 'ok';
+    try { g = win.g_steamID; } catch { gState = 'unreadable'; }
+    if (gState === 'unreadable') out.push({name: 'g-steamid', state: 'unreadable'});
+    else if (g !== undefined) out.push({name: 'g-steamid', state: 'ok', loggedIn: null, steamid: g, accountid: undefined, requireAccountId: false}); // the legacy global genuinely has no accountid
+    return out;
+  }
+  async function observeIdentity(o = {}, env = {}) {
+    const win = env.win ?? window, doc = env.doc ?? document, loc = env.loc ?? location;
+    let saltBytes = o.salt !== undefined ? b64uDecode(o.salt) : null, generated = false;
+    if (o.salt === undefined && o.candidate === true) { saltBytes = crypto.getRandomValues(new Uint8Array(16)); generated = true; }
+    if (!saltBytes || saltBytes.length !== 16) throw new Error('identity needs a 16-byte base64url salt (or candidate: true)');
+    const saltCheck = (await sha256HexOf(saltBytes)).slice(0, 8);
+    const finish = r => { if (generated) r.salt = b64uEncode(saltBytes); return r; };
+    if (!['https://store.steampowered.com', 'https://steamcommunity.com'].includes(loc?.origin)) {
+      return finish({version: 1, sources: [], loggedIn: null, consistent: false, problems: ['unsupported-origin'], saltCheck, sessionFingerprint: null, pathFingerprint: null});
+    }
+    const sources = readSessionSources(win, doc);
+    const problems = new Set(), ids = new Set(), states = new Set();
+    for (const s of sources) {
+      if (s.state === 'unreadable') { problems.add('unreadable-marker'); continue; }
+      if (s.state === 'malformed') { problems.add('malformed-marker'); continue; }
+      if (s.loggedIn === 'invalid') { problems.add('malformed-marker'); continue; }
+      const provided = s.steamid !== undefined && s.steamid !== null && s.steamid !== false && s.steamid !== '' && s.steamid !== 0 && s.steamid !== '0';
+      if (s.loggedIn === true && !provided) problems.add('login-state-conflict');
+      if (s.loggedIn === false && provided) problems.add('login-state-conflict');
+      if (s.loggedIn !== null) states.add(s.loggedIn);
+      if (!provided) continue;
+      const id = canonicalSteamId64(s.steamid);
+      if (!id) { problems.add('invalid-id'); continue; }
+      if (s.accountid === undefined) { if (s.requireAccountId) { problems.add('missing-account-id'); continue; } }
+      else if (!accountIdMatches(id, s.accountid)) { problems.add('invalid-account-id'); continue; }
+      ids.add(id);
+      if (s.name === 'g-steamid') states.add(true); // a valid ID in the legacy global means signed in
+    }
+    if (ids.size > 1) problems.add('id-conflict');
+    if (states.size > 1) problems.add('login-state-conflict');
+    const loggedIn = states.size === 1 ? [...states][0] : null;
+    const consistent = problems.size === 0;
+    const fp = async id => sha256HexOf(fingerprintBytes(saltBytes, id));
+    const sessionId = ids.size === 1 ? [...ids][0] : null;
+    const pathMatch = /\/(?:replay|profiles)\/([0-9]{17})(?=\/|$)/.exec(String(loc?.pathname ?? ''));
+    const pathId = pathMatch ? canonicalSteamId64(pathMatch[1]) : null;
+    return finish({
+      version: 1,
+      sources: sources.map(s => s.name),
+      loggedIn,
+      consistent,
+      problems: [...problems].sort(),
+      saltCheck,
+      sessionFingerprint: consistent && loggedIn === true && sessionId ? await fp(sessionId) : null,
+      pathFingerprint: pathId ? await fp(pathId) : null,
+    });
+  }
   async function sha256Hex(bytes) {
     return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
   }
@@ -73,7 +182,41 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     });
     return {callStart, left, sleep, outOfCall, nextMutation};
   }
+  async function identityStep(state, identityOpt, ownerNow, covered = true) {
+    if (!identityOpt) return state ?? null;
+    const st = state ?? {checks: 0, stable: true, broke: false, covered: covered !== false, first: null, last: null}; // covered: identity was active from the FIRST batch of the run
+    let obs = null;
+    try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
+    if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
+    const good = !!obs && obs.problems.length === 0 && obs.loggedIn === true && obs.sessionFingerprint !== null;
+    st.checks += 1;
+    if (st.checks === 1) st.first = good ? obs.sessionFingerprint : null;
+    const lost = !good || obs.sessionFingerprint !== st.first;
+    if (lost) st.stable = false;
+    if (lost && st.checks > 1 && st.first !== null) st.broke = true; // a signed-in account was established and then changed or lost: stop the run
+    // (an account that was never established is not a change: the run proceeds and the saver reports identity as unobserved)
+    st.last = obs ?? {version: 1, sources: [], loggedIn: null, consistent: false, problems: [], saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed', owner: null};
+    return st;
+  }
+  function identityOf(st) {
+    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable, broke: st.broke, covered: st.covered}} : undefined;
+  }
+  function identityObsValid(o) {
+    const hex = v => v === null || (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
+    return !!o && typeof o === 'object' && !Array.isArray(o) && o.version === 1 && Array.isArray(o.sources) && o.sources.length <= 3 && o.sources.every(x => typeof x === 'string' && x.length <= 20)
+      && Array.isArray(o.problems) && o.problems.length <= 10 && o.problems.every(x => typeof x === 'string' && x.length <= 30) && hex(o.sessionFingerprint) && hex(o.pathFingerprint)
+      && (o.loggedIn === null || typeof o.loggedIn === 'boolean') && typeof o.consistent === 'boolean' && (o.saltCheck === null || (typeof o.saltCheck === 'string' && /^[0-9a-f]{8}$/.test(o.saltCheck)))
+      && (o.owner === undefined || o.owner === null || typeof o.owner === 'boolean') && (o.error === undefined || o.error === 'observation-failed');
+  }
+  function identityStateValid(st) {
+    if (st === null) return true;
+    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'covered', 'first', 'last'].includes(k))
+      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean' && typeof st.covered === 'boolean'
+      && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
+  }
   async function deliverEnvelope(envelope, o) {
+    // Identity continuity state (see identityStep): the last observation plus whether the signed-in account was the same at every check of the run.
+    if (o.identityState) envelope.diagnostics = {...envelope.diagnostics, identity: identityOf(o.identityState)};
     if (o.deliver !== 'download') return envelope;
     const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
     const file = `${o.filePrefix}-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
@@ -120,7 +263,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     // Returns null if the state is acceptable, otherwise the reason it is not.
     const invalid = (S, listPath) => {
       const has = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
-      if (!has(S, ['v', 'path', 'startedAt', 'born', 'touched', 'activeMs', 'rows', 'visited', 'pending', 'requested', 'repeats', 'expected', 'attempts', 'calls', 'restarts', 'owner', 'warnings', 'opts', 'view'])) return 'unexpected shape';
+      if (!has(S, ['v', 'path', 'startedAt', 'born', 'touched', 'activeMs', 'rows', 'visited', 'pending', 'requested', 'repeats', 'expected', 'attempts', 'calls', 'restarts', 'owner', 'warnings', 'opts', 'view', 'identity'])) return 'unexpected shape';
       if (S.v !== 1) return 'unsupported version';
       if (S.path !== listPath) return 'different list path';
       if (typeof S.startedAt !== 'string' || !Number.isFinite(Date.parse(S.startedAt)) || S.startedAt.length > 40) return 'bad start time';
@@ -128,7 +271,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       if (![S.repeats, S.attempts, S.calls, S.restarts].every(n => isInt(n, 10000))) return 'bad counters';
       if (!(S.expected === null || isInt(S.expected, 100000)) || typeof S.owner !== 'boolean') return 'bad expected or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxPages', 'retainMs']) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
+      if (!has(S.opts, ['maxPages', 'retainMs', 'identity']) || !(S.opts.identity === undefined || (has(S.opts.identity, ['salt']) && typeof S.opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(S.opts.identity.salt))) || !identityStateValid(S.identity ?? null) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
         || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'recommended-list' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.pages || !list.every(k => okPageKey(k, listPath))) return 'bad page list';
@@ -143,7 +286,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       return null;
     };
     const fresh = why => { const S = {v: 1, path, startedAt, born: Date.now(), touched: Date.now(), activeMs: 0, rows: [], visited: [], pending: [], requested: null, repeats: 0, expected: null, attempts: 0,
-      calls: 0, restarts: 0, owner: false, warnings: [], opts: {}, view: {kind: 'recommended-list', language: document.documentElement.lang || null}}; if (why) S.warnings.push(why); return S; };
+      calls: 0, restarts: 0, owner: false, identity: null, warnings: [], opts: {}, view: {kind: 'recommended-list', language: document.documentElement.lang || null}}; if (why) S.warnings.push(why); return S; };
 
     let S = null, viewAtStop = null, stopReason = null;
     const stored = raw();
@@ -158,7 +301,13 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxPages', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    const priorIdOpt = S.opts.identity;
+    for (const k of ['maxPages', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    const idOpt = S.opts.identity, ownerNow = () => !!document.querySelector('.review_box .control_block');
+    // Who is signed in on THIS page, before its rows are merged: a change or loss since the first page of the run stops the run and these rows are not added.
+    const lateId = S.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt);
+    if (idOpt) { S.identity = await identityStep(lateId ? null : (S.identity ?? null), idOpt, ownerNow, !lateId); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxPages = Math.min(S.opts.maxPages ?? 20, HARD.pages);
     const seen = new Set(S.rows.map(r => r.reviewUrl));
 
@@ -177,8 +326,8 @@ await (window.__gcReviewsRun = async (opts = {}) => {
         // The displayed count changed under us: batches from different counts must not mix. Restart once, then stop.
         if (S.restarts >= 1) { stopReason = 'view-changed'; viewAtStop = {expected: snap.expected, pageKey}; }
         else {
-          const warnings = [...S.warnings, `The displayed review count changed from ${S.expected} to ${snap.expected} during collection; restarted from page 1.`], restarts = S.restarts + 1, keptOpts = S.opts, calls = S.calls;
-          S = fresh(); S.warnings = warnings.slice(-HARD.warnings); S.restarts = restarts; S.calls = calls; S.expected = snap.expected; S.opts = keptOpts;
+          const warnings = [...S.warnings, `The displayed review count changed from ${S.expected} to ${snap.expected} during collection; restarted from page 1.`], restarts = S.restarts + 1, keptOpts = S.opts, keptId = S.identity, calls = S.calls;
+          S = fresh(); S.warnings = warnings.slice(-HARD.warnings); S.restarts = restarts; S.calls = calls; S.expected = snap.expected; S.opts = keptOpts; S.identity = keptId;
           const first = reviewPageKey(Object.assign(new URL(snap.url), {search: '?p=1'}).href);
           S.requested = first; save(S);
           return {status: 'continue', next: first, restart: true, collected: 0, expected: S.expected, pagesVisited: 0, hint: 'The count changed; navigate to next and run this file again.'};
@@ -199,6 +348,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       else if (!S.pending.length) stopReason = 'pages-exhausted';
       else if (S.attempts >= maxPages || S.visited.length >= HARD.pages) stopReason = 'budget';
     }
+    if (idOpt && stopReason !== null) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; } // last look, on the final page
     S.activeMs += Date.now() - callStart; S.touched = Date.now();
     if (stopReason === null) { // more pages: remember where we are (data only) and ask the caller to navigate
       S.requested = S.pending.shift(); save(S);
@@ -232,6 +382,6 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
   }
 })({})

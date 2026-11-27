@@ -36,7 +36,8 @@
 // Separate captures are bounded and never evicted to admit a different observation.
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
-import {parseSettings} from '../settings.mjs';
+import {parseSettings, readSettingsFile, bindingKey} from '../settings.mjs';
+import {checkObservation, evaluateIdentity, identityPolicy, knownConflict, generationOf} from '../identity.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -347,6 +348,7 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
     if (typeof d.recordsSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(d.recordsSha256)) errors.push('the original capture\'s records checksum is missing');
     if (!Number.isSafeInteger(d.uniqueCount) || d.uniqueCount < 1) errors.push('diagnostics.uniqueCount is invalid');
     if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
+    if (d.identity !== undefined) errors.push(...checkObservation(d.identity));
     rules.validateDiagnostics?.(d, recs, errors, env);
     if (Number.isSafeInteger(d.yearsPending) && d.yearsPending > 0) incomplete.push(`${d.yearsPending} ${rules.pendingLabel} were not visited`);
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
@@ -365,6 +367,12 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
     if (d.expectedCount === null) incomplete.push('the displayed count was not available, so coverage cannot be verified');
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
     if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
+    if (d.identity !== undefined) errors.push(...checkObservation(d.identity));
+    if (d.identityYears !== undefined) { // Replay: one observation per report page, each bound to its own year
+      const ys = d.identityYears;
+      if (env.source !== 'replay' || !Array.isArray(ys)) errors.push('diagnostics.identityYears is invalid');
+      else { const seen = new Set(); for (const e of ys) { if (!isPlainObject(e) || !Number.isSafeInteger(e.year) || seen.has(e.year) || !recs.some(r => r?.year === e.year)) { errors.push('diagnostics.identityYears has an invalid or unmatched entry'); continue; } seen.add(e.year); const {year, ...obs} = e; errors.push(...checkObservation(obs)); } }
+    }
     rules.validateDiagnostics?.(d, recs, errors, env);
     // A transfer from a page is observation only: it may not carry attestations (those are added here, by the caller's verified inputs)
     // and, for reviews, may not carry names (a name only ever comes from the enrichment step that verifies it).
@@ -410,17 +418,23 @@ export function fieldLosses(existing, next) { return cfgOf(next).fieldLosses(exi
 // Add game names to a reviews envelope from a library capture that is verified to be the same account. The review page never shows
 // a name, so this is the only source; every name added is marked nameSource "verified-library-capture" and the library capture's
 // time and size are recorded. A review whose game is absent from the library simply stays without a name. Returns {env, enrichment}.
-export function enrichReviewNames(env, library, {libraryAccount, librarySha256} = {}) {
+export function enrichReviewNames(env, library, {libraryAccount, librarySha256, binding = null, identity = null} = {}) {
   if (env?.source !== 'reviews') throw new Error('name enrichment applies only to a reviews capture');
   if (!validExisting(library, 'library')) throw new Error('the names source is not a valid library capture');
-  const account = library.account ?? libraryAccount;
-  if (!env.account || !account || account !== env.account) throw new Error('names can only be added from a library capture verified as the same account (both captures must carry the same account alias; use --library-account only for a library file the user confirmed)');
+  if (binding) { // an account is bound: both captures must be verified under THIS binding generation; no manual alias can stand in
+    if (libraryAccount !== undefined) throw new Error('--library-account cannot be used while an account is bound: the library capture must itself be verified under the current binding');
+    if (!(identity?.result === 'match' && identity.ownership === 'verified')) throw new Error('names can only be added to a reviews capture verified as the bound account');
+    const att = library.diagnostics?.attestations?.identity;
+    if (library.account !== binding.alias || !(att?.by === 'binding' && att.result === 'match' && att.ownership === 'verified' && att.generation === binding.generation)) throw new Error('the library capture was not verified under the current account binding (a different generation, a legacy or manual capture, or another alias cannot supply names)');
+  }
+  const account = binding ? binding.alias : (library.account ?? libraryAccount);
+  if (!binding && (!env.account || !account || account !== env.account)) throw new Error('names can only be added from a library capture verified as the same account (both captures must carry the same account alias; use --library-account only for a library file the user confirmed)');
   if (!['signed-in', 'public'].includes(library.accessScope)) throw new Error('the library capture has no established access scope');
   const names = new Map(library.records.filter(r => typeof r.name === 'string' && r.name.trim()).map(r => [r.appid, r.name]));
   let named = 0;
   const records = env.records.map(r => { if (!names.has(r.appid)) return r; named++; return {...r, name: names.get(r.appid), nameSource: 'verified-library-capture'}; });
   if (typeof librarySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(librarySha256)) throw new Error('enrichment must be bound to the exact library snapshot: the SHA-256 of its bytes is required (a local digest identifies the file; it does not authenticate its source)');
-  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length, librarySha256, libraryAccount: account};
+  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length, librarySha256, libraryAccount: account, ...(binding ? {generation: binding.generation} : {})};
   const warnings = records.length - named ? [...env.warnings, 'Some review names are missing from the verified library capture.'] : env.warnings;
   return {env: {...env, records, warnings}, enrichment};
 }
@@ -453,7 +467,7 @@ const verifiedTransfer = env => {
 };
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'refresh'|'separate', reason, notes}.
-export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
+export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false, identityBlock = null} = {}) {
   const notes = [], cfg = cfgOf(next);
   const candidate = validate(next, {account: next?.account, accessScope: next?.accessScope ?? 'unknown'});
   if (candidate.errors.length) return {action: 'separate', reason: `invalid capture: ${candidate.errors.join('; ')}`, notes};
@@ -461,6 +475,7 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
   if (keepSeparate) return {action: 'separate', reason: 'user asked to keep this capture separate', notes};
   if (incomplete.length) return {action: 'separate', reason: `incomplete capture: ${incomplete.join('; ')}`, notes};
   if (!transferVerified || !verifiedTransfer(next)) return {action: 'separate', reason: 'transfer not verified: provenance was not established by the caller (--provenance tool-result, or --provenance download with a matching --page-summary)', notes};
+  if (identityBlock) return {action: 'separate', reason: `account identity does not allow promotion: ${identityBlock}`, notes};
   // Main creation and promotion both need an established identity, scope and view; otherwise keep it separate.
   if (!established(next)) return {action: 'separate', reason: 'account identity or access scope is not established (signed-in or public with a verified account)', notes};
   if (!cfg.viewOk(next)) return {action: 'separate', reason: `capture is not verified as ${cfg.viewMessage}`, notes};
@@ -468,6 +483,7 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
   if (!validExisting(existing, next.source)) return {action: 'separate', reason: `existing file is not a valid ${next.source} envelope; preserved untouched`, notes};
   if (next.source === 'replay' && existing.records[0].year !== next.records[0].year) return {action: 'separate', reason: 'existing file holds a different year; preserved untouched', notes};
   if (existing.account !== next.account) return {action: 'separate', reason: 'account identity differs or is unknown', notes};
+  if (generationOf(existing) !== generationOf(next)) return {action: 'separate', reason: 'the existing capture was verified under a different (or no) account binding, even though the alias matches', notes};
   if (existing.accessScope !== next.accessScope) return {action: 'separate', reason: 'access scope differs or is not established', notes};
   if (existing.coverage !== next.coverage) return {action: 'separate', reason: 'coverage differs', notes};
   if (!(Date.parse(next.capturedAt) > Date.parse(existing.capturedAt))) return {action: 'separate', reason: 'new capture is not newer', notes};
@@ -485,7 +501,10 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
 
 // Select from already authorized captures; no filesystem access, identity inference or merge.
 // Ineligible but structurally usable evidence is returned separately for historical context.
-export function selectSnapshots(captures, {source, account, accessScope, year} = {}) {
+export function selectSnapshots(captures, {source, account, accessScope, year, binding} = {}) {
+  // With a binding, selection is for the bound account only and only captures verified under THIS binding generation are eligible: the alias is
+  // a label and never proves the same bound identity (a reused alias after a change or revoke names a different binding).
+  if (binding) { if (account !== undefined && account !== binding.alias) throw new Error('selection account differs from the bound account'); account = binding.alias; }
   if (!SOURCE_NAMES.includes(source) || !account || !['signed-in', 'public'].includes(accessScope)) throw new Error('selection requires a source and established account and scope');
   if (source === 'replay' && (!Number.isInteger(year) || year < 2000 || year > 2099)) throw new Error('Replay selection requires a year');
   const eligible = [], supporting = [], rejected = [];
@@ -493,6 +512,10 @@ export function selectSnapshots(captures, {source, account, accessScope, year} =
     if (!capture || capture.source !== source) continue;
     if (source === 'replay' && (!Array.isArray(capture.records) || capture.records.length !== 1)) { rejected.push({capture, reasons: ['Replay selection requires one annual record']}); continue; }
     if (source === 'replay' && capture.records[0]?.year !== year) continue;
+    const conflict = knownConflict(capture);
+    if (conflict) { rejected.push({capture, reasons: [conflict]}); continue; } // a known conflict is never supporting evidence, whether or not an alias was saved
+    const gen = generationOf(capture);
+    if (binding && gen !== null && gen !== binding.generation) { rejected.push({capture, reasons: ['verified under a prior account binding (a different generation) that shared this alias']}); continue; } // never current-account evidence
     const v = validate(capture, {account: capture.account, accessScope: capture.accessScope ?? 'unknown'});
     const inconsistentTransfer = VERIFIED_TRANSFER_LEVELS.has(capture.diagnostics?.attestations?.transfer?.level) && !verifiedTransfer(capture);
     if (v.errors.length || inconsistentTransfer || (capture.account && capture.account !== account) || (capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope)) {
@@ -501,6 +524,8 @@ export function selectSnapshots(captures, {source, account, accessScope, year} =
     }
     const reasons = [...v.incomplete, ...(source === 'replay' ? SOURCES.replay.yearIncomplete(capture.diagnostics, capture.records[0]) : [])];
     if (capture.account !== account) reasons.push('account identity differs or is unknown');
+    if (binding && gen === null) reasons.push('captured outside any account binding (legacy or manual): caveated, not verified under this binding');
+    if (!binding && gen !== null) reasons.push('verified under an account binding that was not supplied: pass the current binding to treat it as current evidence');
     if (capture.accessScope !== accessScope) reasons.push('access scope differs or is unknown');
     if (!cfgOf(capture).viewOk(capture)) reasons.push('view is not verified');
     if (!verifiedTransfer(capture)) reasons.push('transfer provenance is not verified');
@@ -611,7 +636,7 @@ function separateCandidates(dir, stem) {
   return fs.readdirSync(dir).filter(n => n.startsWith(prefix) && /^\d{8}T\d{6}Z-[a-f0-9]{12}\.json$/.test(n.slice(prefix.length))).sort().map(n => path.join(dir, n));
 }
 function sameSeparate(a, b) {
-  if (!established(a) || !established(b) || a.account !== b.account || a.accessScope !== b.accessScope || a.coverage !== b.coverage || a.source !== b.source) return false;
+  if (!established(a) || !established(b) || a.account !== b.account || generationOf(a) !== generationOf(b) || a.accessScope !== b.accessScope || a.coverage !== b.coverage || a.source !== b.source) return false;
   // Only the timestamp and transfer fingerprint are omitted. All other diagnostics,
   // warnings and exact records must match; unknown identity is never deduplicated.
   const clean = e => {
@@ -640,11 +665,45 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
   if (!readIfExists(file)?.equals(Buffer.from(text))) throw new Error(`read-back mismatch for ${file}`);
 }
 
-export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, ...policy} = {}) {
-  checkCacheAuthorized(destDir, settings); // before inspecting the payload or any cache file, including dry runs
+// Derive the identity verdict for a capture at the shared boundary, from the actual observation, the approved binding and the collector's own
+// owner evidence; nothing a caller attaches is trusted. The observation is consumed and only the verdict (with the binding generation) is
+// stored. A manual alias counts only where extraction was unavailable. Returns {env, block, identity}.
+export function applyIdentity(env, binding, manualAccount) {
+  const out = JSON.parse(JSON.stringify(env)), d = out.diagnostics ?? {};
+  const observation = d.identity;
+  if (observation !== undefined) { const bad = checkObservation(observation); if (bad.length) throw new Error(`Invalid capture: ${bad.join('; ')}`); } // validated BEFORE it is consumed: a malformed observation is never downgraded to unobserved
+  if (isPlainObject(out.diagnostics)) delete out.diagnostics.identity;
+  if (!binding) { if (manualAccount !== undefined && out.account === undefined) out.account = manualAccount; return {env: canonicalize(out), block: null, identity: null}; }
+  const ownerEvidence = SOURCES[out.source]?.ownerEvidence?.(d) === true;
+  const evaluation = evaluateIdentity({binding, observation, ownerEvidence, identityChanged: d.stopReason === 'identity-changed'});
+  const pol = identityPolicy({binding, evaluation, manualAccount}); // only an explicit manualAccount counts: an alias merely present on the envelope is not a confirmation
+  if (pol.account === undefined) delete out.account; else out.account = pol.account;
+  if (isPlainObject(out.diagnostics)) {
+    const att = {...(out.diagnostics.attestations ?? {}), identity: pol.attestation};
+    if (pol.account !== undefined) att.account = pol.account; else delete att.account;
+    if (pol.scope && (out.accessScope === undefined || out.accessScope === 'unknown')) { out.accessScope = pol.scope; att.accessScope = pol.scope; }
+    out.diagnostics.attestations = att;
+  }
+  return {env: canonicalize(out), block: pol.block, identity: pol.attestation};
+}
+
+export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, manualAccount, ...policy} = {}) {
+  const settingsFile = checkCacheAuthorized(destDir, settings); // before inspecting the payload or any cache file, including dry runs
+  const bound0 = readSettingsFile(settingsFile).settings.steamAccount;
   if (stemOverride !== undefined) throw new Error('stem override is not supported');
   const consentDest = destDir;
-  const recheckConsent = () => { checkCacheAuthorized(consentDest, settings); extraCheck?.(); };
+  // Intrinsic recheck: consent AND the account binding the decision was based on; a change or revocation stops the save wherever it is called.
+  const recheckConsent = () => {
+    checkCacheAuthorized(consentDest, settings);
+    if (bindingKey(readSettingsFile(settingsFile).settings.steamAccount) !== bindingKey(bound0)) throw new Error('The account binding changed during the save; nothing more was written');
+    extraCheck?.();
+  };
+  const enr = env?.diagnostics?.attestations?.enrichment;
+  if (enr && bound0 && enr.generation !== bound0.generation) throw new Error('review names were attached under a different (or no) account binding than the one in force; nothing was written');
+  if (enr && !bound0 && enr.generation !== undefined) throw new Error('review names were attached under an account binding that is no longer in force; nothing was written');
+  const applied = applyIdentity(env, bound0, manualAccount);
+  env = applied.env;
+  if (applied.block && !policy.identityBlock) policy.identityBlock = applied.block;
   const checked = validate(env, {account: env?.account, accessScope: env?.accessScope ?? 'unknown'});
   if (checked.errors.length) throw new Error(`Invalid capture: ${checked.errors.join('; ')}`);
   incomplete = [...new Set([...incomplete, ...checked.incomplete, ...(env?.source === 'replay' && env.records?.length === 1 ? SOURCES.replay.yearIncomplete(env.diagnostics, env.records[0]) : [])])];
@@ -663,6 +722,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
   const partial = path.join(destDir, `${stem}.managed-v1.partial.${ts}-${sha256(JSON.stringify([env.source, env.capturedAt, env.account, env.accessScope, env.records])).slice(0, 12)}.json`);
   const result = {...decision, target: decision.action === 'separate' ? partial : main, backup: decision.action === 'replace' ? path.join(destDir, `${stem}.managed-v1.superseded.${stamp(existing.capturedAt)}-${sha256(decisionBytes).slice(0, 12)}.json`) : null, bytes: Buffer.byteLength(text), sha256: sha256(text)};
   if (decision.action === 'separate') Object.assign(result, chooseSeparate(destDir, stem, env, partial));
+  result.identity = applied.identity;
   if (dryRun) return result;
 
   recheckConsent?.(); // before creating or touching anything
@@ -713,7 +773,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
           if (!st.isFile() || st.isSymbolicLink()) continue;
           const bytes = readIfExists(file), digest = sha256(bytes), snapshot = JSON.parse(bytes);
           if (!name.endsWith(`-${digest.slice(0, 12)}.json`) || !validExisting(snapshot, env.source)) continue;
-          if (snapshot.account !== existing.account || snapshot.accessScope !== existing.accessScope || snapshot.coverage !== existing.coverage || !cfgOf(snapshot).viewOk(snapshot) || JSON.stringify(snapshot.diagnostics.view) !== JSON.stringify(existing.diagnostics.view) || snapshot.diagnostics.attestations?.filters !== existing.diagnostics.attestations?.filters) continue;
+          if (snapshot.account !== existing.account || generationOf(snapshot) !== generationOf(existing) || snapshot.accessScope !== existing.accessScope || snapshot.coverage !== existing.coverage || !cfgOf(snapshot).viewOk(snapshot) || JSON.stringify(snapshot.diagnostics.view) !== JSON.stringify(existing.diagnostics.view) || snapshot.diagnostics.attestations?.filters !== existing.diagnostics.attestations?.filters) continue;
           managed.push({file, digest, time: Date.parse(snapshot.capturedAt)});
         } catch { /* Unreadable or edited files are user evidence; leave them alone. */ }
       }
@@ -739,8 +799,11 @@ export const replayYearIncomplete = (env, record) => SOURCES.replay.yearIncomple
 // checksum of its own record so the per-year file stays verifiable without the original.
 export function splitReplay(env) {
   const {records, ...rest} = env, n = records.length;
+  // Each annual file carries ONLY the identity observation made on its own report page (plus the run's continuity), never another year's.
+  const {identityYears, identity: runIdentity, ...baseDiag} = env.diagnostics ?? {};
+  const own = year => { const e = Array.isArray(identityYears) ? identityYears.find(x => x?.year === year) : null; if (!e) return {}; const {year: y, ...obs} = e; return {identity: {...obs, ...(runIdentity?.continuity ? {continuity: runIdentity.continuity} : {})}}; };
   return [...records].sort((a, b) => a.year - b.year).map(r => canonicalize({...rest, diagnosticsScope: 'original-multi-year-capture', records: [r],
-    diagnostics: {...env.diagnostics, attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(r)), originalRecords: n}}}}));
+    diagnostics: {...baseDiag, ...own(r.year), attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(r)), originalRecords: n}}}}));
 }
 
 // True only when this file is the process entry point, including when invoked through a symlink or a path
@@ -765,7 +828,7 @@ if (isMain()) {
     let hookRoot = null, sourceConsent = null;
     const defaultCache = path.join(os.homedir(), '.curator/game-curator/cache/steam'), realOrSelf = p => { try { return fs.realpathSync(p); } catch { return p; } };
     const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
-    checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
+    const settingsFile = checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
     const sourceSha = opt('--source-sha256'), expectBytes = opt('--expect-bytes'), provenanceArg = opt('--provenance'), summaryArg = opt('--page-summary');
     if (provenanceArg !== undefined && !['tool-result', 'download', 'hook-capture', 'host-result'].includes(provenanceArg)) throw new Error('--provenance must be tool-result, download, hook-capture or host-result');
     let hookMeta = null, hookIdentity = null, rawBytes;
@@ -804,9 +867,13 @@ if (isMain()) {
     // Verified means the caller established it: a declared tool-result file, or a download whose page summary matched every fact.
     const transferVerified = (provenanceArg === 'tool-result') || (provenanceArg === 'hook-capture' && hookMeta !== null) || (provenanceArg === 'download' && summaryChecks !== null);
     const level = provenanceArg === 'host-result' ? 'host-result-unverified' : provenanceArg === 'tool-result' ? 'runtime-tool-result' : provenanceArg === 'hook-capture' ? 'hook-tool-response' : transferVerified ? (sourceSha !== undefined ? 'download-summary-and-source-digest' : 'download-summary-verified') : 'unverified';
-    const account = opt('--account'), accessScope = opt('--access-scope') ?? 'unknown';
-    const {errors, incomplete} = validate(env, {account, accessScope, incoming: true});
+    const accountArg = opt('--account'), scopeArg = opt('--access-scope');
+    const {errors, incomplete} = validate(env, {account: accountArg, accessScope: scopeArg ?? 'unknown', incoming: true});
     if (errors.length) { console.error('Rejected (not a valid Steam export envelope for its source):\n- ' + errors.join('\n- ')); process.exit(1); }
+    // Identity is derived inside save() from the page's observation and the approved binding (never trusted from here). With an account bound the
+    // manual alias is only a fallback for unavailable extraction and is passed through; unbound, it is attested as before.
+    const binding = readSettingsFile(settingsFile).settings.steamAccount;
+    const account = binding ? undefined : accountArg, accessScope = scopeArg ?? 'unknown';
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
     const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope,
@@ -835,7 +902,8 @@ if (isMain()) {
         if (!libBytes) throw new Error('names source does not exist');
         library = JSON.parse(libBytes.toString('utf8'));
       } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
-      const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes)});
+      const pre = binding ? applyIdentity(env, binding, accountArg) : null; // the same binding revision save() will use; the observation stays on env for save() to consume
+      const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes), binding, identity: pre?.identity ? {result: pre.identity.result, ownership: pre.identity.ownership} : null});
       const bad = verifyNameAttribution(result.env, library);
       if (bad.length) throw new Error(`name attribution failed verification:\n- ${bad.join('\n- ')}`);
       toSave = result.env; attestations.enrichment = result.enrichment;
@@ -844,8 +912,8 @@ if (isMain()) {
     env.diagnostics = {...env.diagnostics, attestations};
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
     const policy = {dryRun, incomplete, transferVerified, settings: opt('--settings'), existingAccount: opt('--existing-account'),
-      existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
-      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null) sourceConsent(hookRoot); }};
+      existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'), manualAccount: accountArg,
+      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null) sourceConsent(hookRoot); }}; // the binding recheck is intrinsic to save()
     if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {

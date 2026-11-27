@@ -169,6 +169,8 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
   assert.equal(nosalt.available, false, 'neither salt nor candidate: refused, never a guess');
 }
 
+// (the identity option of the collectors is exercised against the real generated page scripts in test_identity_collectors.mjs)
+
 // ---- D. settings v1 / v2 reader (fixtures; no production file is read)
 const goodV2 = (extra = {}) => ({version: 2, persistence: {profileAndFeedback: true, steamCache: true}, steamAccount: {alias: 'my-steam', fingerprint: {alg: BINDING_ALG, salt: SALT, value: VECTOR}, approvedAt: '2026-11-26T00:00:00Z', generation: 'AAAAAAAAAAAAAAAAAAAAAA'}, ...extra});
 assert.deepEqual(parseSettings({version: 1, persistence: {profileAndFeedback: true, steamCache: false}}), {version: 1, persistence: {profileAndFeedback: true, steamCache: false}, steamAccount: null});

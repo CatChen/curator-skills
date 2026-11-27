@@ -61,3 +61,7 @@ Run these in genuinely fresh sessions with the activation gate passed. Use synth
 For each case also verify the exact files the agent read or wrote, the agreed consent scope, and whether it preserved unrelated user edits. Do not add a database, background process, or persistence script to make these tests pass.
 
 For scratch-cache tests, pass the saver's arguments as an explicit array (never an unquoted shell variable that may not split) and check that every `--dry-run` `target` lies inside the intended scratch directory before running the real save; a production cache is never a test destination.
+
+## Account identity and binding
+
+Development tests: `node tests/game-curator/test_identity.mjs` (fingerprints, narrow extraction, settings v1/v2) and `node tests/game-curator/test_account_binding.mjs` (bind, change, revoke, saver verdicts) use synthetic identifiers and scratch homes only. Never bind, change or migrate the production `settings.json` as a test. For a live pass use a scratch settings file and a scratch cache, record which scenarios were live and which fixture, and keep identifiers out of reports; the scenarios, their status and the known runtime restrictions are in [account identity](game-curator-identity.md).

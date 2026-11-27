@@ -11,6 +11,8 @@ Files, all under `scripts/claude-code/` unless noted:
 | `../browser/wishlist-rows.mjs` | Shared, self-contained row extraction and merge semantics used by this script **and** by the Codex `collectWishlist` |
 | `save-capture.mjs` | Node saver: contract validation, cache policy, safe write and read-back |
 
+**Account identity.** Every "confirm the account with the user" step below is the **manual fallback**. When an account is bound (`bind-account.mjs status`), collect with `identity: {salt}` on the first call (it is remembered across resume calls; the hook grammar accepts it together with `deliver: 'hook'`) and let the saver compare the observed fingerprint with the binding: a verified match needs no account question and no `--account`; a mismatch, ambiguity or unproven page ownership is kept separate and never replaces a verified cache; anything unobserved falls back to the manual confirmation, recorded as such and never as a match. Page ownership, scope, completeness, transfer and cache consent are separate checks. See [account identity](identity.md).
+
 ## Procedure
 
 1. **Consent first.** Raw cache writes need `steamCache: true` in the Curator Home `settings.json` ([persistence](persistence.md)); the saver checks it again and fails closed. Honor an explicit current instruction from the user over stored settings.

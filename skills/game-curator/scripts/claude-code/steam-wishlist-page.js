@@ -46,6 +46,115 @@ await (window.__gcWishlistRun = async (opts = {}) => {
   function toWishlistRecords(rows) {
     return [...rows.values()].filter(r => r.complete).sort((a, b) => a.rank - b.rank).map(({complete, ...record}) => record);
   }
+  function b64uEncode(bytes) {
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64uDecode(text) {
+    if (typeof text !== 'string' || !/^[A-Za-z0-9_-]+$/.test(text) || text.length % 4 === 1) return null;
+    try {
+      const bin = atob(text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - text.length % 4) % 4));
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return b64uEncode(out) === text ? out : null;
+    } catch { return null; }
+  }
+  function canonicalSteamId64(value) {
+    if (typeof value !== 'string' || !/^[1-9][0-9]{16}$/.test(value)) return null;
+    const n = BigInt(value);
+    const base = 76561197960265728n; // individual-account base; a constant local to the function so the inlined page text stays self-contained
+    return n >= base && n <= base + 4294967295n ? value : null;
+  }
+  function accountIdMatches(steamid64, accountid) {
+    const id = canonicalSteamId64(steamid64);
+    if (!id) return false;
+    const a = typeof accountid === 'number' ? (Number.isSafeInteger(accountid) && accountid >= 0 ? BigInt(accountid) : null)
+      : typeof accountid === 'string' && /^(?:0|[1-9][0-9]{0,9})$/.test(accountid) ? BigInt(accountid) : null;
+    return a !== null && BigInt(id) - 76561197960265728n === a;
+  }
+  function fingerprintBytes(saltBytes, steamid64) {
+    const enc = new TextEncoder(), head = enc.encode('curator/steam-account/v1'), id = enc.encode(steamid64);
+    const out = new Uint8Array(head.length + 1 + saltBytes.length + 1 + id.length);
+    out.set(head, 0); out[head.length] = 0; out.set(saltBytes, head.length + 1); out[head.length + 1 + saltBytes.length] = 0; out.set(id, head.length + 2 + saltBytes.length);
+    return out;
+  }
+  async function sha256HexOf(bytes) {
+    return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  function readSessionSources(win = window, doc = document) {
+    const out = [];
+    const take = (name, raw, requireAccountId) => {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { out.push({name, state: 'malformed'}); return; }
+      let lg, steamid, accountid;
+      try { lg = raw.logged_in; steamid = raw.steamid; accountid = raw.accountid; } catch { out.push({name, state: 'unreadable'}); return; } // a throwing field getter is an unreadable marker; its message is never surfaced
+      out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid, accountid, requireAccountId});
+    };
+    let uc, ucState = 'ok';
+    try { uc = win.UserConfig; } catch { ucState = 'unreadable'; }
+    if (ucState === 'unreadable') out.push({name: 'user-config', state: 'unreadable'});
+    else if (uc !== undefined) take('user-config', uc, true);
+    let attr = null, attrState = 'ok';
+    try { attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo') ?? null; } catch { attrState = 'unreadable'; }
+    if (attrState === 'unreadable') out.push({name: 'userinfo-attr', state: 'unreadable'});
+    else if (attr !== null) {
+      let parsed, ok = true;
+      try { parsed = JSON.parse(attr); } catch { ok = false; } // the parsed object is discarded after the three fields are copied
+      if (ok) take('userinfo-attr', parsed, true); else out.push({name: 'userinfo-attr', state: 'malformed'});
+    }
+    let g, gState = 'ok';
+    try { g = win.g_steamID; } catch { gState = 'unreadable'; }
+    if (gState === 'unreadable') out.push({name: 'g-steamid', state: 'unreadable'});
+    else if (g !== undefined) out.push({name: 'g-steamid', state: 'ok', loggedIn: null, steamid: g, accountid: undefined, requireAccountId: false}); // the legacy global genuinely has no accountid
+    return out;
+  }
+  async function observeIdentity(o = {}, env = {}) {
+    const win = env.win ?? window, doc = env.doc ?? document, loc = env.loc ?? location;
+    let saltBytes = o.salt !== undefined ? b64uDecode(o.salt) : null, generated = false;
+    if (o.salt === undefined && o.candidate === true) { saltBytes = crypto.getRandomValues(new Uint8Array(16)); generated = true; }
+    if (!saltBytes || saltBytes.length !== 16) throw new Error('identity needs a 16-byte base64url salt (or candidate: true)');
+    const saltCheck = (await sha256HexOf(saltBytes)).slice(0, 8);
+    const finish = r => { if (generated) r.salt = b64uEncode(saltBytes); return r; };
+    if (!['https://store.steampowered.com', 'https://steamcommunity.com'].includes(loc?.origin)) {
+      return finish({version: 1, sources: [], loggedIn: null, consistent: false, problems: ['unsupported-origin'], saltCheck, sessionFingerprint: null, pathFingerprint: null});
+    }
+    const sources = readSessionSources(win, doc);
+    const problems = new Set(), ids = new Set(), states = new Set();
+    for (const s of sources) {
+      if (s.state === 'unreadable') { problems.add('unreadable-marker'); continue; }
+      if (s.state === 'malformed') { problems.add('malformed-marker'); continue; }
+      if (s.loggedIn === 'invalid') { problems.add('malformed-marker'); continue; }
+      const provided = s.steamid !== undefined && s.steamid !== null && s.steamid !== false && s.steamid !== '' && s.steamid !== 0 && s.steamid !== '0';
+      if (s.loggedIn === true && !provided) problems.add('login-state-conflict');
+      if (s.loggedIn === false && provided) problems.add('login-state-conflict');
+      if (s.loggedIn !== null) states.add(s.loggedIn);
+      if (!provided) continue;
+      const id = canonicalSteamId64(s.steamid);
+      if (!id) { problems.add('invalid-id'); continue; }
+      if (s.accountid === undefined) { if (s.requireAccountId) { problems.add('missing-account-id'); continue; } }
+      else if (!accountIdMatches(id, s.accountid)) { problems.add('invalid-account-id'); continue; }
+      ids.add(id);
+      if (s.name === 'g-steamid') states.add(true); // a valid ID in the legacy global means signed in
+    }
+    if (ids.size > 1) problems.add('id-conflict');
+    if (states.size > 1) problems.add('login-state-conflict');
+    const loggedIn = states.size === 1 ? [...states][0] : null;
+    const consistent = problems.size === 0;
+    const fp = async id => sha256HexOf(fingerprintBytes(saltBytes, id));
+    const sessionId = ids.size === 1 ? [...ids][0] : null;
+    const pathMatch = /\/(?:replay|profiles)\/([0-9]{17})(?=\/|$)/.exec(String(loc?.pathname ?? ''));
+    const pathId = pathMatch ? canonicalSteamId64(pathMatch[1]) : null;
+    return finish({
+      version: 1,
+      sources: sources.map(s => s.name),
+      loggedIn,
+      consistent,
+      problems: [...problems].sort(),
+      saltCheck,
+      sessionFingerprint: consistent && loggedIn === true && sessionId ? await fp(sessionId) : null,
+      pathFingerprint: pathId ? await fp(pathId) : null,
+    });
+  }
   async function sha256Hex(bytes) {
     return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
   }
@@ -62,7 +171,41 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     });
     return {callStart, left, sleep, outOfCall, nextMutation};
   }
+  async function identityStep(state, identityOpt, ownerNow, covered = true) {
+    if (!identityOpt) return state ?? null;
+    const st = state ?? {checks: 0, stable: true, broke: false, covered: covered !== false, first: null, last: null}; // covered: identity was active from the FIRST batch of the run
+    let obs = null;
+    try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
+    if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
+    const good = !!obs && obs.problems.length === 0 && obs.loggedIn === true && obs.sessionFingerprint !== null;
+    st.checks += 1;
+    if (st.checks === 1) st.first = good ? obs.sessionFingerprint : null;
+    const lost = !good || obs.sessionFingerprint !== st.first;
+    if (lost) st.stable = false;
+    if (lost && st.checks > 1 && st.first !== null) st.broke = true; // a signed-in account was established and then changed or lost: stop the run
+    // (an account that was never established is not a change: the run proceeds and the saver reports identity as unobserved)
+    st.last = obs ?? {version: 1, sources: [], loggedIn: null, consistent: false, problems: [], saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed', owner: null};
+    return st;
+  }
+  function identityOf(st) {
+    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable, broke: st.broke, covered: st.covered}} : undefined;
+  }
+  function identityObsValid(o) {
+    const hex = v => v === null || (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
+    return !!o && typeof o === 'object' && !Array.isArray(o) && o.version === 1 && Array.isArray(o.sources) && o.sources.length <= 3 && o.sources.every(x => typeof x === 'string' && x.length <= 20)
+      && Array.isArray(o.problems) && o.problems.length <= 10 && o.problems.every(x => typeof x === 'string' && x.length <= 30) && hex(o.sessionFingerprint) && hex(o.pathFingerprint)
+      && (o.loggedIn === null || typeof o.loggedIn === 'boolean') && typeof o.consistent === 'boolean' && (o.saltCheck === null || (typeof o.saltCheck === 'string' && /^[0-9a-f]{8}$/.test(o.saltCheck)))
+      && (o.owner === undefined || o.owner === null || typeof o.owner === 'boolean') && (o.error === undefined || o.error === 'observation-failed');
+  }
+  function identityStateValid(st) {
+    if (st === null) return true;
+    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'covered', 'first', 'last'].includes(k))
+      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean' && typeof st.covered === 'boolean'
+      && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
+  }
   async function deliverEnvelope(envelope, o) {
+    // Identity continuity state (see identityStep): the last observation plus whether the signed-in account was the same at every check of the run.
+    if (o.identityState) envelope.diagnostics = {...envelope.diagnostics, identity: identityOf(o.identityState)};
     if (o.deliver !== 'download') return envelope;
     const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
     const file = `${o.filePrefix}-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
@@ -101,6 +244,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     let scroller = null;
     const nextMutation = limit => waitMutation(scroller && scroller !== document.scrollingElement ? scroller : document.body, limit);
 
+    const ownerNow = () => !!document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let snap = snapshotWishlist();
     for (let i = 0; !snap.rows.length && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotWishlist(); }
     let view = viewInfo(); const expected0 = snap.expected;
@@ -109,7 +253,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, retainMs: opts.retainMs});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, identityState: opts.identity ? await identityStep(await identityStep(null, opts.identity, ownerNow), opts.identity, ownerNow) : null, retainMs: opts.retainMs});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -126,7 +270,11 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    const priorIdOpt = S.opts.identity;
+    for (const k of ['identity', 'maxMs', 'maxSteps', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    const idOpt = S.opts.identity, idEvery = Number.isInteger(opts.identityEveryMs) && opts.identityEveryMs >= 0 ? opts.identityEveryMs : 1000; let idAt = Date.now(); // identityEveryMs: test tuning only, not remembered
+    const lateId = S.stats.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt); // identity added (or re-salted) on a resume call: earlier batches were collected without it and are never attested retroactively
+    S.identity = await identityStep(lateId ? null : S.identity, idOpt, ownerNow, !lateId); // who is signed in at the start of this call; the first call fixes the account of the run
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
@@ -159,6 +307,10 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     let stopReason = null;
     while (stopReason === null) {
       if (outOfTotal()) { stopReason = 'budget'; break; }
+      if (idOpt) { // identity continuity at collection boundaries (about once a second): a change or loss stops the run with the coherent batches only
+        if (Date.now() - idAt >= idEvery) { S.identity = await identityStep(S.identity, idOpt); idAt = Date.now(); }
+        if (S.identity.broke) { stopReason = 'identity-changed'; break; }
+      }
       if (outOfCall()) { // hand control back before the tool's 45 s limit; the next run resumes here
         S.activeMs += Date.now() - callStart; S.touched = Date.now();
         return {inProgress: true, collected: got.size, expected, elapsedMs: S.activeMs, calls: stats.calls, hint: 'Run window.__gcWishlistRun({}) again to resume'};
@@ -189,11 +341,12 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     if (stopReason === 'complete' && viewChanged(snapshotWishlist())) stopReason = 'view-changed'; // last look before emitting
     if (stopReason === 'view-changed') view = viewInfo(); // never emit the stale starting view for a changed one
+    if (idOpt) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; } // last look at who is signed in, on the page that was collected
     S.activeMs += Date.now() - callStart;
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
@@ -226,6 +379,6 @@ await (window.__gcWishlistRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
-    return deliverEnvelope(envelope, {deliver: c.deliver, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
+    return deliverEnvelope(envelope, {deliver: c.deliver, identityState: c.identityState, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
   }
 })({})

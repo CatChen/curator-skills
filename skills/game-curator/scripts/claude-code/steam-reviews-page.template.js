@@ -54,7 +54,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     // Returns null if the state is acceptable, otherwise the reason it is not.
     const invalid = (S, listPath) => {
       const has = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
-      if (!has(S, ['v', 'path', 'startedAt', 'born', 'touched', 'activeMs', 'rows', 'visited', 'pending', 'requested', 'repeats', 'expected', 'attempts', 'calls', 'restarts', 'owner', 'warnings', 'opts', 'view'])) return 'unexpected shape';
+      if (!has(S, ['v', 'path', 'startedAt', 'born', 'touched', 'activeMs', 'rows', 'visited', 'pending', 'requested', 'repeats', 'expected', 'attempts', 'calls', 'restarts', 'owner', 'warnings', 'opts', 'view', 'identity'])) return 'unexpected shape';
       if (S.v !== 1) return 'unsupported version';
       if (S.path !== listPath) return 'different list path';
       if (typeof S.startedAt !== 'string' || !Number.isFinite(Date.parse(S.startedAt)) || S.startedAt.length > 40) return 'bad start time';
@@ -62,7 +62,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       if (![S.repeats, S.attempts, S.calls, S.restarts].every(n => isInt(n, 10000))) return 'bad counters';
       if (!(S.expected === null || isInt(S.expected, 100000)) || typeof S.owner !== 'boolean') return 'bad expected or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxPages', 'retainMs']) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
+      if (!has(S.opts, ['maxPages', 'retainMs', 'identity']) || !(S.opts.identity === undefined || (has(S.opts.identity, ['salt']) && typeof S.opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(S.opts.identity.salt))) || !identityStateValid(S.identity ?? null) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
         || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'recommended-list' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.pages || !list.every(k => okPageKey(k, listPath))) return 'bad page list';
@@ -77,7 +77,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       return null;
     };
     const fresh = why => { const S = {v: 1, path, startedAt, born: Date.now(), touched: Date.now(), activeMs: 0, rows: [], visited: [], pending: [], requested: null, repeats: 0, expected: null, attempts: 0,
-      calls: 0, restarts: 0, owner: false, warnings: [], opts: {}, view: {kind: 'recommended-list', language: document.documentElement.lang || null}}; if (why) S.warnings.push(why); return S; };
+      calls: 0, restarts: 0, owner: false, identity: null, warnings: [], opts: {}, view: {kind: 'recommended-list', language: document.documentElement.lang || null}}; if (why) S.warnings.push(why); return S; };
 
     let S = null, viewAtStop = null, stopReason = null;
     const stored = raw();
@@ -92,7 +92,13 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxPages', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    const priorIdOpt = S.opts.identity;
+    for (const k of ['maxPages', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    const idOpt = S.opts.identity, ownerNow = () => !!document.querySelector('.review_box .control_block');
+    // Who is signed in on THIS page, before its rows are merged: a change or loss since the first page of the run stops the run and these rows are not added.
+    const lateId = S.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt);
+    if (idOpt) { S.identity = await identityStep(lateId ? null : (S.identity ?? null), idOpt, ownerNow, !lateId); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxPages = Math.min(S.opts.maxPages ?? 20, HARD.pages);
     const seen = new Set(S.rows.map(r => r.reviewUrl));
 
@@ -111,8 +117,8 @@ await (window.__gcReviewsRun = async (opts = {}) => {
         // The displayed count changed under us: batches from different counts must not mix. Restart once, then stop.
         if (S.restarts >= 1) { stopReason = 'view-changed'; viewAtStop = {expected: snap.expected, pageKey}; }
         else {
-          const warnings = [...S.warnings, `The displayed review count changed from ${S.expected} to ${snap.expected} during collection; restarted from page 1.`], restarts = S.restarts + 1, keptOpts = S.opts, calls = S.calls;
-          S = fresh(); S.warnings = warnings.slice(-HARD.warnings); S.restarts = restarts; S.calls = calls; S.expected = snap.expected; S.opts = keptOpts;
+          const warnings = [...S.warnings, `The displayed review count changed from ${S.expected} to ${snap.expected} during collection; restarted from page 1.`], restarts = S.restarts + 1, keptOpts = S.opts, keptId = S.identity, calls = S.calls;
+          S = fresh(); S.warnings = warnings.slice(-HARD.warnings); S.restarts = restarts; S.calls = calls; S.expected = snap.expected; S.opts = keptOpts; S.identity = keptId;
           const first = reviewPageKey(Object.assign(new URL(snap.url), {search: '?p=1'}).href);
           S.requested = first; save(S);
           return {status: 'continue', next: first, restart: true, collected: 0, expected: S.expected, pagesVisited: 0, hint: 'The count changed; navigate to next and run this file again.'};
@@ -133,6 +139,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       else if (!S.pending.length) stopReason = 'pages-exhausted';
       else if (S.attempts >= maxPages || S.visited.length >= HARD.pages) stopReason = 'budget';
     }
+    if (idOpt && stopReason !== null) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; } // last look, on the final page
     S.activeMs += Date.now() - callStart; S.touched = Date.now();
     if (stopReason === null) { // more pages: remember where we are (data only) and ask the caller to navigate
       S.requested = S.pending.shift(); save(S);
@@ -166,6 +173,6 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
   }
 })({})

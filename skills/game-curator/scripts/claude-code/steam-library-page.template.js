@@ -38,6 +38,8 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     };
     const sigOf = (v, count) => JSON.stringify([location.pathname.replace(/\/+$/, ''), v.tab, count, v.search]);
 
+    // owner-only evidence is read from the rows retained so far (the same rule the envelope uses), never from whatever else the page shows
+    const ownerNow = () => { const g = window.__gcLibrary?.got; return !!g && [...g.values()].some(r => /\b(DOWNLOAD|UNINSTALL|UPDATE)\b|My Game Content/.test(r.pageText ?? '')); };
     let snap = snapshotLibrary();
     for (let i = 0; !snap.records.length && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotLibrary(); }
     let view = viewInfo(), expected = snap.expected;
@@ -45,7 +47,7 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     if (!snap.records.length) {
       if (expected !== 0) throw new Error('No library rows rendered; the page may still be loading, signed out or private, or its layout changed. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, got: new Map(), stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, retainMs: opts.retainMs});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, got: new Map(), stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, identityState: opts.identity ? await identityStep(await identityStep(null, opts.identity, ownerNow), opts.identity, ownerNow) : null, retainMs: opts.retainMs});
     }
 
     const fresh = () => ({sig, startedAt, got: new Map(), activeMs: 0, opts: {}, warnings: [], stats: {steps: 0, waits: 0, calls: 0, restarts: 0}, scrollStalls: 0, quietSince: Date.now()});
@@ -56,7 +58,11 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     }
     S = window.__gcLibrary ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps', 'retainMs', 'quietMs', 'stallMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    const priorIdOpt = S.opts.identity;
+    for (const k of ['identity', 'maxMs', 'maxSteps', 'retainMs', 'quietMs', 'stallMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    const idOpt = S.opts.identity, idEvery = Number.isInteger(opts.identityEveryMs) && opts.identityEveryMs >= 0 ? opts.identityEveryMs : 1000; let idAt = Date.now(); // identityEveryMs: test tuning only, not remembered
+    const lateId = S.stats.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt); // identity added (or re-salted) on a resume call: earlier batches were collected without it and are never attested retroactively
+    S.identity = await identityStep(lateId ? null : S.identity, idOpt, ownerNow, !lateId); // who is signed in at the start of this call; the first call fixes the account of the run
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 200;
     const quietMs = S.opts.quietMs ?? 800, stallMs = S.opts.stallMs ?? 1500; // quiet period that confirms completion; stall period before scrolling
     const {got, stats} = S;
@@ -90,6 +96,10 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     let stopReason = null; // S.quietSince lives in the resumable state so a quiet period can span calls
     while (stopReason === null) {
       if (outOfTotal()) { stopReason = 'budget'; break; }
+      if (idOpt) { // identity continuity at collection boundaries (about once a second): a change or loss stops the run with the coherent batches only
+        if (Date.now() - idAt >= idEvery) { S.identity = await identityStep(S.identity, idOpt); idAt = Date.now(); }
+        if (S.identity.broke) { stopReason = 'identity-changed'; break; }
+      }
       if (outOfCall()) { // hand control back before the tool's 45 s limit; the next run resumes here
         S.activeMs += Date.now() - callStart; S.touched = Date.now();
         return {inProgress: true, collected: got.size, expected, elapsedMs: S.activeMs, calls: stats.calls, hint: 'Run window.__gcLibraryRun({}) again to resume'};
@@ -111,11 +121,12 @@ await (window.__gcLibraryRun = async (opts = {}) => {
       stats.waits++; await nextMutation(reached ? Math.max(50, quietMs - quiet) : Math.min(400, stallMs));
     }
     if (stopReason === 'complete' && viewChanged(snapshotLibrary())) stopReason = 'view-changed'; // last look before emitting
+    if (idOpt) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; } // last look at who is signed in, on the page that was collected
     // On a view change the envelope keeps describing the batches that were collected (view, expected); the page's present state is reported separately.
     const viewAtStop = stopReason === 'view-changed' ? {view: viewInfo(), expected: snapshotLibrary().expected} : null;
     S.activeMs += Date.now() - callStart;
     const c = {startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, got, stopReason, view, stats, activeMs: S.activeMs, calls: stats.calls,
-      warnings: S.warnings, deliver: opts.deliver, retainMs: S.opts.retainMs, viewAtStop};
+      warnings: S.warnings, deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, viewAtStop};
     cleanup();
     return envelopeOf(c);
   } catch (error) { cleanup(); throw error; }
@@ -154,6 +165,6 @@ await (window.__gcLibraryRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: c.deliver, retainMs: c.retainMs, filePrefix: 'gc-library'});
+    return deliverEnvelope(envelope, {deliver: c.deliver, identityState: c.identityState, retainMs: c.retainMs, filePrefix: 'gc-library'});
   }
 })({})
