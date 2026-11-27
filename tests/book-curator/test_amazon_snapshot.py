@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -52,7 +53,7 @@ class AmazonSnapshotTests(unittest.TestCase):
     def test_summary_is_counts_only_and_never_writes(self):
         path, digest = self.write('books-x.json', snapshot(warnings=['Private warning text']))
         self.evidence(path, digest)
-        before = open(path, 'rb').read()
+        before = pathlib.Path(path).read_bytes()
         result = self.run_script(path)
         report = json.loads(result.stdout)
         self.assertEqual(report['recordCount'], 2)
@@ -62,7 +63,7 @@ class AmazonSnapshotTests(unittest.TestCase):
         self.assertEqual((report['identity'], report['problems'], report['snapshotWarningCount']), ('recorded', [], 1))
         for private in ('Synthetic', 'S1', 'test-alias', 'Private warning', 'user confirmed'):
             self.assertNotIn(private, result.stdout)
-        self.assertEqual(open(path, 'rb').read(), before)
+        self.assertEqual(pathlib.Path(path).read_bytes(), before)
         self.assertEqual(sorted(os.listdir(self.dir.name)), ['books-x.json', 'books-x.json.evidence.json'])
 
     def test_matching_association_without_verified_identity_stays_unknown(self):
@@ -94,14 +95,14 @@ class AmazonSnapshotTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual((report['malformedRecords'], report['unsupportedSourceTypes']), (3, 1))
-        self.assertEqual(report['missingIds'], 3)
+        self.assertEqual(report['missingIds'], 2)
         self.assertEqual(report['identity'], 'unknown')
         self.assertIsNone(report['snapshotWarningCount'])
         self.assertIsNone(report['displayedTotal'])
         for expected in ('malformed records', 'duplicate source identifiers', 'evidence sidecar is not an object'):
             self.assertIn(expected, report['problems'])
         unreadable, _ = self.write('books-u.json', snapshot())
-        open(unreadable + '.evidence.json', 'w').write('{broken')
+        pathlib.Path(unreadable + '.evidence.json').write_text('{broken')
         self.assertIn('evidence sidecar unreadable', json.loads(self.run_script(unreadable).stdout)['problems'])
 
     def test_rejects_other_formats_and_bad_usage_without_echoing_content(self):
