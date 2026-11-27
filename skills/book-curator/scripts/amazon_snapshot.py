@@ -23,7 +23,7 @@ def summarize(snapshot_path, evidence_path=None):
     data, snap = load(snapshot_path)
     problems = []
     if not isinstance(snap, dict) or snap.get('format') != FORMAT or snap.get('version') != 1:
-        raise ValueError('not a book-curator-amazon-content version 1 snapshot')
+        raise ValueError('not a book-curator-amazon-content version 1 snapshot (an evidence sidecar goes after --evidence)')
     records = snap.get('records')
     if snap.get('category') not in ('books', 'docs') or not isinstance(records, list):
         raise ValueError('invalid category or records')
