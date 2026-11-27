@@ -100,6 +100,11 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
     const r = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), attr: {logged_in: true, steamid: ID_A, accountid: 999}}))); assert.deepEqual(r.problems, ['invalid-account-id']); assert.equal(r.sessionFingerprint, null);
     const lg = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), attr: {logged_in: false, steamid: ID_A, accountid: ACC_A}}))); assert.ok(lg.problems.includes('login-state-conflict')); assert.equal(lg.sessionFingerprint, null);
   }
+  { // field-level getters that throw are unreadable markers, never raw exception text; accountid must be canonical decimal
+    const bad = {get steamid() { throw new Error('SECRET field text'); }, logged_in: true, accountid: ACC_A};
+    const r = j(await observeIdentity({salt: SALT}, env({userConfig: bad}))); assert.deepEqual(r.problems, ['unreadable-marker']); assert.equal(r.sessionFingerprint, null); assert.ok(!JSON.stringify(r).includes('SECRET'));
+    const z = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, '0' + ACC_A)}))); assert.ok(z.problems.includes('invalid-account-id'), 'leading zeros are not canonical'); assert.equal(z.sessionFingerprint, null);
+  }
   const g = j(await observeIdentity({salt: SALT}, env({g: ID_A}))); assert.deepEqual(g.problems, [], 'the legacy global genuinely has no accountid'); assert.equal(g.sessionFingerprint, VECTOR);
   const out = j(await observeIdentity({salt: SALT}, env({userConfig: {logged_in: false}}))); assert.deepEqual(out.problems, []); assert.equal(out.loggedIn, false, 'explicitly signed out is its own state');
   const none = j(await observeIdentity({salt: SALT}, env({}))); assert.deepEqual(none.problems, []); assert.equal(none.loggedIn, null, 'no markers is a different state again');

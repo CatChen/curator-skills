@@ -39,7 +39,7 @@ export function accountIdMatches(steamid64, accountid) {
   const id = canonicalSteamId64(steamid64);
   if (!id) return false;
   const a = typeof accountid === 'number' ? (Number.isSafeInteger(accountid) && accountid >= 0 ? BigInt(accountid) : null)
-    : typeof accountid === 'string' && /^[0-9]{1,10}$/.test(accountid) ? BigInt(accountid) : null;
+    : typeof accountid === 'string' && /^(?:0|[1-9][0-9]{0,9})$/.test(accountid) ? BigInt(accountid) : null;
   return a !== null && BigInt(id) - 76561197960265728n === a;
 }
 
@@ -62,8 +62,9 @@ export function readSessionSources(win = window, doc = document) {
   const out = [];
   const take = (name, raw, requireAccountId) => {
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { out.push({name, state: 'malformed'}); return; }
-    const lg = raw.logged_in;
-    out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid: raw.steamid, accountid: raw.accountid, requireAccountId});
+    let lg, steamid, accountid;
+    try { lg = raw.logged_in; steamid = raw.steamid; accountid = raw.accountid; } catch { out.push({name, state: 'unreadable'}); return; } // a throwing field getter is an unreadable marker; its message is never surfaced
+    out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid, accountid, requireAccountId});
   };
   let uc, ucState = 'ok';
   try { uc = win.UserConfig; } catch { ucState = 'unreadable'; }
