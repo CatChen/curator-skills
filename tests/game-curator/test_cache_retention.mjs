@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {save} from '../../skills/game-curator/scripts/cache.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-separate-'));
-const dest = path.join(root, 'steam'); fs.mkdirSync(dest, {mode: 0o700});
+const dest = path.join(root, 'cache', 'steam'); fs.mkdirSync(dest, {recursive: true, mode: 0o700});
+fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: true}}));
 const env = (n, at) => {
   const records = [{appid: n, rank: 1, name: `Game ${n}`, pageText: `Game ${n}`, membershipSource: 'wishlist-row'}];
   return {format: 'game-curator-steam-export', version: 1, source: 'wishlist', capturedAt: at, method: 'browser-dom-claude-code', coverage: 'partial', warnings: [], account: 'test', accessScope: 'signed-in', diagnostics: {view: {sort: 'Name'}, expectedCount: 1, uniqueCount: 1, ranksObserved: 1, placeholderNameRows: 0, complete: true, reorderHandles: true, recordsSha256: crypto.createHash('sha256').update(JSON.stringify(records)).digest('hex')}, records};

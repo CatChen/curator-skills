@@ -14,8 +14,9 @@ import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/bui
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 // Policy tests assume verified transfer unless a case says otherwise (the default is fail-closed).
-const decide = (o, n, c = {}) => decideRaw(o, n, {transferVerified: true, ...c});
-const save = (e, d, c = {}) => saveRaw(e, d, {transferVerified: true, ...c});
+const transfer = e => { e.diagnostics.attestations ??= {}; e.diagnostics.attestations.transfer ??= {level: 'runtime-tool-result'}; return e; };
+const decide = (o, n, c = {}) => decideRaw(o, transfer(structuredClone(n)), {transferVerified: true, ...c});
+const save = (e, d, c = {}) => saveRaw(transfer(e), d, {transferVerified: true, ...c});
 const row = (i, {labels = ['RELEASE DATE:', 'ENGLISH REVIEWS:', 'USER TAGS:', 'MY CATEGORIES:'], base = 1000} = {}) => ({appid: base + i, rank: i, name: `Game ${i}`,
   pageText: `Game ${i}\n${labels.map(l => `${l}\nx`).join('\n')}\n$9.99`, membershipSource: 'wishlist-row'});
 function make(n, {at = '2026-11-26T02:37:30.226Z', account, accessScope = 'signed-in', view = {sort: 'Your Rank', search: 'empty', filters: 'none'}, records, diag = {}} = {}) {
@@ -77,7 +78,7 @@ const old = make(4, {account: 'me', at: '2026-11-25T00:00:00Z'});
 const next = make(3, {account: 'me', at: '2026-11-26T03:00:00Z'});
 assert.equal(decide(null, next).action, 'create');
 assert.match(decideRaw(null, next).reason, /transfer not verified/); // fail closed unless the caller establishes verified transfer
-assert.equal(decideRaw(null, next, {transferVerified: true}).action, 'create');
+assert.equal(decideRaw(null, transfer(structuredClone(next)), {transferVerified: true}).action, 'create');
 assert.equal(decide(old, next).action, 'replace'); // a legitimately smaller unfiltered wishlist replaces
 assert.match(decide(old, next).notes.join(), /1 removed/);
 const reason = (o, n, ctx) => decide(o, n, ctx).reason;
@@ -413,7 +414,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   const lnext = lib(4, {account: 'me', at: '2026-11-27T00:00:00.000Z'});
   assert.equal(decide(null, lnext).action, 'create');
   for (const view of [{tab: 'completed', search: 'empty'}, {tab: 'all', search: 'active'}, {tab: null, search: 'empty'}, {tab: 'all', search: 'unknown'}])
-    assert.match(decideRaw(null, lib(4, {account: 'me', view}), {transferVerified: true}).reason, /not verified as the "All Games" tab/);
+    assert.match(decideRaw(null, transfer(lib(4, {account: 'me', view})), {transferVerified: true}).reason, /not verified as the "All Games" tab/);
   const lold = lib(5, {account: 'me', at: '2026-11-26T00:00:00.000Z'});
   assert.equal(decide(lold, lnext).action, 'replace'); // fewer games (a removal or refund) still replaces
   assert.match(reason({...lold, account: 'other'}, lnext), /account/);
@@ -549,7 +550,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   // policy: view, field loss (a baseline that had names must not lose them), per-source files
   const rnext = rev(4, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), rold = rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'});
   assert.equal(decide(rold, rnext).action, 'replace'); assert.equal(decide(null, rnext).action, 'create'); // a removed review is a legitimate change
-  assert.match(decideRaw(null, rev(4, {account: 'me', view: {kind: 'other'}}), {transferVerified: true}).reason, /not verified as the full "My reviews" list/);
+  assert.match(decideRaw(null, transfer(rev(4, {account: 'me', view: {kind: 'other'}})), {transferVerified: true}).reason, /not verified as the full "My reviews" list/);
   assert.match(reason({...rold, diagnostics: {...rold.diagnostics, view: undefined}}, rnext), /no view evidence/); // an older Codex baseline has no view evidence
   assert.match(reason({...rold, diagnostics: {...rold.diagnostics, view: {kind: 'other'}}}, rnext), /non-default view/);
   const namedResult = enrich(rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'}), libAccount('me'));

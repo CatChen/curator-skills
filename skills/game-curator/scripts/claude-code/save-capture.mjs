@@ -437,6 +437,10 @@ export function verifyNameAttribution(env, library) {
   return bad;
 }
 
+// Promotion evidence is independent of record semantics and can evolve with identity policy.
+const VERIFIED_TRANSFER_LEVELS = new Set(['runtime-tool-result', 'hook-tool-response', 'download-summary-verified', 'download-summary-and-source-digest']);
+const verifiedTransfer = env => VERIFIED_TRANSFER_LEVELS.has(env?.diagnostics?.attestations?.transfer?.level);
+
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'refresh'|'separate', reason, notes}.
 export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
   const notes = [], cfg = cfgOf(next);
@@ -445,7 +449,7 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
   incomplete = [...new Set([...incomplete, ...candidate.incomplete, ...(next?.source === 'replay' && next.records?.length === 1 ? SOURCES.replay.yearIncomplete(next.diagnostics, next.records[0]) : [])])];
   if (keepSeparate) return {action: 'separate', reason: 'user asked to keep this capture separate', notes};
   if (incomplete.length) return {action: 'separate', reason: `incomplete capture: ${incomplete.join('; ')}`, notes};
-  if (!transferVerified) return {action: 'separate', reason: 'transfer not verified: provenance was not established by the caller (--provenance tool-result, or --provenance download with a matching --page-summary)', notes};
+  if (!transferVerified || !verifiedTransfer(next)) return {action: 'separate', reason: 'transfer not verified: provenance was not established by the caller (--provenance tool-result, or --provenance download with a matching --page-summary)', notes};
   // Main creation and promotion both need an established identity, scope and view; otherwise keep it separate.
   if (!established(next)) return {action: 'separate', reason: 'account identity or access scope is not established (signed-in or public with a verified account)', notes};
   if (!cfg.viewOk(next)) return {action: 'separate', reason: `capture is not verified as ${cfg.viewMessage}`, notes};
@@ -473,15 +477,21 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
 export function selectSnapshots(captures, {source, account, accessScope, year} = {}) {
   if (!SOURCE_NAMES.includes(source) || !account || !['signed-in', 'public'].includes(accessScope)) throw new Error('selection requires a source and established account and scope');
   if (source === 'replay' && (!Number.isInteger(year) || year < 2000 || year > 2099)) throw new Error('Replay selection requires a year');
-  const eligible = [], supporting = [];
+  const eligible = [], supporting = [], rejected = [];
   for (const capture of captures) {
-    if (!capture || capture.source !== source || (source === 'replay' && (capture.records?.length !== 1 || capture.records[0]?.year !== year))) continue;
+    if (!capture || capture.source !== source) continue;
+    if (source === 'replay' && (!Array.isArray(capture.records) || capture.records.length !== 1)) { rejected.push({capture, reasons: ['Replay selection requires one annual record']}); continue; }
+    if (source === 'replay' && capture.records[0]?.year !== year) continue;
     const v = validate(capture, {account: capture.account, accessScope: capture.accessScope ?? 'unknown'});
-    const reasons = [...v.errors, ...v.incomplete, ...(source === 'replay' ? SOURCES.replay.yearIncomplete(capture.diagnostics, capture.records[0]) : [])];
+    if (v.errors.length || (capture.account && capture.account !== account) || (capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope)) {
+      rejected.push({capture, reasons: [...v.errors, ...(capture.account && capture.account !== account ? ['different account'] : []), ...(capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope ? ['different scope'] : [])]});
+      continue;
+    }
+    const reasons = [...v.incomplete, ...(source === 'replay' ? SOURCES.replay.yearIncomplete(capture.diagnostics, capture.records[0]) : [])];
     if (capture.account !== account) reasons.push('account identity differs or is unknown');
     if (capture.accessScope !== accessScope) reasons.push('access scope differs or is unknown');
     if (!cfgOf(capture).viewOk(capture)) reasons.push('view is not verified');
-    if (!['runtime-tool-result', 'hook-tool-response', 'download-summary-verified', 'download-summary-and-source-digest'].includes(capture.diagnostics?.attestations?.transfer?.level)) reasons.push('transfer provenance is not verified');
+    if (!verifiedTransfer(capture)) reasons.push('transfer provenance is not verified');
     const item = {capture, reasons};
     (reasons.length ? supporting : eligible).push(item);
   }
@@ -494,7 +504,7 @@ export function selectSnapshots(captures, {source, account, accessScope, year} =
     if (choice.action === 'replace' || choice.action === 'refresh') selected = item.capture;
     else supporting.push({capture: item.capture, reasons: [choice.reason]});
   }
-  return {selected, supporting};
+  return {selected, supporting, rejected};
 }
 
 // Hook-captured transfers (capture-hook.mjs). Shared with the hook so both sides agree on what is allowed.
@@ -553,6 +563,16 @@ export function removeIfUnchanged(identity) {
   return true;
 }
 
+// Dispatch by version without inferring authorization for unknown versions.
+export function parseCacheSettings(s) {
+  if (!s || typeof s !== 'object' || Array.isArray(s) || s.version !== 1) throw new Error('unsupported or invalid settings version');
+  const ok = Object.keys(s).sort().join() === 'persistence,version' && s.persistence && typeof s.persistence === 'object' && !Array.isArray(s.persistence)
+    && Object.keys(s.persistence).sort().join() === 'profileAndFeedback,steamCache'
+    && typeof s.persistence.profileAndFeedback === 'boolean' && typeof s.persistence.steamCache === 'boolean';
+  if (!ok) throw new Error('invalid version 1 settings record');
+  return s.persistence;
+}
+
 // Persistence consent: strict settings.json v1 (persistence.md "Durable scope record"). Fails closed.
 export function checkCacheAuthorized(dest, settingsPath) {
   let file = settingsPath;
@@ -565,11 +585,9 @@ export function checkCacheAuthorized(dest, settingsPath) {
   const real = p => { let q = path.resolve(p); const tail = []; while (!fs.existsSync(q)) { tail.unshift(path.basename(q)); q = path.dirname(q); } return path.join(fs.realpathSync(q), ...tail); };
   const home = real(path.dirname(file)), target = real(dest);
   if (target !== home && !target.startsWith(home + path.sep)) throw new Error(`Cache not authorized: ${file} does not govern ${dest} (the destination must be inside the settings record's directory)`);
-  const ok = s && typeof s === 'object' && s.version === 1 && Object.keys(s).sort().join() === 'persistence,version'
-    && s.persistence && typeof s.persistence === 'object' && Object.keys(s.persistence).sort().join() === 'profileAndFeedback,steamCache'
-    && typeof s.persistence.profileAndFeedback === 'boolean' && typeof s.persistence.steamCache === 'boolean';
-  if (!ok) throw new Error(`Cache not authorized: ${file} is not a valid version 1 settings record`);
-  if (!s.persistence.steamCache) throw new Error('Cache not authorized: settings.json has steamCache false');
+  let scopes;
+  try { scopes = parseCacheSettings(s); } catch { throw new Error(`Cache not authorized: ${file} is not a valid version 1 settings record`); }
+  if (!scopes.steamCache) throw new Error('Cache not authorized: settings.json has steamCache false');
   return file;
 }
 
@@ -611,17 +629,27 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
   if (fs.readFileSync(file, 'utf8') !== text) throw new Error(`read-back mismatch for ${file}`);
 }
 
-export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent, stem: stemOverride, ...policy} = {}) {
+export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, ...policy} = {}) {
+  checkCacheAuthorized(destDir, settings); // before inspecting the payload or any cache file, including dry runs
+  if (stemOverride !== undefined) throw new Error('stem override is not supported');
+  const consentDest = destDir;
+  const recheckConsent = () => { checkCacheAuthorized(consentDest, settings); extraCheck?.(); };
   const checked = validate(env, {account: env?.account, accessScope: env?.accessScope ?? 'unknown'});
   if (checked.errors.length) throw new Error(`Invalid capture: ${checked.errors.join('; ')}`);
   incomplete = [...new Set([...incomplete, ...checked.incomplete, ...(env?.source === 'replay' && env.records?.length === 1 ? SOURCES.replay.yearIncomplete(env.diagnostics, env.records[0]) : [])])];
-  const stem = stemOverride ?? cfgOf(env).file, main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
+  if (env.source === 'replay' && (env.diagnosticsScope !== 'original-multi-year-capture' || env.records.length !== 1)) throw new Error('Replay save requires one validated annual split capture');
+  const stem = env.source === 'replay' ? String(env.records[0].year) : cfgOf(env).file;
+  if (env.source === 'replay') {
+    destDir = path.join(destDir, 'replay');
+    if (fs.existsSync(destDir) && fs.lstatSync(destDir).isSymbolicLink()) throw new Error('Replay cache directory must not be a symlink');
+  }
+  const main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
   const decisionBytes = readIfExists(main);
   let existing = null;
   if (decisionBytes) { try { existing = JSON.parse(decisionBytes.toString('utf8')); } catch { existing = {malformed: true}; } }
   let decision = decide(existing, env, {...policy, incomplete});
   const text = JSON.stringify(env, null, 2) + '\n', ts = stamp(env.capturedAt);
-  const partial = path.join(destDir, `${stem}.managed-v1.partial.${ts}-${(env.diagnostics?.attestations?.sourceEnvelopeSha256 ?? sha256(JSON.stringify(env.records))).slice(0, 12)}.json`);
+  const partial = path.join(destDir, `${stem}.managed-v1.partial.${ts}-${sha256(JSON.stringify([env.source, env.capturedAt, env.account, env.accessScope, env.records])).slice(0, 12)}.json`);
   const result = {...decision, target: decision.action === 'separate' ? partial : main, backup: decision.action === 'replace' ? path.join(destDir, `${stem}.managed-v1.superseded.${stamp(existing.capturedAt)}-${sha256(decisionBytes).slice(0, 12)}.json`) : null, bytes: Buffer.byteLength(text), sha256: sha256(text)};
   if (decision.action === 'separate') Object.assign(result, chooseSeparate(destDir, stem, env, partial));
   if (dryRun) return result;
@@ -796,14 +824,14 @@ if (isMain()) {
     env = toSave;
     env.diagnostics = {...env.diagnostics, attestations};
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
-    const policy = {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
+    const policy = {dryRun, incomplete, transferVerified, settings: opt('--settings'), existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
       recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null) sourceConsent(hookRoot); }};
     if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {
         const year = annual.records[0].year;
-        try { const r = save(annual, path.join(dest, 'replay'), {...policy, incomplete: [...incomplete, ...replayYearIncomplete(annual, annual.records[0])], stem: String(year)}); outcomes.push({year, action: r.action, reason: r.reason, notes: r.notes, target: r.target, backup: r.backup, bytes: r.bytes, sha256: r.sha256}); }
+        try { const r = save(annual, dest, {...policy, incomplete: [...incomplete, ...replayYearIncomplete(annual, annual.records[0])]}); outcomes.push({year, action: r.action, reason: r.reason, notes: r.notes, target: r.target, backup: r.backup, bytes: r.bytes, sha256: r.sha256}); }
         catch (e) { outcomes.push({year, error: String(e.message ?? e)}); }
       }
       console.log(JSON.stringify({source: 'replay', capturedAt: env.capturedAt, records: env.records.length, years: outcomes, dryRun}, null, 2));

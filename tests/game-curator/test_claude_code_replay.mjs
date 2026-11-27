@@ -237,7 +237,7 @@ const env0 = await page();
 }
 // Splitting: one file per year, each verifiable on its own, labeled as carrying the original multi-year diagnostics, in year order.
 {
-  const stamped = j(env0); stamped.account = 'tester'; stamped.accessScope = 'signed-in'; stamped.diagnostics.attestations = {by: 'caller'};
+  const stamped = j(env0); stamped.account = 'tester'; stamped.accessScope = 'signed-in'; stamped.diagnostics.attestations = {by: 'caller', transfer: {level: 'runtime-tool-result'}};
   const parts = splitReplay(canonicalize(stamped));
   assert.deepEqual(parts.map(p => p.records[0].year), [2022, 2023, 2024, 2025]);
   for (const p of parts) {
@@ -265,7 +265,8 @@ const env0 = await page();
   unsettled.records[0].semanticText += '\nLOADING...';
   unsettled.diagnostics.attestations.split.recordSha256 = sha(JSON.stringify(unsettled.records[0]));
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-replay-unsettled-'));
-  try { assert.equal(save(unsettled, scratch, {dryRun: true, transferVerified: true}).action, 'separate'); }
+  const settings = path.join(scratch, 'settings.json'); fs.writeFileSync(settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: true}}));
+  try { assert.equal(save(unsettled, scratch, {settings, dryRun: true, transferVerified: true}).action, 'separate'); }
   finally { fs.rmSync(scratch, {recursive: true, force: true}); }
   const prior = j(next); prior.capturedAt = '2026-11-26T00:00:00.000Z'; assert.equal(decide(prior, next, ok).action, 'refresh');
   const named = j(prior); named.records[0].apps[1].name = 'Named'; named.diagnostics.attestations.split.recordSha256 = sha(JSON.stringify(named.records[0])); assert.match(decide(named, next, ok).reason, /lose fields/);
