@@ -237,7 +237,7 @@ const env0 = await page();
 }
 // Splitting: one file per year, each verifiable on its own, labeled as carrying the original multi-year diagnostics, in year order.
 {
-  const stamped = j(env0); stamped.account = 'tester'; stamped.accessScope = 'signed-in'; stamped.diagnostics.attestations = {by: 'caller', transfer: {level: 'runtime-tool-result'}};
+  const stamped = j(env0); stamped.account = 'tester'; stamped.accessScope = 'signed-in'; stamped.diagnostics.attestations = {by: 'caller', transfer: {level: 'runtime-tool-result', provenance: 'tool-result', receivedBytes: 1, localSha256Fingerprint: 'a'.repeat(64), sourceDigest: 'unavailable'}};
   const parts = splitReplay(canonicalize(stamped));
   assert.deepEqual(parts.map(p => p.records[0].year), [2022, 2023, 2024, 2025]);
   for (const p of parts) {

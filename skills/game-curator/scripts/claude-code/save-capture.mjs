@@ -439,7 +439,17 @@ export function verifyNameAttribution(env, library) {
 
 // Promotion evidence is independent of record semantics and can evolve with identity policy.
 const VERIFIED_TRANSFER_LEVELS = new Set(['runtime-tool-result', 'hook-tool-response', 'download-summary-verified', 'download-summary-and-source-digest']);
-const verifiedTransfer = env => VERIFIED_TRANSFER_LEVELS.has(env?.diagnostics?.attestations?.transfer?.level);
+const verifiedTransfer = env => {
+  const t = env?.diagnostics?.attestations?.transfer;
+  if (!t || !VERIFIED_TRANSFER_LEVELS.has(t.level)) return false;
+  const expected = t.level === 'runtime-tool-result' ? 'tool-result' : t.level === 'hook-tool-response' ? 'hook-capture' : 'download';
+  if (t.provenance !== expected || !Number.isSafeInteger(t.receivedBytes) || t.receivedBytes < 0 || !/^[a-f0-9]{64}$/.test(t.localSha256Fingerprint ?? '') || !['matched', 'unavailable'].includes(t.sourceDigest)) return false;
+  if (t.level === 'download-summary-and-source-digest' && t.sourceDigest !== 'matched') return false;
+  if (t.level === 'download-summary-verified' && t.sourceDigest !== 'unavailable') return false;
+  if (expected === 'download' && (!Array.isArray(t.pageSummaryChecks) || !['file name', 'byte count', 'capture time', 'source', 'record count', 'displayed count', 'completeness', 'stop reason', 'view'].every(k => t.pageSummaryChecks.includes(k)))) return false;
+  if (expected === 'hook-capture' && (!t.hook || !HOOK_TOOLS.includes(t.hook.tool) || !/^[a-f0-9]{64}$/.test(t.hook.sha256 ?? ''))) return false;
+  return true;
+};
 
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'refresh'|'separate', reason, notes}.
 export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
@@ -591,7 +601,13 @@ export function checkCacheAuthorized(dest, settingsPath) {
   return file;
 }
 
-const readIfExists = f => { try { return fs.readFileSync(f); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+const readIfExists = f => {
+  let fd;
+  try { fd = fs.openSync(f, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); }
+  catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  try { if (!fs.fstatSync(fd).isFile()) throw new Error('cache path is not a regular file'); return fs.readFileSync(fd); }
+  finally { fs.closeSync(fd); }
+};
 // Only versioned separate files produced by this policy count toward its bound. A full
 // set is never evicted to make room for a different observation: report the limit instead.
 function separateCandidates(dir, stem) {
@@ -618,7 +634,7 @@ function sameSeparate(a, b) {
 function chooseSeparate(dir, stem, env, proposed) {
   const files = separateCandidates(dir, stem);
   for (const file of files) {
-    try { const st = fs.lstatSync(file); if (st.isFile() && !st.isSymbolicLink() && sameSeparate(JSON.parse(fs.readFileSync(file, 'utf8')), env)) return {action: 'duplicate', target: file, reason: 'equivalent separate evidence already retained'}; } catch { /* preserve unreadable files and count them toward the limit */ }
+    try { const st = fs.lstatSync(file); if (st.isFile() && !st.isSymbolicLink() && sameSeparate(JSON.parse(readIfExists(file).toString('utf8')), env)) return {action: 'duplicate', target: file, reason: 'equivalent separate evidence already retained'}; } catch { /* preserve unreadable files and count them toward the limit */ }
   }
   if (files.length >= MAX_SEPARATE) return {action: 'full', target: proposed, reason: `separate capture limit ${MAX_SEPARATE} reached; preserve this capture elsewhere or review retained evidence`};
   return {action: 'separate', target: proposed};
@@ -626,7 +642,7 @@ function chooseSeparate(dir, stem, env, proposed) {
 
 function writeNew(file, text) { // exclusive creation, owner-only, read back
   fs.writeFileSync(file, text, {flag: 'wx', mode: 0o600});
-  if (fs.readFileSync(file, 'utf8') !== text) throw new Error(`read-back mismatch for ${file}`);
+  if (!readIfExists(file)?.equals(Buffer.from(text))) throw new Error(`read-back mismatch for ${file}`);
 }
 
 export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, ...policy} = {}) {
@@ -667,9 +683,9 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
       let backup = null;
       if (decision.action === 'replace') {
         backup = path.join(destDir, `${stem}.managed-v1.superseded.${stamp(existing.capturedAt)}-${sha256(decisionBytes).slice(0, 12)}.json`);
-        try { fs.copyFileSync(main, backup, fs.constants.COPYFILE_EXCL); }
+        try { fs.writeFileSync(backup, decisionBytes, {flag: 'wx', mode: 0o600}); }
         catch (e) { if (e.code !== 'EEXIST') throw e; } // a retry may find its own earlier backup; it must be identical
-        if (sha256(fs.readFileSync(backup)) !== sha256(decisionBytes)) throw new Error('backup does not match the existing file');
+        if (sha256(readIfExists(backup)) !== sha256(decisionBytes)) throw new Error('backup does not match the existing file');
       }
       tmp = path.join(destDir, `.${stem}.${process.pid}.tmp`);
       writeNew(tmp, text);
@@ -687,7 +703,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
     } else if (decision.action === 'create') {
       recheckConsent?.(); writeNew(main, text);
     } else { recheckConsent?.(); writeNew(partial, text); }
-    const back = JSON.parse(fs.readFileSync(result.target, 'utf8'));
+    const back = JSON.parse(readIfExists(result.target).toString('utf8'));
     if (JSON.stringify(back) !== JSON.stringify(env)) throw new Error('semantic read-back mismatch');
     if (result.action === 'replace') {
       // Only our versioned namespace is eligible. Existing historical files are never touched.
@@ -700,7 +716,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
         try {
           const st = fs.lstatSync(file);
           if (!st.isFile() || st.isSymbolicLink()) continue;
-          const bytes = fs.readFileSync(file), digest = sha256(bytes), snapshot = JSON.parse(bytes);
+          const bytes = readIfExists(file), digest = sha256(bytes), snapshot = JSON.parse(bytes);
           if (!name.endsWith(`-${digest.slice(0, 12)}.json`) || !validExisting(snapshot, env.source)) continue;
           if (snapshot.account !== existing.account || snapshot.accessScope !== existing.accessScope || snapshot.coverage !== existing.coverage || !cfgOf(snapshot).viewOk(snapshot) || JSON.stringify(snapshot.diagnostics.view) !== JSON.stringify(existing.diagnostics.view) || snapshot.diagnostics.attestations?.filters !== existing.diagnostics.attestations?.filters) continue;
           managed.push({file, digest, time: Date.parse(snapshot.capturedAt)});
@@ -710,7 +726,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
       for (const item of managed.slice(MAX_BACKUPS)) {
         recheckConsent?.();
         const st = fs.lstatSync(item.file);
-        if (st.isFile() && !st.isSymbolicLink() && sha256(fs.readFileSync(item.file)) === item.digest) fs.unlinkSync(item.file);
+        if (st.isFile() && !st.isSymbolicLink() && sha256(readIfExists(item.file)) === item.digest) fs.unlinkSync(item.file);
       }
     }
   } finally {

@@ -25,7 +25,7 @@ try {
   assert.throws(() => save({...env,source:'replay',records:[]}, dest, {dryRun:true}), /Invalid capture|annual split/);
   const noTransfer = save(env, dest, {dryRun:true, transferVerified:true});
   assert.equal(noTransfer.action, 'separate');
-  const verified = structuredClone(env); verified.diagnostics.attestations = {transfer:{level:'runtime-tool-result'}, sourceEnvelopeSha256:'../../escape'};
+  const verified = structuredClone(env); verified.diagnostics.attestations = {transfer:{level:'runtime-tool-result', provenance:'tool-result', receivedBytes:1, localSha256Fingerprint:'a'.repeat(64), sourceDigest:'unavailable'}, sourceEnvelopeSha256:'../../escape'};
   const proposal = save(verified, dest, {dryRun:true, transferVerified:true});
   assert.equal(proposal.action, 'create');
   const separatePath = save(verified, dest, {dryRun:true, transferVerified:true, keepSeparate:true});
@@ -44,5 +44,15 @@ try {
   const foreign = {...verified, account:'other'};
   const result = selectSnapshots([invalid, foreign, verified], {source:'wishlist',account:'test',accessScope:'signed-in'});
   assert.equal(result.selected, verified); assert.equal(result.supporting.length, 0); assert.equal(result.rejected.length, 2);
+  const contradictory = structuredClone(verified); contradictory.diagnostics.attestations.transfer.provenance = 'host-result';
+  assert.equal(save(contradictory, dest, {dryRun:true, transferVerified:true}).action, 'separate');
+  assert.equal(selectSnapshots([contradictory], {source:'wishlist',account:'test',accessScope:'signed-in'}).selected, null);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-outside-'));
+  try {
+    const external = path.join(outside, 'external.json'); fs.writeFileSync(external, 'outside');
+    fs.unlinkSync(proposal.target); fs.symlinkSync(external, proposal.target);
+    assert.throws(() => save(verified, dest, {dryRun:true, transferVerified:true}), /ELOOP|symbolic link/i);
+    assert.equal(fs.readFileSync(external, 'utf8'), 'outside');
+  } finally { fs.rmSync(outside, {recursive:true,force:true}); }
   console.log('shared cache boundary checks passed');
 } finally { fs.rmSync(root, {recursive:true,force:true}); }

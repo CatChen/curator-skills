@@ -14,7 +14,7 @@ import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/bui
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 // Policy tests assume verified transfer unless a case says otherwise (the default is fail-closed).
-const transfer = e => { e.diagnostics.attestations ??= {}; e.diagnostics.attestations.transfer ??= {level: 'runtime-tool-result'}; return e; };
+const transfer = e => { e.diagnostics.attestations ??= {}; e.diagnostics.attestations.transfer ??= {level: 'runtime-tool-result', provenance: 'tool-result', receivedBytes: 1, localSha256Fingerprint: 'a'.repeat(64), sourceDigest: 'unavailable'}; return e; };
 const decide = (o, n, c = {}) => decideRaw(o, transfer(structuredClone(n)), {transferVerified: true, ...c});
 const save = (e, d, c = {}) => saveRaw(transfer(e), d, {transferVerified: true, ...c});
 const row = (i, {labels = ['RELEASE DATE:', 'ENGLISH REVIEWS:', 'USER TAGS:', 'MY CATEGORIES:'], base = 1000} = {}) => ({appid: base + i, rank: i, name: `Game ${i}`,
