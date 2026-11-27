@@ -49,7 +49,7 @@ export function textCoverageLost(source, oldText, newText) {
   const clean = source === 'library' ? libraryText : source === 'wishlist' ? wishlistText : x => x;
   const lines = text => String(clean(text) ?? '').split('\n').map(x => x.trim()).filter(Boolean);
   const remaining = lines(newText);
-  const shape = line => line.replace(/\b(?:ENGLISH|OVERALL) REVIEWS:/gi, 'REVIEWS:').replace(/\d[\d,.]*/g, '#');
+  const shape = line => line.replace(/\d[\d,.]*/g, '#');
   for (const oldLine of lines(oldText)) {
     let i = remaining.indexOf(oldLine);
     if (i < 0) i = remaining.findIndex(line => shape(line) === shape(oldLine));

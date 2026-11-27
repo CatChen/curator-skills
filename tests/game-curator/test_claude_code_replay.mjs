@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {makeReplaySite, ACCOUNT, OTHER} from './fake-replay-site.mjs';
-import {validate, splitReplay, canonicalize, decide, checkPageSummary, replayYearIncomplete} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {validate, splitReplay, canonicalize, decide, save, checkPageSummary, replayYearIncomplete} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 
 const j = o => JSON.parse(JSON.stringify(o));
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
@@ -261,6 +261,12 @@ const env0 = await page();
   assert.match(decide({...legacy, records: [{...legacy.records[0], year: 2024}]}, next, ok).reason, /different year/);
   assert.match(decide({...legacy, records: []}, next, ok).reason, /not a valid replay envelope/);
   assert.equal(decide(null, next, {}).action, 'separate'); assert.equal(decide(null, parts[0], {transferVerified: true, incomplete: ['x']}).action, 'separate');
+  const unsettled = j(next); unsettled.diagnostics.unsettledYears = [unsettled.records[0].year];
+  unsettled.records[0].semanticText += '\nLOADING...';
+  unsettled.diagnostics.attestations.split.recordSha256 = sha(JSON.stringify(unsettled.records[0]));
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-replay-unsettled-'));
+  try { assert.equal(save(unsettled, scratch, {dryRun: true, transferVerified: true}).action, 'separate'); }
+  finally { fs.rmSync(scratch, {recursive: true, force: true}); }
   const prior = j(next); prior.capturedAt = '2026-11-26T00:00:00.000Z'; assert.equal(decide(prior, next, ok).action, 'refresh');
   const named = j(prior); named.records[0].apps[1].name = 'Named'; named.diagnostics.attestations.split.recordSha256 = sha(JSON.stringify(named.records[0])); assert.match(decide(named, next, ok).reason, /lose fields/);
 }

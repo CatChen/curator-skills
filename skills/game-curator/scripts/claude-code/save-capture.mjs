@@ -58,7 +58,7 @@ const isPlainObject = o => !!o && typeof o === 'object' && !Array.isArray(o);
 //   viewOk(e) / viewConflict(e)  evidence that the capture shows the full source (default view, no filter), and evidence that it does not
 //   viewAttestable whether a caller may attest filters (the library page has no filter panel to inspect)
 //   fieldLosses(existing, next)  per retained AppID, a field that existed and is now absent
-const FIELD_GROUPS = {releaseDate: /RELEASE DATE:/, reviews: /(ENGLISH|OVERALL) REVIEWS:/, userTags: /USER TAGS:/, myCategories: /MY CATEGORIES:/};
+const FIELD_GROUPS = {releaseDate: /RELEASE DATE:/, englishReviews: /ENGLISH REVIEWS:/, overallReviews: /OVERALL REVIEWS:/, userTags: /USER TAGS:/, myCategories: /MY CATEGORIES:/};
 const wishlistView = e => { const d = e?.diagnostics, v = d?.view; return v ? {...v, filters: d.attestations?.filters ?? v.filters} : null; };
 const SOURCES = {
   wishlist: {
@@ -440,6 +440,9 @@ export function verifyNameAttribution(env, library) {
 // Decide where the new capture goes. Returns {action:'create'|'replace'|'refresh'|'separate', reason, notes}.
 export function decide(existing, next, {existingAccount, existingViewUnfiltered = false, keepSeparate = false, backupCount = 0, incomplete = [], transferVerified = false} = {}) {
   const notes = [], cfg = cfgOf(next);
+  const candidate = validate(next, {account: next?.account, accessScope: next?.accessScope ?? 'unknown'});
+  if (candidate.errors.length) return {action: 'separate', reason: `invalid capture: ${candidate.errors.join('; ')}`, notes};
+  incomplete = [...new Set([...incomplete, ...candidate.incomplete, ...(next?.source === 'replay' && next.records?.length === 1 ? SOURCES.replay.yearIncomplete(next.diagnostics, next.records[0]) : [])])];
   if (keepSeparate) return {action: 'separate', reason: 'user asked to keep this capture separate', notes};
   if (incomplete.length) return {action: 'separate', reason: `incomplete capture: ${incomplete.join('; ')}`, notes};
   if (!transferVerified) return {action: 'separate', reason: 'transfer not verified: provenance was not established by the caller (--provenance tool-result, or --provenance download with a matching --page-summary)', notes};
@@ -611,7 +614,7 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
 export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent, stem: stemOverride, ...policy} = {}) {
   const checked = validate(env, {account: env?.account, accessScope: env?.accessScope ?? 'unknown'});
   if (checked.errors.length) throw new Error(`Invalid capture: ${checked.errors.join('; ')}`);
-  incomplete = [...new Set([...incomplete, ...checked.incomplete])];
+  incomplete = [...new Set([...incomplete, ...checked.incomplete, ...(env?.source === 'replay' && env.records?.length === 1 ? SOURCES.replay.yearIncomplete(env.diagnostics, env.records[0]) : [])])];
   const stem = stemOverride ?? cfgOf(env).file, main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
   const decisionBytes = readIfExists(main);
   let existing = null;

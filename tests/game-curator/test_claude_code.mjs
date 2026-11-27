@@ -103,7 +103,7 @@ assert.match(reason({malformed: true}, next), /not a valid wishlist/);
 assert.match(reason({...old, records: [{appid: 'x'}]}, next), /not a valid wishlist/);
 // Filters and sort: unknown, active or non-default views never promote.
 for (const view of [{...U, filters: 'unknown'}, {...U, filters: 'active'}, {...U, sort: 'Name'}, {...U, search: 'active'}, null])
-  assert.match(reason(old, make(3, {account: 'me', at: '2026-11-26T03:00:00Z', view})), /not verified as default sort/);
+  assert.match(reason(old, make(3, {account: 'me', at: '2026-11-26T03:00:00Z', view})), /not verified as default sort|diagnostics.view is invalid/);
 const legacy = {...old, diagnostics: {expectedCount: 4}}; // an older capture with no view evidence
 assert.match(reason(legacy, next), /no view evidence/);
 assert.equal(decide(legacy, next, {existingViewUnfiltered: true}).action, 'separate');
@@ -131,7 +131,7 @@ assert.match(reason({...old, method: ''}, next), /not a valid wishlist/);
   const c = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [row(1), row(2, {labels: ['RELEASE DATE:'], base: 5000})]}); // dropped AppID, new AppID: not a loss
   assert.equal(decide(a, c).action, 'replace');
   const reviews = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [{...row(1), pageText: 'Game 1\nRELEASE DATE:\nx\nOVERALL REVIEWS:\nx\nUSER TAGS:\nx\nMY CATEGORIES:\nx\n$9.99'}, row(2, {labels: ['RELEASE DATE:']})]});
-  assert.equal(decide(a, reviews).action, 'replace'); // English vs overall reviews wording is not a loss
+  assert.equal(decide(a, reviews).action, 'separate'); // distinct review populations must remain distinct
 }
 assert.equal(decide(old, next, {backupCount: MAX_BACKUPS}).action, 'replace');
 
@@ -556,7 +556,8 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   const named = {...namedResult.env, diagnostics: {...namedResult.env.diagnostics, attestations: {enrichment: namedResult.enrichment}}};
   assert.deepEqual(fieldLosses(named, rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'})), {name: 1}); // un-enriched replacement would lose a name
   assert.match(reason(named, rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'})), /lose fields/);
-  assert.equal(decide(named, enrich(rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), libAccount('me')).env).action, 'refresh');
+  const namedNext = enrich(rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), libAccount('me'));
+  assert.equal(decide(named, {...namedNext.env, diagnostics: {...namedNext.env.diagnostics, attestations: {enrichment: namedNext.enrichment}}}).action, 'refresh');
   const rootR = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-rev-')), destR = path.join(rootR, 'game-curator', 'cache', 'steam'); fs.mkdirSync(destR, {recursive: true});
   fs.writeFileSync(path.join(rootR, 'game-curator', 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
   const r1 = save(rold, destR); assert.equal(r1.target, path.join(destR, 'reviews.json'));

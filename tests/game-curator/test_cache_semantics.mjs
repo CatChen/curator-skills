@@ -28,3 +28,4 @@ assert.equal(textCoverageLost('replay', 'Games played: 4\nAnnual achievements: 1
 assert.equal(textCoverageLost('wishlist', 'A lengthy description and price $20', 'A lengthy description and price'), true);
 assert.equal(textCoverageLost('reviews', 'This was a very memorable game with a wonderful ending', 'This was a very memorable game with a wonderful'), true);
 assert.equal(textCoverageLost('reviews', 'This was a very memorable game with a wonderful ending', 'This was a very memorable game...'), true);
+assert.equal(textCoverageLost('wishlist', 'OVERALL REVIEWS: 100', 'ENGLISH REVIEWS: 100'), true);
