@@ -59,6 +59,13 @@ try {
   assert.equal(selection.selected.capturedAt, current.capturedAt);
   assert.equal(selection.supporting.length, 1);
   assert.match(selection.supporting[0].reasons.join(' '), /identity|view/);
+  const poorer = structuredClone(current);
+  poorer.capturedAt = '2026-01-09T00:00:00Z';
+  poorer.records[0].pageText = 'Synthetic game';
+  poorer.diagnostics.recordsSha256 = crypto.createHash('sha256').update(JSON.stringify(poorer.records)).digest('hex');
+  const withPoorer = selectSnapshots([poorer, current], {source: 'wishlist', account: 'synthetic', accessScope: 'signed-in'});
+  assert.equal(withPoorer.selected.capturedAt, current.capturedAt);
+  assert.match(withPoorer.supporting[0].reasons.join(' '), /lose fields/);
   const codex = {...capture('2026-01-08T00:00:00Z', records), method: 'browser-dom', diagnostics: {expectedCount: 1, uniqueCount: 1, ranksObserved: 1, placeholderNameRows: 0}};
   const codexFile = path.join(root, 'codex.json');
   fs.writeFileSync(codexFile, JSON.stringify(codex), {mode: 0o600});
