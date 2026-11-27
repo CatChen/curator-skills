@@ -13,7 +13,7 @@
 //   callBudgetMs (35000, per call)  maxMs (150000)  maxSteps (200)  fresh (discard saved state)
 //   quietMs (800: no change for this long once the displayed count is reached confirms completion)  stallMs (1500: no new rows for
 //   this long before the count is reached triggers a bounded scroll)
-//   deliver: 'return' (default) or 'download' (see references/claude-in-chrome.md): the page starts a
+//   deliver: 'return' (default) or 'download' (see references/claude-code.md (Chrome section)): the page starts a
 //   local file download and returns a small summary of INITIATION only; retainMs (default 10 min) bounds how long the
 //   finished envelope is kept for an authorized retry via window.__gcRedeliver() / window.__gcRelease().
 //   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging

@@ -14,7 +14,7 @@
 //   deliver: 'return' (default) returns the envelope as the tool result. 'download' makes the page start a local
 //   file download (a Blob, no network) and returns only a small summary that reports INITIATION, not receipt: the
 //   browser may block, hold or relocate the file, so confirm it on disk. Use it only where the host permits downloads
-//   and the user has authorized it (see references/claude-in-chrome.md). The finished envelope is then kept in
+//   and the user has authorized it (see references/claude-code.md (Chrome section)). The finished envelope is then kept in
 //   collector-owned page state for retainMs (default 10 minutes) so an authorized retry needs no rescrape:
 //   window.__gcRedeliver() starts the download again, window.__gcRelease() discards it.
 //   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging
