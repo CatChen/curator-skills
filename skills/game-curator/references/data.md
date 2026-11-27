@@ -42,20 +42,11 @@ if (JSON.stringify(probeBack) !== JSON.stringify(probe)) throw new Error('Probe 
 await fs.unlink(probePath);
 ```
 
-After separate raw-cache consent and a successful probe, this example writes the complete `result` from the collector above to a **new**, trusted path that the host has explicitly permitted; it does not overwrite an existing cache:
-
-```js
-const bytes = JSON.stringify(result, null, 2);
-await fs.writeFile(authorizedNewFile, bytes, { flag: 'wx', mode: 0o600 });
-const saved = JSON.parse(await fs.readFile(authorizedNewFile, 'utf8'));
-if (JSON.stringify(saved) !== JSON.stringify(result)) throw new Error('Cache mismatch');
-```
-
-Use a direct destination only when permitted. Otherwise, if supported, write a private temporary staging file and transfer it using the host's supported mechanism and normal destination approval. Staging does not grant destination access. Compare existing caches first, use a safe host-supported commit, reread the final file and compare with the original object; clean up temporary files on success or abandonment. Never send complete datasets or encoded copies through model context, or use page evaluation for filesystem access. Node is an example, not a requirement for other hosts. Follow [safe replacement and verification](persistence.md#freshness-refresh-and-safe-replacement) and [recovery](acquisition.md#recovery).
+After separate raw-cache consent, use the shared saver instead of writing directly to the current cache. When the host supports local Node and the filesystem, write the exact in-memory `result` to an exclusive private staging file under a host-permitted directory, then run `scripts/claude-code/save-capture.mjs` with that path, `--provenance host-result`, `--access-scope unknown`, and the authorized `--dest`/`--settings` when needed. Inspect `--dry-run` first and verify every target is within the intended cache, then run the same argument array without `--dry-run`. Current Codex collector diagnostics do not establish owner, view or completeness, so the saver keeps this result separately rather than promoting it. Do not fabricate missing fields, and remove staging only after successful verified persistence or abandonment. The shared policy can also be imported from `scripts/cache.mjs` in either Node host. Never pass whole captures through model context. See [persistence](persistence.md#freshness-refresh-and-safe-replacement).
 
 ## Using collected or supplied data
 
-Each collector returns `format: game-curator-steam-export`, `version: 1`, a `source`, `capturedAt`, `method`, `coverage`, `warnings`, `diagnostics`, and `records`. Keep captures and their timestamps separate; check source, account, AppIDs, missing fields and warnings before drawing conclusions. Compare counts and representative fields with the page, and treat a count match as evidence rather than proof of completeness. Collectors deduplicate records within a capture; there is no automated multi-capture merge, archive validator, or historical-format importer. Authorized caching, selective refresh and safe replacement follow [persistence](persistence.md).
+Each collector returns `format: game-curator-steam-export`, `version: 1`, a `source`, `capturedAt`, `method`, `coverage`, `warnings`, `diagnostics`, and `records`. Keep captures and their timestamps separate; check source, account, AppIDs, missing fields and warnings before drawing conclusions. Compare counts and representative fields with the page, and treat a count match as evidence rather than proof of completeness. Collectors deduplicate records within a capture; there is no automated multi-capture merge or historical-format importer. Authorized caching, selective refresh and safe replacement follow [persistence](persistence.md).
 
 For library rows the collector parses labeled English playtime, last-played display and achievement counts while preserving `pageText`. Missing values stay null, minutes are converted to hours, and dates without a year remain unchanged. Non-English page labels may not parse. Do not use file size as playtime. Historical library v2 exports had unreliable `hours`; do not treat those values as validated. Without reliable labeled evidence, report playtime as unknown. The skill can still use user-provided observations and review text without claiming an automated import or validation.
 

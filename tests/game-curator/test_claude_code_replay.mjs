@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {makeReplaySite, ACCOUNT, OTHER} from './fake-replay-site.mjs';
-import {validate, splitReplay, canonicalize, decide, checkPageSummary, replayYearIncomplete} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {validate, splitReplay, canonicalize, decide, save, checkPageSummary, replayYearIncomplete} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
 
 const j = o => JSON.parse(JSON.stringify(o));
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
@@ -237,7 +237,7 @@ const env0 = await page();
 }
 // Splitting: one file per year, each verifiable on its own, labeled as carrying the original multi-year diagnostics, in year order.
 {
-  const stamped = j(env0); stamped.account = 'tester'; stamped.accessScope = 'signed-in'; stamped.diagnostics.attestations = {by: 'caller'};
+  const stamped = j(env0); stamped.account = 'tester'; stamped.accessScope = 'signed-in'; stamped.diagnostics.attestations = {by: 'caller', transfer: {level: 'runtime-tool-result', provenance: 'tool-result', receivedBytes: 1, localSha256Fingerprint: 'a'.repeat(64), sourceDigest: 'unavailable'}};
   const parts = splitReplay(canonicalize(stamped));
   assert.deepEqual(parts.map(p => p.records[0].year), [2022, 2023, 2024, 2025]);
   for (const p of parts) {
@@ -261,8 +261,15 @@ const env0 = await page();
   assert.match(decide({...legacy, records: [{...legacy.records[0], year: 2024}]}, next, ok).reason, /different year/);
   assert.match(decide({...legacy, records: []}, next, ok).reason, /not a valid replay envelope/);
   assert.equal(decide(null, next, {}).action, 'separate'); assert.equal(decide(null, parts[0], {transferVerified: true, incomplete: ['x']}).action, 'separate');
-  const prior = j(next); prior.capturedAt = '2026-11-26T00:00:00.000Z'; assert.equal(decide(prior, next, ok).action, 'replace');
-  const named = j(prior); named.records[0].apps[1].name = 'Named'; assert.match(decide(named, next, ok).reason, /lose fields/);
+  const unsettled = j(next); unsettled.diagnostics.unsettledYears = [unsettled.records[0].year];
+  unsettled.records[0].semanticText += '\nLOADING...';
+  unsettled.diagnostics.attestations.split.recordSha256 = sha(JSON.stringify(unsettled.records[0]));
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-replay-unsettled-'));
+  const settings = path.join(scratch, 'settings.json'); fs.writeFileSync(settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: true}}));
+  try { assert.equal(save(unsettled, scratch, {settings, dryRun: true, transferVerified: true}).action, 'separate'); }
+  finally { fs.rmSync(scratch, {recursive: true, force: true}); }
+  const prior = j(next); prior.capturedAt = '2026-11-26T00:00:00.000Z'; assert.equal(decide(prior, next, ok).action, 'refresh');
+  const named = j(prior); named.records[0].apps[1].name = 'Named'; named.diagnostics.attestations.split.recordSha256 = sha(JSON.stringify(named.records[0])); assert.match(decide(named, next, ok).reason, /lose fields/);
 }
 
 // ---- end to end through the CLI: download with a page summary, per-year files, replacement, legacy preserved ----
@@ -286,7 +293,7 @@ const env0 = await page();
   // dry run: nothing written, a decision per year
   r = run(file, summary, '--dry-run'); assert.equal(r.status, 0, r.stderr);
   let out = JSON.parse(r.stdout); assert.deepEqual(out.years.map(y => [y.year, y.action]), [[2022, 'create'], [2023, 'create'], [2024, 'create'], [2025, 'separate']]);
-  assert.match(out.years[3].reason, /account identity differs or is unknown/); assert.match(path.basename(out.years[3].target), /^2025\.partial\.\d{8}T\d{6}Z\.json$/);
+  assert.match(out.years[3].reason, /account identity differs or is unknown/); assert.match(path.basename(out.years[3].target), /^2025\.managed-v1\.partial\.\d{8}T\d{6}Z-[a-f0-9]{12}\.json$/);
   assert.deepEqual(fs.readdirSync(path.join(cache, 'replay')), ['2025.json']);
   // real save
   r = run(file, summary); assert.equal(r.status, 0, r.stderr); out = JSON.parse(r.stdout);
@@ -299,8 +306,8 @@ const env0 = await page();
   // a newer capture of the same account replaces the Claude-written files (previous kept as superseded) and still leaves legacy alone
   await new Promise(res => setTimeout(res, 1100));
   ({summary, file} = await capture()); r = run(file, summary); assert.equal(r.status, 0, r.stderr); out = JSON.parse(r.stdout);
-  assert.deepEqual(out.years.map(y => [y.year, y.action]), [[2022, 'replace'], [2023, 'replace'], [2024, 'replace'], [2025, 'separate']]);
-  assert.equal(fs.readdirSync(path.join(cache, 'replay')).filter(f => /^2022\.superseded\./.test(f)).length, 1);
+  assert.deepEqual(out.years.map(y => [y.year, y.action]), [[2022, 'refresh'], [2023, 'refresh'], [2024, 'refresh'], [2025, 'duplicate']]);
+  assert.equal(fs.readdirSync(path.join(cache, 'replay')).filter(f => /^2022\.managed-v1\.superseded\./.test(f)).length, 0);
   assert.equal(fs.readFileSync(path.join(cache, 'replay', '2025.json'), 'utf8'), legacyText);
   // consent revoked: nothing is written
   fs.writeFileSync(path.join(home, 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":false}}');
