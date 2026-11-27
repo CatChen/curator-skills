@@ -31,22 +31,25 @@ export const MAX_STAGED_BYTES = 16 * 1024 * 1024;
 export const STAGED_MAX_AGE_MS = 24 * 3600 * 1000;
 const PAGES = {wishlist: 'steam-wishlist-page.js', library: 'steam-library-page.js', reviews: 'steam-reviews-page.js', replay: 'steam-replay-page.js'};
 const RESUME = {__gcWishlistRun: 'wishlist', __gcLibraryRun: 'library', __gcReviewsRun: 'reviews', __gcReplayRun: 'replay'};
-const OPTION_KEYS = new Set(['callBudgetMs', 'maxMs', 'maxSteps', 'fresh', 'cancel', 'deliver', 'retainMs', 'maxYears', 'maxPages', 'quietMs', 'stallMs', 'settleMs', 'settleCapMs']);
+const OPTION_KEYS = new Set(['callBudgetMs', 'maxMs', 'maxSteps', 'fresh', 'cancel', 'deliver', 'retainMs', 'maxYears', 'maxPages', 'quietMs', 'stallMs', 'settleMs', 'settleCapMs', 'identity']);
 const sha256 = b => crypto.createHash('sha256').update(b).digest('hex');
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Parse the restricted options literal `({key: value, ...})` WITHOUT evaluating anything: known keys only, values are a short lowercase
 // string, an integer, true or false, and a repeated key makes the whole literal invalid (so an ambiguous `deliver` never opts in).
+// The one nested shape is `identity: {salt: '<22 base64url characters>'}`; any other object, key, salt shape or repetition is invalid.
 export function parseOptions(literal) {
-  const m = typeof literal === 'string' && literal.match(/^\(\{([^{}()]*)\}\)$/);
+  const m = typeof literal === 'string' && literal.match(/^\(\{([^()]*)\}\)$/);
   if (!m) return null;
   const out = {};
   let rest = m[1];
-  const item = /^\s*([A-Za-z]+)\s*:\s*('[a-z]*'|"[a-z]*"|\d+|true|false)\s*(?:,|$)/;
+  const item = /^\s*([A-Za-z]+)\s*:\s*('[a-z]*'|"[a-z]*"|\d+|true|false|\{\s*salt\s*:\s*(?:'([A-Za-z0-9_-]{22})'|"([A-Za-z0-9_-]{22})")\s*\})\s*(?:,|$)/;
   while (rest.trim() !== '') {
     const t = item.exec(rest);
     if (!t || !OPTION_KEYS.has(t[1]) || Object.hasOwn(out, t[1])) return null;
     const v = t[2];
+    if (v.startsWith('{')) { if (t[1] !== 'identity') return null; out.identity = {salt: t[3] ?? t[4]}; rest = rest.slice(t[0].length); continue; }
+    if (t[1] === 'identity') return null;
     out[t[1]] = v === 'true' ? true : v === 'false' ? false : /^\d/.test(v) ? Number(v) : v.slice(1, -1);
     rest = rest.slice(t[0].length);
   }

@@ -33,8 +33,9 @@ export function makeReplaySite({account = ACCOUNT, years = [2025, 2022, 2023, 20
     const loc = {protocol: 'https:', hostname: 'store.steampowered.com', origin: 'https://store.steampowered.com', pathname: url.pathname, search: url.search, href: url.href};
     // A navigation creates a brand new global scope: page JavaScript state is gone, sessionStorage is kept.
     ctx = vm.createContext({document, MutationObserver, sessionStorage, setTimeout, clearTimeout, Date, JSON, Map, Set, Array, Object, Math, Number, Error, Promise, RegExp, URLSearchParams,
-      TextEncoder, Uint8Array, Blob, URL: PageURL, crypto: globalThis.crypto, console, innerWidth: width, location: loc, getComputedStyle: () => ({})});
+      TextEncoder, btoa, atob, Uint8Array, Blob, URL: PageURL, crypto: globalThis.crypto, console, innerWidth: width, location: loc, getComputedStyle: () => ({})});
     ctx.window = ctx;
+    Object.defineProperty(ctx, 'UserConfig', {get: () => site.userConfig, configurable: true}); // synthetic Steam identity data; tests set it (or a getter) to model sign-in, switches and expiry
   }
   // navigate(url): follows an optional one-shot redirect map keyed by the requested path.
   site.navigate = url => {

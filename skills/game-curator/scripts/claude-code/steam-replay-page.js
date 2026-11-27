@@ -102,13 +102,27 @@ await (window.__gcReplayRun = async (opts = {}) => {
   }
   function readSessionSources(win = window, doc = document) {
     const out = [];
-    const take = (name, o) => { if (o && typeof o === 'object') out.push({name, loggedIn: o.logged_in === true ? true : o.logged_in === false ? false : null, steamid: o.steamid, accountid: o.accountid}); };
-    try { take('user-config', win.UserConfig); } catch { /* unreadable: treated as absent */ }
-    try {
-      const attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo');
-      if (attr) take('userinfo-attr', JSON.parse(attr)); // the parsed object is discarded after the three fields are copied
-    } catch { /* malformed: treated as absent */ }
-    try { if (win.g_steamID !== undefined) out.push({name: 'g-steamid', loggedIn: null, steamid: win.g_steamID, accountid: undefined}); } catch { /* absent */ }
+    const take = (name, raw, requireAccountId) => {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { out.push({name, state: 'malformed'}); return; }
+      const lg = raw.logged_in;
+      out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid: raw.steamid, accountid: raw.accountid, requireAccountId});
+    };
+    let uc, ucState = 'ok';
+    try { uc = win.UserConfig; } catch { ucState = 'unreadable'; }
+    if (ucState === 'unreadable') out.push({name: 'user-config', state: 'unreadable'});
+    else if (uc !== undefined) take('user-config', uc, true);
+    let attr = null, attrState = 'ok';
+    try { attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo') ?? null; } catch { attrState = 'unreadable'; }
+    if (attrState === 'unreadable') out.push({name: 'userinfo-attr', state: 'unreadable'});
+    else if (attr !== null) {
+      let parsed, ok = true;
+      try { parsed = JSON.parse(attr); } catch { ok = false; } // the parsed object is discarded after the three fields are copied
+      if (ok) take('userinfo-attr', parsed, true); else out.push({name: 'userinfo-attr', state: 'malformed'});
+    }
+    let g, gState = 'ok';
+    try { g = win.g_steamID; } catch { gState = 'unreadable'; }
+    if (gState === 'unreadable') out.push({name: 'g-steamid', state: 'unreadable'});
+    else if (g !== undefined) out.push({name: 'g-steamid', state: 'ok', loggedIn: null, steamid: g, accountid: undefined, requireAccountId: false}); // the legacy global genuinely has no accountid
     return out;
   }
   async function observeIdentity(o = {}, env = {}) {
@@ -116,35 +130,47 @@ await (window.__gcReplayRun = async (opts = {}) => {
     let saltBytes = o.salt !== undefined ? b64uDecode(o.salt) : null, generated = false;
     if (o.salt === undefined && o.candidate === true) { saltBytes = crypto.getRandomValues(new Uint8Array(16)); generated = true; }
     if (!saltBytes || saltBytes.length !== 16) throw new Error('identity needs a 16-byte base64url salt (or candidate: true)');
+    const saltCheck = (await sha256HexOf(saltBytes)).slice(0, 8);
+    const finish = r => { if (generated) r.salt = b64uEncode(saltBytes); return r; };
+    if (!['https://store.steampowered.com', 'https://steamcommunity.com'].includes(loc?.origin)) {
+      return finish({version: 1, sources: [], loggedIn: null, consistent: false, problems: ['unsupported-origin'], saltCheck, sessionFingerprint: null, pathFingerprint: null});
+    }
     const sources = readSessionSources(win, doc);
-    const ids = new Set();
-    let loggedIn = null, consistent = true;
+    const problems = new Set(), ids = new Set(), states = new Set();
     for (const s of sources) {
-      if (s.loggedIn === false) loggedIn = false;
-      else if (s.loggedIn === true && loggedIn !== false) loggedIn = true;
+      if (s.state === 'unreadable') { problems.add('unreadable-marker'); continue; }
+      if (s.state === 'malformed') { problems.add('malformed-marker'); continue; }
+      if (s.loggedIn === 'invalid') { problems.add('malformed-marker'); continue; }
       const provided = s.steamid !== undefined && s.steamid !== null && s.steamid !== false && s.steamid !== '' && s.steamid !== 0 && s.steamid !== '0';
+      if (s.loggedIn === true && !provided) problems.add('login-state-conflict');
+      if (s.loggedIn === false && provided) problems.add('login-state-conflict');
+      if (s.loggedIn !== null) states.add(s.loggedIn);
       if (!provided) continue;
       const id = canonicalSteamId64(s.steamid);
-      if (!id || (s.accountid !== undefined && !accountIdMatches(id, s.accountid))) { consistent = false; continue; }
+      if (!id) { problems.add('invalid-id'); continue; }
+      if (s.accountid === undefined) { if (s.requireAccountId) { problems.add('missing-account-id'); continue; } }
+      else if (!accountIdMatches(id, s.accountid)) { problems.add('invalid-account-id'); continue; }
       ids.add(id);
-      if (s.name === 'g-steamid' && loggedIn === null) loggedIn = true;
+      if (s.name === 'g-steamid') states.add(true); // a valid ID in the legacy global means signed in
     }
-    if (ids.size > 1) consistent = false;
+    if (ids.size > 1) problems.add('id-conflict');
+    if (states.size > 1) problems.add('login-state-conflict');
+    const loggedIn = states.size === 1 ? [...states][0] : null;
+    const consistent = problems.size === 0;
     const fp = async id => sha256HexOf(fingerprintBytes(saltBytes, id));
     const sessionId = ids.size === 1 ? [...ids][0] : null;
     const pathMatch = /\/(?:replay|profiles)\/([0-9]{17})(?=\/|$)/.exec(String(loc?.pathname ?? ''));
     const pathId = pathMatch ? canonicalSteamId64(pathMatch[1]) : null;
-    const result = {
+    return finish({
       version: 1,
       sources: sources.map(s => s.name),
       loggedIn,
       consistent,
-      saltCheck: (await sha256HexOf(saltBytes)).slice(0, 8),
-      sessionFingerprint: loggedIn !== false && consistent && sessionId ? await fp(sessionId) : null,
+      problems: [...problems].sort(),
+      saltCheck,
+      sessionFingerprint: consistent && loggedIn === true && sessionId ? await fp(sessionId) : null,
       pathFingerprint: pathId ? await fp(pathId) : null,
-    };
-    if (generated) result.salt = b64uEncode(saltBytes);
-    return result;
+    });
   }
   async function sha256Hex(bytes) {
     return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -162,17 +188,41 @@ await (window.__gcReplayRun = async (opts = {}) => {
     });
     return {callStart, left, sleep, outOfCall, nextMutation};
   }
+  async function identityStep(state, identityOpt, ownerNow) {
+    if (!identityOpt) return state ?? null;
+    const st = state ?? {checks: 0, stable: true, broke: false, first: null, last: null};
+    let obs = null;
+    try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
+    if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
+    const good = !!obs && obs.problems.length === 0 && obs.loggedIn === true && obs.sessionFingerprint !== null;
+    st.checks += 1;
+    if (st.checks === 1) st.first = good ? obs.sessionFingerprint : null;
+    const lost = !good || obs.sessionFingerprint !== st.first;
+    if (lost) st.stable = false;
+    if (lost && st.checks > 1 && st.first !== null) st.broke = true; // a signed-in account was established and then changed or lost: stop the run
+    // (an account that was never established is not a change: the run proceeds and the saver reports identity as unobserved)
+    st.last = obs ?? {version: 1, sources: [], loggedIn: null, consistent: false, problems: [], saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed', owner: null};
+    return st;
+  }
+  function identityOf(st) {
+    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable}} : undefined;
+  }
+  function identityObsValid(o) {
+    const hex = v => v === null || (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
+    return !!o && typeof o === 'object' && !Array.isArray(o) && o.version === 1 && Array.isArray(o.sources) && o.sources.length <= 3 && o.sources.every(x => typeof x === 'string' && x.length <= 20)
+      && Array.isArray(o.problems) && o.problems.length <= 10 && o.problems.every(x => typeof x === 'string' && x.length <= 30) && hex(o.sessionFingerprint) && hex(o.pathFingerprint)
+      && (o.loggedIn === null || typeof o.loggedIn === 'boolean') && typeof o.consistent === 'boolean' && (o.saltCheck === null || (typeof o.saltCheck === 'string' && /^[0-9a-f]{8}$/.test(o.saltCheck)))
+      && (o.owner === undefined || o.owner === null || typeof o.owner === 'boolean') && (o.error === undefined || o.error === 'observation-failed');
+  }
+  function identityStateValid(st) {
+    if (st === null) return true;
+    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'first', 'last'].includes(k))
+      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean'
+      && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
+  }
   async function deliverEnvelope(envelope, o) {
-    // Optional identity observation ({salt} of the approved binding, stated on the finishing call like deliver): fingerprints only, never an identifier.
-    // A failed observation is recorded as unobserved rather than losing the capture; the saver, not this script, decides what it means.
-    if (o.identity) {
-      let observed;
-      try {
-        if (o.identity.candidate !== undefined) throw new Error('candidate salts belong to the standalone probe');
-        observed = await observeIdentity({salt: o.identity.salt});
-      } catch { observed = {version: 1, sources: [], loggedIn: null, consistent: false, saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed'}; }
-      envelope.diagnostics = {...envelope.diagnostics, identity: observed};
-    }
+    // Identity continuity state (see identityStep): the last observation plus whether the signed-in account was the same at every check of the run.
+    if (o.identityState) envelope.diagnostics = {...envelope.diagnostics, identity: identityOf(o.identityState)};
     if (o.deliver !== 'download') return envelope;
     const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
     const file = `${o.filePrefix}-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
@@ -233,14 +283,15 @@ await (window.__gcReplayRun = async (opts = {}) => {
     const has = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
     // Returns null if the state is acceptable, otherwise the reason it is not.
     const invalid = S => {
-      if (!has(S, ['v', 'accountPath', 'startedAt', 'born', 'touched', 'activeMs', 'records', 'visited', 'pending', 'requested', 'repeats', 'attempts', 'calls', 'owner', 'warnings', 'opts', 'view', 'unsettled', 'truncated'])) return 'unexpected shape';
+      if (!has(S, ['v', 'accountPath', 'startedAt', 'born', 'touched', 'activeMs', 'records', 'visited', 'pending', 'requested', 'repeats', 'attempts', 'calls', 'owner', 'warnings', 'opts', 'view', 'unsettled', 'truncated', 'identity', 'identityYears'])) return 'unexpected shape';
       if (S.v !== 1) return 'unsupported version';
       if (typeof S.accountPath !== 'string' || !/^\/replay\/[A-Za-z0-9_-]{1,64}$/.test(S.accountPath)) return 'bad account path';
       if (typeof S.startedAt !== 'string' || !Number.isFinite(Date.parse(S.startedAt)) || S.startedAt.length > 40) return 'bad start time';
       if (![S.born, S.touched].every(t => isInt(t, 1e14)) || !isInt(S.activeMs, 1e9)) return 'bad timestamps';
       if (![S.repeats, S.attempts, S.calls].every(n => isInt(n, 10000)) || typeof S.owner !== 'boolean') return 'bad counters or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxYears', 'retainMs']) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
+      if (!has(S.opts, ['maxYears', 'retainMs', 'identity']) || !(S.opts.identity === undefined || (has(S.opts.identity, ['salt']) && typeof S.opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(S.opts.identity.salt))) || !identityStateValid(S.identity ?? null)
+        || !(S.identityYears === undefined || (Array.isArray(S.identityYears) && S.identityYears.length <= HARD.years && S.identityYears.every(e => e && typeof e === 'object' && isYear(e.year) && identityObsValid(Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'year')))))) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
         || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'annual-report' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.years || !list.every(isYear) || new Set(list).size !== list.length) return 'bad year list';
@@ -256,7 +307,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       return null;
     };
     const fresh = why => { const S = {v: 1, accountPath: snap.accountPath, startedAt, born: Date.now(), touched: Date.now(), activeMs: 0, records: [], visited: [], pending: [], requested: null, repeats: 0, attempts: 0,
-      calls: 0, owner: snap.ownerControls, warnings: [], unsettled: [], truncated: [], opts: {}, view: {kind: 'annual-report', language: snap.language}}; if (why) S.warnings.push(why); return S; };
+      calls: 0, owner: snap.ownerControls, warnings: [], unsettled: [], truncated: [], identity: null, identityYears: [], opts: {}, view: {kind: 'annual-report', language: snap.language}}; if (why) S.warnings.push(why); return S; };
 
     let S = null, viewAtStop = null, stopReason = null;
     const stored = raw();
@@ -270,7 +321,12 @@ await (window.__gcReplayRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxYears', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    for (const k of ['maxYears', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    S.identityYears ??= [];
+    const idOpt = S.opts.identity, ownerNow = () => !!snap.ownerControls;
+    // Who is signed in on THIS report page, before it is merged: each year gets its own observation, and a change since the first report stops the run.
+    if (idOpt) { S.identity = await identityStep(S.identity ?? null, idOpt, ownerNow); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxYears = Math.min(S.opts.maxYears ?? 20, HARD.years);
     const target = year => `${location.origin}${S.accountPath}/${year}`;
 
@@ -295,6 +351,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
         if (cut) { S.truncated.push(snap.year); S.warnings.push(`The ${snap.year} report has ${refs.length} game references; only the first ${HARD.apps} were kept, so it is incomplete.`); }
         S.records.push({year: snap.year, semanticText: snap.text, apps: refs.slice(0, HARD.apps)});
         S.visited.push(snap.year); S.attempts++; S.owner = S.owner && snap.ownerControls;
+        if (idOpt) S.identityYears.push({year: snap.year, ...S.identity.last}); // bound to this report's own page
         for (const y of replayYears(snap.links, snap.accountPath)) if (!S.visited.includes(y) && !S.pending.includes(y)) S.pending.push(y);
         S.pending = S.pending.filter(y => !S.visited.includes(y)).slice(0, HARD.years);
       }
@@ -303,6 +360,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       if (!S.pending.length) stopReason = 'complete';
       else if (S.attempts >= maxYears || S.visited.length >= HARD.years) stopReason = 'budget';
     }
+    if (idOpt && stopReason !== null) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; }
     S.activeMs += Date.now() - callStart; S.touched = Date.now();
     if (stopReason === null) { // more years: remember where we are (data only) and ask the caller to navigate
       S.requested = S.pending.shift(); save(S);
@@ -332,10 +390,10 @@ await (window.__gcReplayRun = async (opts = {}) => {
       capturedAt: finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
       diagnostics: {expectedCount: S.visited.length + pending, uniqueCount: records.length, years: S.visited, yearsPending: pending, yearAttempts: S.attempts, unsettledYears: S.unsettled, truncatedYears: S.truncated,
         complete: done, stopReason, startedAt: S.startedAt, finishedAt, elapsedMs: S.activeMs, calls: S.calls, viewportWidth: innerWidth,
-        view: S.view, ownerControls: S.owner, viewAtStop, recordsSha256: sha, extraction: 'claude-code-page-script', carrier: 'sessionStorage-data-only'},
+        view: S.view, ownerControls: S.owner, viewAtStop, ...(S.opts.identity ? {identityYears: S.identityYears} : {}), recordsSha256: sha, extraction: 'claude-code-page-script', carrier: 'sessionStorage-data-only'},
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
   }
 })({})

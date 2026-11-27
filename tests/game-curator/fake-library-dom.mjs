@@ -41,10 +41,11 @@ export function makeLibraryPage({n = 100, chunk = 25, chunkMs = 20, requireScrol
     querySelectorAll: sel => (/app\//.test(sel) ? anchors() : []),
     querySelector: sel => /app\//.test(sel) ? anchors()[0] ?? null : /Find a game/.test(sel) ? {get value() { return state.search; }} : null};
   class MutationObserver { constructor(cb) { this.cb = cb; } observe() { state.observers.add(this.cb); } disconnect() { state.observers.delete(this.cb); } }
-  const location = {protocol: 'https:', hostname: 'steamcommunity.com', pathname: path, get search() { return state.tab === null ? '' : `?tab=${state.tab}`; }};
+  const location = {protocol: 'https:', hostname: 'steamcommunity.com', origin: 'https://steamcommunity.com', pathname: path, get search() { return state.tab === null ? '' : `?tab=${state.tab}`; }};
   const ctx = vm.createContext({document, MutationObserver, setTimeout, clearTimeout, Date, JSON, Map, Set, Array, Object, Math, Number, Error, Promise, RegExp, URLSearchParams,
-    TextEncoder, Uint8Array, Blob, URL: URLfake, crypto: globalThis.crypto, console, innerWidth: width, location, getComputedStyle: () => ({overflowY: 'visible'})});
+    TextEncoder, btoa, atob, Uint8Array, Blob, URL: URLfake, crypto: globalThis.crypto, console, innerWidth: width, location, getComputedStyle: () => ({overflowY: 'visible'})});
   ctx.window = ctx;
+  Object.defineProperty(ctx, 'UserConfig', {get: () => state.userConfig, configurable: true}); // synthetic Steam identity data; tests set it (or a getter) to model sign-in, switches and expiry
   state.render();
   const source = fs.readFileSync(new URL('../../skills/game-curator/scripts/claude-code/steam-library-page.js', import.meta.url), 'utf8');
   const run = (opts = {}) => ctx.window.__gcLibraryRun ? ctx.window.__gcLibraryRun(opts) : vm.runInContext(`(async () => (${source.replace(/\}\)\(\{\}\)\s*$/, `})(${JSON.stringify(opts)})`).replace(/^(?:\/\/.*\n)*await /m, '')}))()`, ctx);

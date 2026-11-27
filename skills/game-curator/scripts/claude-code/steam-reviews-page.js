@@ -95,13 +95,27 @@ await (window.__gcReviewsRun = async (opts = {}) => {
   }
   function readSessionSources(win = window, doc = document) {
     const out = [];
-    const take = (name, o) => { if (o && typeof o === 'object') out.push({name, loggedIn: o.logged_in === true ? true : o.logged_in === false ? false : null, steamid: o.steamid, accountid: o.accountid}); };
-    try { take('user-config', win.UserConfig); } catch { /* unreadable: treated as absent */ }
-    try {
-      const attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo');
-      if (attr) take('userinfo-attr', JSON.parse(attr)); // the parsed object is discarded after the three fields are copied
-    } catch { /* malformed: treated as absent */ }
-    try { if (win.g_steamID !== undefined) out.push({name: 'g-steamid', loggedIn: null, steamid: win.g_steamID, accountid: undefined}); } catch { /* absent */ }
+    const take = (name, raw, requireAccountId) => {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { out.push({name, state: 'malformed'}); return; }
+      const lg = raw.logged_in;
+      out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid: raw.steamid, accountid: raw.accountid, requireAccountId});
+    };
+    let uc, ucState = 'ok';
+    try { uc = win.UserConfig; } catch { ucState = 'unreadable'; }
+    if (ucState === 'unreadable') out.push({name: 'user-config', state: 'unreadable'});
+    else if (uc !== undefined) take('user-config', uc, true);
+    let attr = null, attrState = 'ok';
+    try { attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo') ?? null; } catch { attrState = 'unreadable'; }
+    if (attrState === 'unreadable') out.push({name: 'userinfo-attr', state: 'unreadable'});
+    else if (attr !== null) {
+      let parsed, ok = true;
+      try { parsed = JSON.parse(attr); } catch { ok = false; } // the parsed object is discarded after the three fields are copied
+      if (ok) take('userinfo-attr', parsed, true); else out.push({name: 'userinfo-attr', state: 'malformed'});
+    }
+    let g, gState = 'ok';
+    try { g = win.g_steamID; } catch { gState = 'unreadable'; }
+    if (gState === 'unreadable') out.push({name: 'g-steamid', state: 'unreadable'});
+    else if (g !== undefined) out.push({name: 'g-steamid', state: 'ok', loggedIn: null, steamid: g, accountid: undefined, requireAccountId: false}); // the legacy global genuinely has no accountid
     return out;
   }
   async function observeIdentity(o = {}, env = {}) {
@@ -109,35 +123,47 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     let saltBytes = o.salt !== undefined ? b64uDecode(o.salt) : null, generated = false;
     if (o.salt === undefined && o.candidate === true) { saltBytes = crypto.getRandomValues(new Uint8Array(16)); generated = true; }
     if (!saltBytes || saltBytes.length !== 16) throw new Error('identity needs a 16-byte base64url salt (or candidate: true)');
+    const saltCheck = (await sha256HexOf(saltBytes)).slice(0, 8);
+    const finish = r => { if (generated) r.salt = b64uEncode(saltBytes); return r; };
+    if (!['https://store.steampowered.com', 'https://steamcommunity.com'].includes(loc?.origin)) {
+      return finish({version: 1, sources: [], loggedIn: null, consistent: false, problems: ['unsupported-origin'], saltCheck, sessionFingerprint: null, pathFingerprint: null});
+    }
     const sources = readSessionSources(win, doc);
-    const ids = new Set();
-    let loggedIn = null, consistent = true;
+    const problems = new Set(), ids = new Set(), states = new Set();
     for (const s of sources) {
-      if (s.loggedIn === false) loggedIn = false;
-      else if (s.loggedIn === true && loggedIn !== false) loggedIn = true;
+      if (s.state === 'unreadable') { problems.add('unreadable-marker'); continue; }
+      if (s.state === 'malformed') { problems.add('malformed-marker'); continue; }
+      if (s.loggedIn === 'invalid') { problems.add('malformed-marker'); continue; }
       const provided = s.steamid !== undefined && s.steamid !== null && s.steamid !== false && s.steamid !== '' && s.steamid !== 0 && s.steamid !== '0';
+      if (s.loggedIn === true && !provided) problems.add('login-state-conflict');
+      if (s.loggedIn === false && provided) problems.add('login-state-conflict');
+      if (s.loggedIn !== null) states.add(s.loggedIn);
       if (!provided) continue;
       const id = canonicalSteamId64(s.steamid);
-      if (!id || (s.accountid !== undefined && !accountIdMatches(id, s.accountid))) { consistent = false; continue; }
+      if (!id) { problems.add('invalid-id'); continue; }
+      if (s.accountid === undefined) { if (s.requireAccountId) { problems.add('missing-account-id'); continue; } }
+      else if (!accountIdMatches(id, s.accountid)) { problems.add('invalid-account-id'); continue; }
       ids.add(id);
-      if (s.name === 'g-steamid' && loggedIn === null) loggedIn = true;
+      if (s.name === 'g-steamid') states.add(true); // a valid ID in the legacy global means signed in
     }
-    if (ids.size > 1) consistent = false;
+    if (ids.size > 1) problems.add('id-conflict');
+    if (states.size > 1) problems.add('login-state-conflict');
+    const loggedIn = states.size === 1 ? [...states][0] : null;
+    const consistent = problems.size === 0;
     const fp = async id => sha256HexOf(fingerprintBytes(saltBytes, id));
     const sessionId = ids.size === 1 ? [...ids][0] : null;
     const pathMatch = /\/(?:replay|profiles)\/([0-9]{17})(?=\/|$)/.exec(String(loc?.pathname ?? ''));
     const pathId = pathMatch ? canonicalSteamId64(pathMatch[1]) : null;
-    const result = {
+    return finish({
       version: 1,
       sources: sources.map(s => s.name),
       loggedIn,
       consistent,
-      saltCheck: (await sha256HexOf(saltBytes)).slice(0, 8),
-      sessionFingerprint: loggedIn !== false && consistent && sessionId ? await fp(sessionId) : null,
+      problems: [...problems].sort(),
+      saltCheck,
+      sessionFingerprint: consistent && loggedIn === true && sessionId ? await fp(sessionId) : null,
       pathFingerprint: pathId ? await fp(pathId) : null,
-    };
-    if (generated) result.salt = b64uEncode(saltBytes);
-    return result;
+    });
   }
   async function sha256Hex(bytes) {
     return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -155,17 +181,41 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     });
     return {callStart, left, sleep, outOfCall, nextMutation};
   }
+  async function identityStep(state, identityOpt, ownerNow) {
+    if (!identityOpt) return state ?? null;
+    const st = state ?? {checks: 0, stable: true, broke: false, first: null, last: null};
+    let obs = null;
+    try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
+    if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
+    const good = !!obs && obs.problems.length === 0 && obs.loggedIn === true && obs.sessionFingerprint !== null;
+    st.checks += 1;
+    if (st.checks === 1) st.first = good ? obs.sessionFingerprint : null;
+    const lost = !good || obs.sessionFingerprint !== st.first;
+    if (lost) st.stable = false;
+    if (lost && st.checks > 1 && st.first !== null) st.broke = true; // a signed-in account was established and then changed or lost: stop the run
+    // (an account that was never established is not a change: the run proceeds and the saver reports identity as unobserved)
+    st.last = obs ?? {version: 1, sources: [], loggedIn: null, consistent: false, problems: [], saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed', owner: null};
+    return st;
+  }
+  function identityOf(st) {
+    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable}} : undefined;
+  }
+  function identityObsValid(o) {
+    const hex = v => v === null || (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
+    return !!o && typeof o === 'object' && !Array.isArray(o) && o.version === 1 && Array.isArray(o.sources) && o.sources.length <= 3 && o.sources.every(x => typeof x === 'string' && x.length <= 20)
+      && Array.isArray(o.problems) && o.problems.length <= 10 && o.problems.every(x => typeof x === 'string' && x.length <= 30) && hex(o.sessionFingerprint) && hex(o.pathFingerprint)
+      && (o.loggedIn === null || typeof o.loggedIn === 'boolean') && typeof o.consistent === 'boolean' && (o.saltCheck === null || (typeof o.saltCheck === 'string' && /^[0-9a-f]{8}$/.test(o.saltCheck)))
+      && (o.owner === undefined || o.owner === null || typeof o.owner === 'boolean') && (o.error === undefined || o.error === 'observation-failed');
+  }
+  function identityStateValid(st) {
+    if (st === null) return true;
+    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'first', 'last'].includes(k))
+      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean'
+      && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
+  }
   async function deliverEnvelope(envelope, o) {
-    // Optional identity observation ({salt} of the approved binding, stated on the finishing call like deliver): fingerprints only, never an identifier.
-    // A failed observation is recorded as unobserved rather than losing the capture; the saver, not this script, decides what it means.
-    if (o.identity) {
-      let observed;
-      try {
-        if (o.identity.candidate !== undefined) throw new Error('candidate salts belong to the standalone probe');
-        observed = await observeIdentity({salt: o.identity.salt});
-      } catch { observed = {version: 1, sources: [], loggedIn: null, consistent: false, saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed'}; }
-      envelope.diagnostics = {...envelope.diagnostics, identity: observed};
-    }
+    // Identity continuity state (see identityStep): the last observation plus whether the signed-in account was the same at every check of the run.
+    if (o.identityState) envelope.diagnostics = {...envelope.diagnostics, identity: identityOf(o.identityState)};
     if (o.deliver !== 'download') return envelope;
     const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
     const file = `${o.filePrefix}-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
@@ -212,7 +262,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     // Returns null if the state is acceptable, otherwise the reason it is not.
     const invalid = (S, listPath) => {
       const has = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
-      if (!has(S, ['v', 'path', 'startedAt', 'born', 'touched', 'activeMs', 'rows', 'visited', 'pending', 'requested', 'repeats', 'expected', 'attempts', 'calls', 'restarts', 'owner', 'warnings', 'opts', 'view'])) return 'unexpected shape';
+      if (!has(S, ['v', 'path', 'startedAt', 'born', 'touched', 'activeMs', 'rows', 'visited', 'pending', 'requested', 'repeats', 'expected', 'attempts', 'calls', 'restarts', 'owner', 'warnings', 'opts', 'view', 'identity'])) return 'unexpected shape';
       if (S.v !== 1) return 'unsupported version';
       if (S.path !== listPath) return 'different list path';
       if (typeof S.startedAt !== 'string' || !Number.isFinite(Date.parse(S.startedAt)) || S.startedAt.length > 40) return 'bad start time';
@@ -220,7 +270,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       if (![S.repeats, S.attempts, S.calls, S.restarts].every(n => isInt(n, 10000))) return 'bad counters';
       if (!(S.expected === null || isInt(S.expected, 100000)) || typeof S.owner !== 'boolean') return 'bad expected or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxPages', 'retainMs']) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
+      if (!has(S.opts, ['maxPages', 'retainMs', 'identity']) || !(S.opts.identity === undefined || (has(S.opts.identity, ['salt']) && typeof S.opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(S.opts.identity.salt))) || !identityStateValid(S.identity ?? null) || !(S.opts.maxPages === undefined || (Number.isInteger(S.opts.maxPages) && S.opts.maxPages >= 1 && S.opts.maxPages <= HARD.pages))
         || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'recommended-list' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.pages || !list.every(k => okPageKey(k, listPath))) return 'bad page list';
@@ -235,7 +285,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       return null;
     };
     const fresh = why => { const S = {v: 1, path, startedAt, born: Date.now(), touched: Date.now(), activeMs: 0, rows: [], visited: [], pending: [], requested: null, repeats: 0, expected: null, attempts: 0,
-      calls: 0, restarts: 0, owner: false, warnings: [], opts: {}, view: {kind: 'recommended-list', language: document.documentElement.lang || null}}; if (why) S.warnings.push(why); return S; };
+      calls: 0, restarts: 0, owner: false, identity: null, warnings: [], opts: {}, view: {kind: 'recommended-list', language: document.documentElement.lang || null}}; if (why) S.warnings.push(why); return S; };
 
     let S = null, viewAtStop = null, stopReason = null;
     const stored = raw();
@@ -250,7 +300,11 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxPages', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    for (const k of ['maxPages', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    const idOpt = S.opts.identity, ownerNow = () => !!document.querySelector('.review_box .control_block');
+    // Who is signed in on THIS page, before its rows are merged: a change or loss since the first page of the run stops the run and these rows are not added.
+    if (idOpt) { S.identity = await identityStep(S.identity ?? null, idOpt, ownerNow); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxPages = Math.min(S.opts.maxPages ?? 20, HARD.pages);
     const seen = new Set(S.rows.map(r => r.reviewUrl));
 
@@ -269,8 +323,8 @@ await (window.__gcReviewsRun = async (opts = {}) => {
         // The displayed count changed under us: batches from different counts must not mix. Restart once, then stop.
         if (S.restarts >= 1) { stopReason = 'view-changed'; viewAtStop = {expected: snap.expected, pageKey}; }
         else {
-          const warnings = [...S.warnings, `The displayed review count changed from ${S.expected} to ${snap.expected} during collection; restarted from page 1.`], restarts = S.restarts + 1, keptOpts = S.opts, calls = S.calls;
-          S = fresh(); S.warnings = warnings.slice(-HARD.warnings); S.restarts = restarts; S.calls = calls; S.expected = snap.expected; S.opts = keptOpts;
+          const warnings = [...S.warnings, `The displayed review count changed from ${S.expected} to ${snap.expected} during collection; restarted from page 1.`], restarts = S.restarts + 1, keptOpts = S.opts, keptId = S.identity, calls = S.calls;
+          S = fresh(); S.warnings = warnings.slice(-HARD.warnings); S.restarts = restarts; S.calls = calls; S.expected = snap.expected; S.opts = keptOpts; S.identity = keptId;
           const first = reviewPageKey(Object.assign(new URL(snap.url), {search: '?p=1'}).href);
           S.requested = first; save(S);
           return {status: 'continue', next: first, restart: true, collected: 0, expected: S.expected, pagesVisited: 0, hint: 'The count changed; navigate to next and run this file again.'};
@@ -291,6 +345,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       else if (!S.pending.length) stopReason = 'pages-exhausted';
       else if (S.attempts >= maxPages || S.visited.length >= HARD.pages) stopReason = 'budget';
     }
+    if (idOpt && stopReason !== null) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; } // last look, on the final page
     S.activeMs += Date.now() - callStart; S.touched = Date.now();
     if (stopReason === null) { // more pages: remember where we are (data only) and ask the caller to navigate
       S.requested = S.pending.shift(); save(S);
@@ -324,6 +379,6 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
   }
 })({})

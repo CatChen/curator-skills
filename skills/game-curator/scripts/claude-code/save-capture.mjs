@@ -37,7 +37,7 @@
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {parseSettings, readSettingsFile, bindingKey} from '../settings.mjs';
-import {checkObservation, evaluateIdentity, identityPolicy} from '../identity.mjs';
+import {checkObservation, evaluateIdentity, identityPolicy, knownConflict, generationOf} from '../identity.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -368,6 +368,11 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
     if (d.complete !== true) incomplete.push(`collector reported an incomplete run (${d.stopReason ?? 'unknown reason'})`);
     if (d.view !== undefined && !isPlainObject(d.view)) errors.push('diagnostics.view is invalid');
     if (d.identity !== undefined) errors.push(...checkObservation(d.identity));
+    if (d.identityYears !== undefined) { // Replay: one observation per report page, each bound to its own year
+      const ys = d.identityYears;
+      if (env.source !== 'replay' || !Array.isArray(ys)) errors.push('diagnostics.identityYears is invalid');
+      else { const seen = new Set(); for (const e of ys) { if (!isPlainObject(e) || !Number.isSafeInteger(e.year) || seen.has(e.year) || !recs.some(r => r?.year === e.year)) { errors.push('diagnostics.identityYears has an invalid or unmatched entry'); continue; } seen.add(e.year); const {year, ...obs} = e; errors.push(...checkObservation(obs)); } }
+    }
     rules.validateDiagnostics?.(d, recs, errors, env);
     // A transfer from a page is observation only: it may not carry attestations (those are added here, by the caller's verified inputs)
     // and, for reviews, may not carry names (a name only ever comes from the enrichment step that verifies it).
@@ -472,6 +477,7 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
   if (!validExisting(existing, next.source)) return {action: 'separate', reason: `existing file is not a valid ${next.source} envelope; preserved untouched`, notes};
   if (next.source === 'replay' && existing.records[0].year !== next.records[0].year) return {action: 'separate', reason: 'existing file holds a different year; preserved untouched', notes};
   if (existing.account !== next.account) return {action: 'separate', reason: 'account identity differs or is unknown', notes};
+  if (generationOf(existing) !== generationOf(next)) return {action: 'separate', reason: 'the existing capture was verified under a different (or no) account binding, even though the alias matches', notes};
   if (existing.accessScope !== next.accessScope) return {action: 'separate', reason: 'access scope differs or is not established', notes};
   if (existing.coverage !== next.coverage) return {action: 'separate', reason: 'coverage differs', notes};
   if (!(Date.parse(next.capturedAt) > Date.parse(existing.capturedAt))) return {action: 'separate', reason: 'new capture is not newer', notes};
@@ -489,7 +495,10 @@ export function decide(existing, next, {existingAccount, existingViewUnfiltered 
 
 // Select from already authorized captures; no filesystem access, identity inference or merge.
 // Ineligible but structurally usable evidence is returned separately for historical context.
-export function selectSnapshots(captures, {source, account, accessScope, year} = {}) {
+export function selectSnapshots(captures, {source, account, accessScope, year, binding} = {}) {
+  // With a binding, selection is for the bound account only and only captures verified under THIS binding generation are eligible: the alias is
+  // a label and never proves the same bound identity (a reused alias after a change or revoke names a different binding).
+  if (binding) { if (account !== undefined && account !== binding.alias) throw new Error('selection account differs from the bound account'); account = binding.alias; }
   if (!SOURCE_NAMES.includes(source) || !account || !['signed-in', 'public'].includes(accessScope)) throw new Error('selection requires a source and established account and scope');
   if (source === 'replay' && (!Number.isInteger(year) || year < 2000 || year > 2099)) throw new Error('Replay selection requires a year');
   const eligible = [], supporting = [], rejected = [];
@@ -497,6 +506,8 @@ export function selectSnapshots(captures, {source, account, accessScope, year} =
     if (!capture || capture.source !== source) continue;
     if (source === 'replay' && (!Array.isArray(capture.records) || capture.records.length !== 1)) { rejected.push({capture, reasons: ['Replay selection requires one annual record']}); continue; }
     if (source === 'replay' && capture.records[0]?.year !== year) continue;
+    const conflict = knownConflict(capture);
+    if (conflict) { rejected.push({capture, reasons: [conflict]}); continue; } // a known conflict is never supporting evidence, whether or not an alias was saved
     const v = validate(capture, {account: capture.account, accessScope: capture.accessScope ?? 'unknown'});
     const inconsistentTransfer = VERIFIED_TRANSFER_LEVELS.has(capture.diagnostics?.attestations?.transfer?.level) && !verifiedTransfer(capture);
     if (v.errors.length || inconsistentTransfer || (capture.account && capture.account !== account) || (capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope)) {
@@ -505,6 +516,7 @@ export function selectSnapshots(captures, {source, account, accessScope, year} =
     }
     const reasons = [...v.incomplete, ...(source === 'replay' ? SOURCES.replay.yearIncomplete(capture.diagnostics, capture.records[0]) : [])];
     if (capture.account !== account) reasons.push('account identity differs or is unknown');
+    if (binding && generationOf(capture) !== binding.generation) reasons.push('captured under a different or no account binding');
     if (capture.accessScope !== accessScope) reasons.push('access scope differs or is unknown');
     if (!cfgOf(capture).viewOk(capture)) reasons.push('view is not verified');
     if (!verifiedTransfer(capture)) reasons.push('transfer provenance is not verified');
@@ -615,7 +627,7 @@ function separateCandidates(dir, stem) {
   return fs.readdirSync(dir).filter(n => n.startsWith(prefix) && /^\d{8}T\d{6}Z-[a-f0-9]{12}\.json$/.test(n.slice(prefix.length))).sort().map(n => path.join(dir, n));
 }
 function sameSeparate(a, b) {
-  if (!established(a) || !established(b) || a.account !== b.account || a.accessScope !== b.accessScope || a.coverage !== b.coverage || a.source !== b.source) return false;
+  if (!established(a) || !established(b) || a.account !== b.account || generationOf(a) !== generationOf(b) || a.accessScope !== b.accessScope || a.coverage !== b.coverage || a.source !== b.source) return false;
   // Only the timestamp and transfer fingerprint are omitted. All other diagnostics,
   // warnings and exact records must match; unknown identity is never deduplicated.
   const clean = e => {
@@ -644,20 +656,41 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
   if (!readIfExists(file)?.equals(Buffer.from(text))) throw new Error(`read-back mismatch for ${file}`);
 }
 
-export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, ...policy} = {}) {
-  const settingsFile = checkCacheAuthorized(destDir, settings); // before inspecting the payload or any cache file, including dry runs
-  // With an account bound, a library caller cannot bypass the CLI's identity check: a capture under the bound alias must carry the
-  // saver's own verdict (a verified match, or the user's manual confirmation), and a capture under any other alias is not promoted.
-  const bound = readSettingsFile(settingsFile).settings.steamAccount;
-  if (bound && !policy.identityBlock) {
-    const idAtt = env?.diagnostics?.attestations?.identity;
-    const verdictOk = (idAtt?.by === 'binding' && idAtt.result === 'match' && idAtt.ownership === 'verified') || (idAtt?.by === 'user' && idAtt.basis === 'manual-confirmation' && idAtt.result === 'unobserved');
-    if (env?.account !== bound.alias) policy.identityBlock = 'the capture is not for the bound account';
-    else if (!verdictOk) policy.identityBlock = 'a capture under the bound alias needs an identity verdict (use the saver, or evaluateIdentity and identityPolicy)';
+// Derive the identity verdict for a capture at the shared boundary, from the actual observation, the approved binding and the collector's own
+// owner evidence; nothing a caller attaches is trusted. The observation is consumed and only the verdict (with the binding generation) is
+// stored. A manual alias counts only where extraction was unavailable. Returns {env, block, identity}.
+export function applyIdentity(env, binding, manualAccount) {
+  const out = JSON.parse(JSON.stringify(env)), d = out.diagnostics ?? {};
+  const observation = d.identity;
+  if (isPlainObject(out.diagnostics)) delete out.diagnostics.identity;
+  if (!binding) { if (manualAccount !== undefined && out.account === undefined) out.account = manualAccount; return {env: canonicalize(out), block: null, identity: null}; }
+  const ownerEvidence = SOURCES[out.source]?.ownerEvidence?.(d) === true;
+  const evaluation = evaluateIdentity({binding, observation, ownerEvidence});
+  const pol = identityPolicy({binding, evaluation, manualAccount}); // only an explicit manualAccount counts: an alias merely present on the envelope is not a confirmation
+  if (pol.account === undefined) delete out.account; else out.account = pol.account;
+  if (isPlainObject(out.diagnostics)) {
+    const att = {...(out.diagnostics.attestations ?? {}), identity: pol.attestation};
+    if (pol.account !== undefined) att.account = pol.account; else delete att.account;
+    if (pol.scope && (out.accessScope === undefined || out.accessScope === 'unknown')) { out.accessScope = pol.scope; att.accessScope = pol.scope; }
+    out.diagnostics.attestations = att;
   }
+  return {env: canonicalize(out), block: pol.block, identity: pol.attestation};
+}
+
+export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, manualAccount, ...policy} = {}) {
+  const settingsFile = checkCacheAuthorized(destDir, settings); // before inspecting the payload or any cache file, including dry runs
+  const bound0 = readSettingsFile(settingsFile).settings.steamAccount;
   if (stemOverride !== undefined) throw new Error('stem override is not supported');
   const consentDest = destDir;
-  const recheckConsent = () => { checkCacheAuthorized(consentDest, settings); extraCheck?.(); };
+  // Intrinsic recheck: consent AND the account binding the decision was based on; a change or revocation stops the save wherever it is called.
+  const recheckConsent = () => {
+    checkCacheAuthorized(consentDest, settings);
+    if (bindingKey(readSettingsFile(settingsFile).settings.steamAccount) !== bindingKey(bound0)) throw new Error('The account binding changed during the save; nothing more was written');
+    extraCheck?.();
+  };
+  const applied = applyIdentity(env, bound0, manualAccount);
+  env = applied.env;
+  if (applied.block && !policy.identityBlock) policy.identityBlock = applied.block;
   const checked = validate(env, {account: env?.account, accessScope: env?.accessScope ?? 'unknown'});
   if (checked.errors.length) throw new Error(`Invalid capture: ${checked.errors.join('; ')}`);
   incomplete = [...new Set([...incomplete, ...checked.incomplete, ...(env?.source === 'replay' && env.records?.length === 1 ? SOURCES.replay.yearIncomplete(env.diagnostics, env.records[0]) : [])])];
@@ -676,6 +709,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
   const partial = path.join(destDir, `${stem}.managed-v1.partial.${ts}-${sha256(JSON.stringify([env.source, env.capturedAt, env.account, env.accessScope, env.records])).slice(0, 12)}.json`);
   const result = {...decision, target: decision.action === 'separate' ? partial : main, backup: decision.action === 'replace' ? path.join(destDir, `${stem}.managed-v1.superseded.${stamp(existing.capturedAt)}-${sha256(decisionBytes).slice(0, 12)}.json`) : null, bytes: Buffer.byteLength(text), sha256: sha256(text)};
   if (decision.action === 'separate') Object.assign(result, chooseSeparate(destDir, stem, env, partial));
+  result.identity = applied.identity;
   if (dryRun) return result;
 
   recheckConsent?.(); // before creating or touching anything
@@ -726,7 +760,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
           if (!st.isFile() || st.isSymbolicLink()) continue;
           const bytes = readIfExists(file), digest = sha256(bytes), snapshot = JSON.parse(bytes);
           if (!name.endsWith(`-${digest.slice(0, 12)}.json`) || !validExisting(snapshot, env.source)) continue;
-          if (snapshot.account !== existing.account || snapshot.accessScope !== existing.accessScope || snapshot.coverage !== existing.coverage || !cfgOf(snapshot).viewOk(snapshot) || JSON.stringify(snapshot.diagnostics.view) !== JSON.stringify(existing.diagnostics.view) || snapshot.diagnostics.attestations?.filters !== existing.diagnostics.attestations?.filters) continue;
+          if (snapshot.account !== existing.account || generationOf(snapshot) !== generationOf(existing) || snapshot.accessScope !== existing.accessScope || snapshot.coverage !== existing.coverage || !cfgOf(snapshot).viewOk(snapshot) || JSON.stringify(snapshot.diagnostics.view) !== JSON.stringify(existing.diagnostics.view) || snapshot.diagnostics.attestations?.filters !== existing.diagnostics.attestations?.filters) continue;
           managed.push({file, digest, time: Date.parse(snapshot.capturedAt)});
         } catch { /* Unreadable or edited files are user evidence; leave them alone. */ }
       }
@@ -752,8 +786,11 @@ export const replayYearIncomplete = (env, record) => SOURCES.replay.yearIncomple
 // checksum of its own record so the per-year file stays verifiable without the original.
 export function splitReplay(env) {
   const {records, ...rest} = env, n = records.length;
+  // Each annual file carries ONLY the identity observation made on its own report page (plus the run's continuity), never another year's.
+  const {identityYears, identity: runIdentity, ...baseDiag} = env.diagnostics ?? {};
+  const own = year => { const e = Array.isArray(identityYears) ? identityYears.find(x => x?.year === year) : null; if (!e) return {}; const {year: y, ...obs} = e; return {identity: {...obs, ...(runIdentity?.continuity ? {continuity: runIdentity.continuity} : {})}}; };
   return [...records].sort((a, b) => a.year - b.year).map(r => canonicalize({...rest, diagnosticsScope: 'original-multi-year-capture', records: [r],
-    diagnostics: {...env.diagnostics, attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(r)), originalRecords: n}}}}));
+    diagnostics: {...baseDiag, ...own(r.year), attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(r)), originalRecords: n}}}}));
 }
 
 // True only when this file is the process entry point, including when invoked through a symlink or a path
@@ -820,19 +857,16 @@ if (isMain()) {
     const accountArg = opt('--account'), scopeArg = opt('--access-scope');
     const {errors, incomplete} = validate(env, {account: accountArg, accessScope: scopeArg ?? 'unknown', incoming: true});
     if (errors.length) { console.error('Rejected (not a valid Steam export envelope for its source):\n- ' + errors.join('\n- ')); process.exit(1); }
-    // Identity: observed (fingerprints in diagnostics.identity) against the approved binding, kept apart from page ownership, scope, completeness, transfer and consent.
+    // Identity is derived inside save() from the page's observation and the approved binding (never trusted from here). With an account bound the
+    // manual alias is only a fallback for unavailable extraction and is passed through; unbound, it is attested as before.
     const binding = readSettingsFile(settingsFile).settings.steamAccount;
-    const evaluation = evaluateIdentity({binding, observation: env.diagnostics?.identity, ownerEvidence: SOURCES[env.source]?.ownerEvidence?.(env.diagnostics) === true});
-    const idPolicy = identityPolicy({binding, evaluation, accountArg});
-    const account = idPolicy.account, accessScope = scopeArg ?? idPolicy.scope ?? 'unknown';
+    const account = binding ? undefined : accountArg, accessScope = scopeArg ?? 'unknown';
     // Caller-attested metadata goes in diagnostics.attestations; the page's observed evidence (diagnostics.view,
     // the reported accessScope) is kept as captured and the original envelope's checksum is recorded.
     const attestations = {by: 'caller', attestedAt: new Date().toISOString(), sourceEnvelopeSha256: sha256(JSON.stringify(env)), pageReportedAccessScope: env.accessScope,
       transfer: {provenance: provenanceArg ?? 'unspecified', level, receivedBytes: rawBytes.length, localSha256Fingerprint: sha256(rawBytes), sourceDigest: sourceSha !== undefined ? 'matched' : 'unavailable',
         pageSummaryChecks: summaryChecks ?? [], ...(hookMeta ? {hook: {tool: hookMeta.tool, toolUseId: hookMeta.toolUseId, call: hookMeta.call, scriptSha256: hookMeta.scriptSha256, stagedAt: hookMeta.stagedAt, sha256: hookMeta.sha256}} : {}), note: hookMeta ? 'The runtime-processed tool response as the skill hook received it (the text the model also saw, after any runtime filtering); not a native tool-result file, not a download, and no independent source digest.' : sourceSha !== undefined ? 'An independently obtained source digest matched the received bytes.' : 'No independent whole-file source digest was available; the local fingerprint only identifies the received file. Exact end-to-end byte equality is not claimed.'}};
     if (account) { env.account = account; attestations.account = account; }
-    if (idPolicy.attestation) attestations.identity = idPolicy.attestation;
-    if (env.diagnostics?.identity !== undefined) { const {identity: observed, ...rest} = env.diagnostics; env.diagnostics = rest; } // consumed: only the saver's verdict is stored
     env.accessScope = accessScope; attestations.accessScope = accessScope;
     if (opt('--view') === 'unfiltered') { // the caller confirmed the page showed the default sort with no filters
       if (!SOURCES[env.source].viewAttestable) { console.error(`--view unfiltered does not apply to the ${env.source} source: its view evidence is observed by the collector, not attested`); process.exit(1); }
@@ -864,8 +898,8 @@ if (isMain()) {
     env.diagnostics = {...env.diagnostics, attestations};
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
     const policy = {dryRun, incomplete, transferVerified, settings: opt('--settings'), existingAccount: opt('--existing-account'),
-      existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'), identityBlock: idPolicy.block,
-      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (bindingKey(readSettingsFile(settingsFile).settings.steamAccount) !== bindingKey(binding)) throw new Error('The account binding changed during the save; nothing more was written'); if (hookRoot !== null) sourceConsent(hookRoot); }};
+      existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'), manualAccount: accountArg,
+      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null) sourceConsent(hookRoot); }}; // the binding recheck is intrinsic to save()
     if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {

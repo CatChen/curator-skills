@@ -74,14 +74,15 @@ await (window.__gcReplayRun = async (opts = {}) => {
     const has = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
     // Returns null if the state is acceptable, otherwise the reason it is not.
     const invalid = S => {
-      if (!has(S, ['v', 'accountPath', 'startedAt', 'born', 'touched', 'activeMs', 'records', 'visited', 'pending', 'requested', 'repeats', 'attempts', 'calls', 'owner', 'warnings', 'opts', 'view', 'unsettled', 'truncated'])) return 'unexpected shape';
+      if (!has(S, ['v', 'accountPath', 'startedAt', 'born', 'touched', 'activeMs', 'records', 'visited', 'pending', 'requested', 'repeats', 'attempts', 'calls', 'owner', 'warnings', 'opts', 'view', 'unsettled', 'truncated', 'identity', 'identityYears'])) return 'unexpected shape';
       if (S.v !== 1) return 'unsupported version';
       if (typeof S.accountPath !== 'string' || !/^\/replay\/[A-Za-z0-9_-]{1,64}$/.test(S.accountPath)) return 'bad account path';
       if (typeof S.startedAt !== 'string' || !Number.isFinite(Date.parse(S.startedAt)) || S.startedAt.length > 40) return 'bad start time';
       if (![S.born, S.touched].every(t => isInt(t, 1e14)) || !isInt(S.activeMs, 1e9)) return 'bad timestamps';
       if (![S.repeats, S.attempts, S.calls].every(n => isInt(n, 10000)) || typeof S.owner !== 'boolean') return 'bad counters or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxYears', 'retainMs']) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
+      if (!has(S.opts, ['maxYears', 'retainMs', 'identity']) || !(S.opts.identity === undefined || (has(S.opts.identity, ['salt']) && typeof S.opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(S.opts.identity.salt))) || !identityStateValid(S.identity ?? null)
+        || !(S.identityYears === undefined || (Array.isArray(S.identityYears) && S.identityYears.length <= HARD.years && S.identityYears.every(e => e && typeof e === 'object' && isYear(e.year) && identityObsValid(Object.fromEntries(Object.entries(e).filter(([k]) => k !== 'year')))))) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
         || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'annual-report' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.years || !list.every(isYear) || new Set(list).size !== list.length) return 'bad year list';
@@ -97,7 +98,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       return null;
     };
     const fresh = why => { const S = {v: 1, accountPath: snap.accountPath, startedAt, born: Date.now(), touched: Date.now(), activeMs: 0, records: [], visited: [], pending: [], requested: null, repeats: 0, attempts: 0,
-      calls: 0, owner: snap.ownerControls, warnings: [], unsettled: [], truncated: [], opts: {}, view: {kind: 'annual-report', language: snap.language}}; if (why) S.warnings.push(why); return S; };
+      calls: 0, owner: snap.ownerControls, warnings: [], unsettled: [], truncated: [], identity: null, identityYears: [], opts: {}, view: {kind: 'annual-report', language: snap.language}}; if (why) S.warnings.push(why); return S; };
 
     let S = null, viewAtStop = null, stopReason = null;
     const stored = raw();
@@ -111,7 +112,12 @@ await (window.__gcReplayRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxYears', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    for (const k of ['maxYears', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    S.identityYears ??= [];
+    const idOpt = S.opts.identity, ownerNow = () => !!snap.ownerControls;
+    // Who is signed in on THIS report page, before it is merged: each year gets its own observation, and a change since the first report stops the run.
+    if (idOpt) { S.identity = await identityStep(S.identity ?? null, idOpt, ownerNow); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxYears = Math.min(S.opts.maxYears ?? 20, HARD.years);
     const target = year => `${location.origin}${S.accountPath}/${year}`;
 
@@ -136,6 +142,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
         if (cut) { S.truncated.push(snap.year); S.warnings.push(`The ${snap.year} report has ${refs.length} game references; only the first ${HARD.apps} were kept, so it is incomplete.`); }
         S.records.push({year: snap.year, semanticText: snap.text, apps: refs.slice(0, HARD.apps)});
         S.visited.push(snap.year); S.attempts++; S.owner = S.owner && snap.ownerControls;
+        if (idOpt) S.identityYears.push({year: snap.year, ...S.identity.last}); // bound to this report's own page
         for (const y of replayYears(snap.links, snap.accountPath)) if (!S.visited.includes(y) && !S.pending.includes(y)) S.pending.push(y);
         S.pending = S.pending.filter(y => !S.visited.includes(y)).slice(0, HARD.years);
       }
@@ -144,6 +151,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
       if (!S.pending.length) stopReason = 'complete';
       else if (S.attempts >= maxYears || S.visited.length >= HARD.years) stopReason = 'budget';
     }
+    if (idOpt && stopReason !== null) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; }
     S.activeMs += Date.now() - callStart; S.touched = Date.now();
     if (stopReason === null) { // more years: remember where we are (data only) and ask the caller to navigate
       S.requested = S.pending.shift(); save(S);
@@ -173,10 +181,10 @@ await (window.__gcReplayRun = async (opts = {}) => {
       capturedAt: finishedAt, method: 'browser-dom-claude-code', coverage: 'partial', warnings,
       diagnostics: {expectedCount: S.visited.length + pending, uniqueCount: records.length, years: S.visited, yearsPending: pending, yearAttempts: S.attempts, unsettledYears: S.unsettled, truncatedYears: S.truncated,
         complete: done, stopReason, startedAt: S.startedAt, finishedAt, elapsedMs: S.activeMs, calls: S.calls, viewportWidth: innerWidth,
-        view: S.view, ownerControls: S.owner, viewAtStop, recordsSha256: sha, extraction: 'claude-code-page-script', carrier: 'sessionStorage-data-only'},
+        view: S.view, ownerControls: S.owner, viewAtStop, ...(S.opts.identity ? {identityYears: S.identityYears} : {}), recordsSha256: sha, extraction: 'claude-code-page-script', carrier: 'sessionStorage-data-only'},
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
   }
 })({})

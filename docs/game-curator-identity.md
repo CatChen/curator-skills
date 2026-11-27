@@ -12,7 +12,7 @@ The procedure for agents is in [account identity](../skills/game-curator/referen
 
 ## Verdict model
 
-Authenticated identity (`unbound`, `unobserved`, `match`, `mismatch`, `ambiguous`) is separate from page ownership (`verified`, `unverified`, `contradicted`). A match promotes only with verified ownership: owner-only page controls observed by the collector, and, where the URL carries an ID, a URL ID equal to the signed-in account. Completeness, transfer provenance and cache consent are decided by their own existing checks and are not affected by identity.
+Authenticated identity (`unbound`, `unobserved` = extraction unavailable, `signed-out`, `match`, `mismatch`, `ambiguous` = present but unusable, contradictory or changed during the run) is separate from page ownership (`verified`, `unverified`, `contradicted`). A match promotes only with identity continuity (observed at the start, at every resume, navigation or Replay report, at collection boundaries and at the end, stopping on a change) and verified ownership: owner-only page controls observed on the observed page, and, where the URL carries an ID, a URL ID equal to the signed-in account. The saver derives the verdict itself at the shared `save()` boundary; every capture records the binding generation, so an alias reused after a change or revoke never inherits earlier evidence. Completeness, transfer provenance and cache consent are decided by their own existing checks and are not affected by identity.
 
 ## Test status
 
@@ -29,7 +29,11 @@ Fixture tests are synthetic and run in CI-style scripts (`node tests/game-curato
 | Bind, change, revoke; persistence preserved; concurrent edit; refusals | fixture | `test_account_binding.mjs` |
 | Verified match without a question; mismatch/ambiguity cannot overwrite or be overridden | fixture | `test_account_binding.mjs` |
 | Another person's public page; owner controls contradicting the URL | fixture | `test_account_binding.mjs` |
-| Binding changed or revoked between decision and commit | fixture | `test_account_binding.mjs` |
+| Binding changed or revoked between decision and commit (intrinsic to `save()`) | fixture | `test_account_binding.mjs` |
+| Alias reused after change or revoke: decide, selection, separate deduplication and backup rotation by generation | fixture | `test_account_binding.mjs` |
+| Known mismatch, ambiguity, signed-out or unproven ownership is never supporting evidence, with or without a saved alias | fixture | `test_account_binding.mjs` |
+| Bind, change, revoke and persistence edits need the approved settings revision and candidate digests; full read-back; binding preserved | fixture | `test_account_binding.mjs` |
+| Real generated collectors with the identity option: start/resume/end observation, remembered across navigations, stop on a mid-run switch, expiry or sign-out, per-year Replay binding, hook grammar and staging, native tool-result path, then the real saver | fixture (the sign-in switches are simulated pages) | `test_identity_collectors.mjs` |
 | Legacy no-account files untouched; old alias not merged after a rebind | fixture | `test_account_binding.mjs` |
 | No raw ID, decoy login name or token in any stored file | fixture | both |
 | Live: normal signed-in account on the four sources, built-in browser and Claude in Chrome | live (probe only) | [Live acceptance](#live-acceptance) |

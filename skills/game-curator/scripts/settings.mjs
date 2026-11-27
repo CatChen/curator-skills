@@ -49,8 +49,9 @@ export function parseSettings(s) {
   throw new Error('unsupported or invalid settings version');
 }
 
-// Identity of a binding for change detection (alias and fingerprint; null when unbound).
-export const bindingKey = b => JSON.stringify(b ? [b.alias, b.fingerprint] : null);
+// Identity of a binding for change detection (alias, generation and fingerprint; null when unbound). The generation is an opaque random id
+// created with every bind or change, so the same alias bound again (or after a revoke) is a different binding.
+export const bindingKey = b => JSON.stringify(b ? [b.alias, b.generation, b.fingerprint] : null);
 
 export function readSettingsFile(file) {
   const bytes = fs.readFileSync(file);

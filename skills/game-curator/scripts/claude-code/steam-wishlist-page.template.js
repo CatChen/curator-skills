@@ -43,6 +43,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     let scroller = null;
     const nextMutation = limit => waitMutation(scroller && scroller !== document.scrollingElement ? scroller : document.body, limit);
 
+    const ownerNow = () => !!document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let snap = snapshotWishlist();
     for (let i = 0; !snap.rows.length && i < 10 && left() > 0; i++) { await nextMutation(500); snap = snapshotWishlist(); }
     let view = viewInfo(); const expected0 = snap.expected;
@@ -51,7 +52,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, identity: opts.identity, retainMs: opts.retainMs});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, identityState: opts.identity ? await identityStep(await identityStep(null, opts.identity, ownerNow), opts.identity, ownerNow) : null, retainMs: opts.retainMs});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -68,7 +69,9 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
-    for (const k of ['maxMs', 'maxSteps', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    for (const k of ['identity', 'maxMs', 'maxSteps', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
+    const idOpt = S.opts.identity, idEvery = Number.isInteger(opts.identityEveryMs) && opts.identityEveryMs >= 0 ? opts.identityEveryMs : 1000; let idAt = Date.now(); // identityEveryMs: test tuning only, not remembered
+    S.identity = await identityStep(S.identity, idOpt, ownerNow); // who is signed in at the start of this call; the first call fixes the account of the run
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;
@@ -101,6 +104,10 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     let stopReason = null;
     while (stopReason === null) {
       if (outOfTotal()) { stopReason = 'budget'; break; }
+      if (idOpt) { // identity continuity at collection boundaries (about once a second): a change or loss stops the run with the coherent batches only
+        if (Date.now() - idAt >= idEvery) { S.identity = await identityStep(S.identity, idOpt); idAt = Date.now(); }
+        if (S.identity.broke) { stopReason = 'identity-changed'; break; }
+      }
       if (outOfCall()) { // hand control back before the tool's 45 s limit; the next run resumes here
         S.activeMs += Date.now() - callStart; S.touched = Date.now();
         return {inProgress: true, collected: got.size, expected, elapsedMs: S.activeMs, calls: stats.calls, hint: 'Run window.__gcWishlistRun({}) again to resume'};
@@ -131,11 +138,12 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     if (stopReason === 'complete' && viewChanged(snapshotWishlist())) stopReason = 'view-changed'; // last look before emitting
     if (stopReason === 'view-changed') view = viewInfo(); // never emit the stale starting view for a changed one
+    if (idOpt) { S.identity = await identityStep(S.identity, idOpt, ownerNow); if (S.identity.broke && stopReason === 'complete') stopReason = 'identity-changed'; } // last look at who is signed in, on the page that was collected
     S.activeMs += Date.now() - callStart;
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, identityState: S.identity, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
@@ -168,6 +176,6 @@ await (window.__gcWishlistRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
-    return deliverEnvelope(envelope, {deliver: c.deliver, identity: c.identity, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
+    return deliverEnvelope(envelope, {deliver: c.deliver, identityState: c.identityState, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
   }
 })({})

@@ -10,7 +10,7 @@ import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord, libraryLabelCo
 import {snapshotReviews, reviewPageKey, queueReviewPages} from '../browser/review-rows.mjs';
 import {snapshotReplay, dedupeReplayApps, replayYears} from '../browser/replay-rows.mjs';
 import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity} from '../browser/identity-probe.mjs';
-import {sha256Hex, makeWaiter, deliverEnvelope} from './page-common.mjs';
+import {sha256Hex, makeWaiter, deliverEnvelope, identityStep, identityOf, identityObsValid, identityStateValid} from './page-common.mjs';
 
 const dir = new URL('.', import.meta.url);
 export const PAGES = {
@@ -21,7 +21,7 @@ export const PAGES = {
   identity: {functions: []}, // standalone probe: only the identity functions (see buildPageScript)
 };
 const IDENTITY = [b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity];
-const COMMON = [...IDENTITY, sha256Hex, makeWaiter, deliverEnvelope];
+const COMMON = [...IDENTITY, sha256Hex, makeWaiter, identityStep, identityOf, identityObsValid, identityStateValid, deliverEnvelope];
 const inline = fns => fns.map(f => '  ' + f.toString().replace(/\n/g, '\n  ')).join('\n').trimStart();
 
 export function buildPageScript(name = 'wishlist') {

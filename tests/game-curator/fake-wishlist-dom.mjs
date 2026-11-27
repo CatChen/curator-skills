@@ -45,10 +45,11 @@ export function makeWishlistPage({n = 60, rowH = 170, clientH = 900, renderLagMs
   };
   class MutationObserver { constructor(cb) { this.cb = cb; } observe() { state.observers.add(this.cb); } disconnect() { state.observers.delete(this.cb); } }
   const ctx = vm.createContext({document, MutationObserver, setTimeout, clearTimeout, Date, JSON, Map, Set, Array, Object, Math, Number, Error, Promise,
-    TextEncoder, Uint8Array, Blob, URL: URLfake, crypto: globalThis.crypto, console, innerWidth: width,
-    location: {protocol: 'https:', hostname: 'store.steampowered.com', pathname: '/wishlist/id/test/', search: ''},
+    TextEncoder, btoa, atob, Uint8Array, Blob, URL: URLfake, crypto: globalThis.crypto, console, innerWidth: width,
+    location: {protocol: 'https:', hostname: 'store.steampowered.com', origin: 'https://store.steampowered.com', pathname: '/wishlist/id/test/', search: ''},
     getComputedStyle: () => ({overflowY: 'auto'})});
   ctx.window = ctx;
+  Object.defineProperty(ctx, 'UserConfig', {get: () => state.userConfig, configurable: true}); // synthetic Steam identity data; tests set it (or a getter) to model sign-in, switches and expiry
   state.render = render;
   render(); // initial window, rows loaded
   for (const r of state.rendered) if (!state.neverLoad.has(r)) state.loaded.add(r);
