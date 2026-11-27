@@ -94,7 +94,7 @@ assert.match(reason(make(4, {account: 'me', accessScope: 'unknown', at: '2026-11
 assert.equal(decide(old, next, {keepSeparate: true}).action, 'separate');
 assert.equal(decide(old, next, {incomplete: ['x']}).action, 'separate');
 assert.match(reason({...old, account: undefined}, next), /account/); // unknown identity is never merged
-assert.equal(decide({...old, account: undefined}, next, {existingAccount: 'me'}).action, 'replace');
+assert.equal(decide({...old, account: undefined}, next, {existingAccount: 'me'}).action, 'separate');
 assert.match(reason({...old, account: 'other'}, next), /account/);
 assert.match(reason({...old, accessScope: 'public'}, next), /scope/);
 assert.match(reason({...old, coverage: 'complete'}, next), /coverage/);
@@ -106,14 +106,14 @@ for (const view of [{...U, filters: 'unknown'}, {...U, filters: 'active'}, {...U
   assert.match(reason(old, make(3, {account: 'me', at: '2026-11-26T03:00:00Z', view})), /not verified as default sort/);
 const legacy = {...old, diagnostics: {expectedCount: 4}}; // an older capture with no view evidence
 assert.match(reason(legacy, next), /no view evidence/);
-assert.equal(decide(legacy, next, {existingViewUnfiltered: true}).action, 'replace');
-// --existing-view only fills missing evidence; it never overrides explicitly conflicting recorded evidence.
+assert.equal(decide(legacy, next, {existingViewUnfiltered: true}).action, 'separate');
+// Retrospective assertions cannot supply or override capture-time view evidence.
 for (const view of [{...U, filters: 'active'}, {...U, sort: 'Name'}, {...U, search: 'active'}]) {
   const conflicted = {...old, diagnostics: {...old.diagnostics, view}};
   assert.match(reason(conflicted, next, {existingViewUnfiltered: true}), /non-default view/);
 }
-assert.equal(decide({...old, diagnostics: {...old.diagnostics, view: {...U, filters: 'unknown'}}}, next, {existingViewUnfiltered: true}).action, 'replace'); // unknown filters: user may fill
-// Existing files must be structurally sound but need no new diagnostics (historical v1 data stays usable).
+assert.equal(decide({...old, diagnostics: {...old.diagnostics, view: {...U, filters: 'unknown'}}}, next, {existingViewUnfiltered: true}).action, 'separate'); // later claims do not establish past evidence
+// Historical v1 data stays usable as separate evidence; it is not retroactively verified.
 assert.match(reason({...old, records: [old.records[0], {...old.records[0]}]}, next), /not a valid wishlist/); // duplicate AppID
 assert.match(reason({...old, records: [old.records[0], {...old.records[1], rank: 1}]}, next), /not a valid wishlist/); // duplicate rank
 assert.match(reason({...old, coverage: 'bogus'}, next), /not a valid wishlist/);
@@ -121,7 +121,7 @@ assert.match(reason({...old, warnings: undefined}, next), /not a valid wishlist/
 assert.match(reason({...old, method: ''}, next), /not a valid wishlist/);
 { const historical = {format: 'game-curator-steam-export', version: 1, source: 'wishlist', capturedAt: '2026-11-25T00:00:00Z', method: 'browser-dom', coverage: 'partial', warnings: [], diagnostics: {expectedCount: 4},
     accessScope: 'signed-in', account: 'me', records: old.records.map(({appid, name, pageText, membershipSource}) => ({appid, name, pageText, membershipSource}))};
-  assert.equal(decide(historical, next, {existingViewUnfiltered: true}).action, 'replace'); }
+  assert.equal(decide(historical, next, {existingViewUnfiltered: true}).action, 'separate'); }
 // Field loss is checked per label for retained AppIDs; one gained field cannot offset a lost one.
 {
   const a = make(0, {account: 'me', at: '2026-11-25T00:00:00Z', records: [row(1), row(2, {labels: ['RELEASE DATE:']})]});
@@ -133,7 +133,7 @@ assert.match(reason({...old, method: ''}, next), /not a valid wishlist/);
   const reviews = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [{...row(1), pageText: 'Game 1\nRELEASE DATE:\nx\nOVERALL REVIEWS:\nx\nUSER TAGS:\nx\nMY CATEGORIES:\nx'}, row(2, {labels: ['RELEASE DATE:']})]});
   assert.equal(decide(a, reviews).action, 'replace'); // English vs overall reviews wording is not a loss
 }
-assert.match(reason(old, next, {backupCount: MAX_BACKUPS}), /backups/);
+assert.equal(decide(old, next, {backupCount: MAX_BACKUPS}).action, 'replace');
 
 // Settings validation (fail closed) before any cache access.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-'));
@@ -167,6 +167,13 @@ const replaced = save(newer, dest);
 assert.equal(replaced.action, 'replace');
 assert.deepEqual(JSON.parse(fs.readFileSync(replaced.backup, 'utf8')), next);
 assert.equal(JSON.parse(fs.readFileSync(path.join(dest, 'wishlist.json'), 'utf8')).records.length, 2);
+const same = make(2, {account: 'me', at: '2026-11-26T04:30:00Z'});
+const beforeRefresh = list();
+const refreshed = save(same, dest);
+assert.equal(refreshed.action, 'refresh');
+assert.equal(refreshed.backup, null);
+assert.deepEqual(list(), beforeRefresh);
+assert.equal(JSON.parse(fs.readFileSync(refreshed.target, 'utf8')).capturedAt, same.capturedAt);
 assert.equal(list().filter(f => f.startsWith('.')).length, 0); // no temp or lock files left behind
 // Concurrent edit between decision and commit: the edit survives and the capture is kept separately.
 {
@@ -186,11 +193,11 @@ assert.equal(list().filter(f => f.startsWith('.')).length, 0); // no temp or loc
   const current = fs.readFileSync(path.join(dest, 'wishlist.json'), 'utf8');
   const filtered = make(2, {account: 'me', at: '2026-11-26T06:00:00Z', view: {...U, filters: 'unknown'}});
   const r = save(filtered, dest);
-  assert.equal(r.action, 'separate'); assert.match(r.target, /wishlist\.partial\.20261126T060000Z\.json$/);
+  assert.equal(r.action, 'separate'); assert.match(r.target, /wishlist\.managed-v1\.partial\.20261126T060000Z-[a-f0-9]{12}\.json$/);
   assert.equal(fs.readFileSync(path.join(dest, 'wishlist.json'), 'utf8'), current);
-  assert.throws(() => save(filtered, dest), /EEXIST/); // never overwrite a snapshot
-  assert.equal(save(filtered, dest, {dryRun: true}).action, 'separate');
-  assert.equal(save(make(2, {account: 'me', at: '2026-11-26T07:00:00Z'}), dest, {keepSeparate: true}).action, 'separate');
+  assert.equal(save(filtered, dest).action, 'duplicate'); // retain equivalent separate evidence only once
+  assert.equal(save(filtered, dest, {dryRun: true}).action, 'duplicate');
+  assert.equal(save(make(2, {account: 'me', at: '2026-11-26T07:00:00Z'}), dest, {keepSeparate: true}).action, 'duplicate');
 }
 // Consent is rechecked before anything is written: revocation between decision and commit stops the save.
 {
@@ -205,13 +212,13 @@ fs.writeFileSync(path.join(dest, '.wishlist.lock'), 'other');
 assert.throws(() => save(make(2, {account: 'me', at: '2026-11-26T08:00:00Z'}), dest), /EEXIST/);
 assert.ok(fs.existsSync(path.join(dest, '.wishlist.lock'))); // a lock this process did not take is not removed
 fs.unlinkSync(path.join(dest, '.wishlist.lock'));
-// Backups are bounded and never pruned automatically.
+// Legacy backup names remain untouched.
 {
   const count = () => fs.readdirSync(dest).filter(f => f.startsWith('wishlist.superseded.')).length;
   for (let i = count(); i < MAX_BACKUPS; i++) fs.writeFileSync(path.join(dest, `wishlist.superseded.2026010${i}T000000Z.json`), '{}');
   const before = count();
   const r = save(make(2, {account: 'me', at: '2026-12-01T00:00:00Z'}), dest);
-  assert.equal(r.action, 'separate'); assert.match(r.reason, /backups/);
+  assert.equal(r.action, 'refresh'); assert.match(r.reason, /equivalent/);
   assert.equal(count(), before); // nothing pruned automatically
 }
 fs.rmSync(tmp, {recursive: true});
@@ -289,7 +296,7 @@ fs.rmSync(tmp, {recursive: true});
   const stamped = {...dl, capturedAt: '2026-11-26T04:30:01.000Z'}; fs.writeFileSync(path.join(home2, 'x.json'), JSON.stringify(stamped));
   // malformed arguments are errors, never silently skipped
   for (const [label, args2, re] of [['summary not JSON', ['--provenance', 'download', '--page-summary', '{nope'], /not valid JSON/], ['summary without download provenance', ['--page-summary', sumArg], /applies only with --provenance download/],
-    ['unknown provenance', ['--provenance', 'trust-me'], /must be tool-result, download or hook-capture/], ['missing provenance value', ['--provenance'], /needs a value/], ['missing summary value', ['--provenance', 'download', '--page-summary'], /needs a value/]]) {
+    ['unknown provenance', ['--provenance', 'trust-me'], /must be tool-result, download, hook-capture or host-result/], ['missing provenance value', ['--provenance'], /needs a value/], ['missing summary value', ['--provenance', 'download', '--page-summary'], /needs a value/]]) {
     const r2 = run(dlFile, ...baseFlags, ...args2); assert.notEqual(r2.status, 0, label); assert.match(r2.stderr, re, label);
   }
   // an array-shaped file does not by itself establish tool-result provenance
@@ -426,8 +433,8 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   assert.equal(save(wl, dest2).target, path.join(dest2, 'wishlist.json'));
   const wlBefore = fs.readFileSync(path.join(dest2, 'wishlist.json'), 'utf8');
   const l1 = save(lold, dest2); assert.equal(l1.action, 'create'); assert.equal(l1.target, path.join(dest2, 'library.json'));
-  const l2 = save(lnext, dest2); assert.equal(l2.action, 'replace'); assert.match(path.basename(l2.backup), /^library\.superseded\.20261126T000000Z\.json$/);
-  const l3 = save(lib(4, {account: 'me', at: '2026-11-28T00:00:00.000Z', view: {tab: 'all', search: 'active'}}), dest2); assert.equal(l3.action, 'separate'); assert.match(path.basename(l3.target), /^library\.partial\.20261128T000000Z\.json$/);
+  const l2 = save(lnext, dest2); assert.equal(l2.action, 'replace'); assert.match(path.basename(l2.backup), /^library\.managed-v1\.superseded\.20261126T000000Z-[a-f0-9]{12}\.json$/);
+  const l3 = save(lib(4, {account: 'me', at: '2026-11-28T00:00:00.000Z', view: {tab: 'all', search: 'active'}}), dest2); assert.equal(l3.action, 'separate'); assert.match(path.basename(l3.target), /^library\.managed-v1\.partial\.20261128T000000Z-[a-f0-9]{12}\.json$/);
   assert.equal(fs.readFileSync(path.join(dest2, 'wishlist.json'), 'utf8'), wlBefore);
   assert.equal(fs.readdirSync(dest2).filter(f => f.startsWith('.')).length, 0);
   fs.rmSync(rootTmp, {recursive: true});
@@ -545,17 +552,18 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   assert.match(decideRaw(null, rev(4, {account: 'me', view: {kind: 'other'}}), {transferVerified: true}).reason, /not verified as the full "My reviews" list/);
   assert.match(reason({...rold, diagnostics: {...rold.diagnostics, view: undefined}}, rnext), /no view evidence/); // an older Codex baseline has no view evidence
   assert.match(reason({...rold, diagnostics: {...rold.diagnostics, view: {kind: 'other'}}}, rnext), /non-default view/);
-  const named = enrich(rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'}), libAccount('me')).env;
+  const namedResult = enrich(rev(5, {account: 'me', at: '2026-11-27T00:00:00.000Z'}), libAccount('me'));
+  const named = {...namedResult.env, diagnostics: {...namedResult.env.diagnostics, attestations: {enrichment: namedResult.enrichment}}};
   assert.deepEqual(fieldLosses(named, rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'})), {name: 1}); // un-enriched replacement would lose a name
   assert.match(reason(named, rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'})), /lose fields/);
-  assert.equal(decide(named, enrich(rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), libAccount('me')).env).action, 'replace');
+  assert.equal(decide(named, enrich(rev(5, {account: 'me', at: '2026-11-28T00:00:00.000Z'}), libAccount('me')).env).action, 'refresh');
   const rootR = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-rev-')), destR = path.join(rootR, 'game-curator', 'cache', 'steam'); fs.mkdirSync(destR, {recursive: true});
   fs.writeFileSync(path.join(rootR, 'game-curator', 'settings.json'), '{"version":1,"persistence":{"profileAndFeedback":false,"steamCache":true}}');
   const r1 = save(rold, destR); assert.equal(r1.target, path.join(destR, 'reviews.json'));
-  const r2 = save(rnext, destR); assert.equal(r2.action, 'replace'); assert.match(path.basename(r2.backup), /^reviews\.superseded\./);
+  const r2 = save(rnext, destR); assert.equal(r2.action, 'replace'); assert.match(path.basename(r2.backup), /^reviews\.managed-v1\.superseded\./);
   const partialRev = rev(4, {account: 'me', at: '2026-11-29T00:00:00.000Z', diag: {pagesPending: 1, complete: false, stopReason: 'budget'}});
   assert.equal(save(partialRev, destR, {incomplete: validate(partialRev, {accessScope: 'signed-in'}).incomplete}).action, 'separate'); // the CLI passes validate()'s incomplete reasons
-  assert.ok(fs.readdirSync(destR).some(f => /^reviews\.partial\./.test(f)));
+  assert.ok(fs.readdirSync(destR).some(f => /^reviews\.managed-v1\.partial\./.test(f)));
   fs.rmSync(rootR, {recursive: true});
   // end to end: simulated site -> navigations -> envelope -> CLI with enrichment from a library file
   {
