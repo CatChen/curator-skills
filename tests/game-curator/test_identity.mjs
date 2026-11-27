@@ -165,7 +165,7 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
 }
 
 // ---- D. settings v1 / v2 reader (fixtures; no production file is read)
-const goodV2 = (extra = {}) => ({version: 2, persistence: {profileAndFeedback: true, steamCache: true}, steamAccount: {alias: 'my-steam', fingerprint: {alg: BINDING_ALG, salt: SALT, value: VECTOR}, approvedAt: '2026-11-26T00:00:00Z'}, ...extra});
+const goodV2 = (extra = {}) => ({version: 2, persistence: {profileAndFeedback: true, steamCache: true}, steamAccount: {alias: 'my-steam', fingerprint: {alg: BINDING_ALG, salt: SALT, value: VECTOR}, approvedAt: '2026-11-26T00:00:00Z', generation: 'AAAAAAAAAAAAAAAAAAAAAA'}, ...extra});
 assert.deepEqual(parseSettings({version: 1, persistence: {profileAndFeedback: true, steamCache: false}}), {version: 1, persistence: {profileAndFeedback: true, steamCache: false}, steamAccount: null});
 assert.equal(parseSettings(goodV2()).steamAccount.alias, 'my-steam');
 assert.equal(parseSettings({version: 2, persistence: {profileAndFeedback: false, steamCache: true}}).steamAccount, null, 'v2 without a binding is valid');
@@ -179,6 +179,7 @@ const invalids = {
 for (const [name, bad] of Object.entries(invalids)) assert.throws(() => parseSettings(bad), /invalid|unsupported/, name);
 for (const [name, mutate] of Object.entries({
   'extra binding key': s => { s.steamAccount.steamid = ID_A; }, 'extra fingerprint key': s => { s.steamAccount.fingerprint.extra = 1; }, 'unsafe alias': s => { s.steamAccount.alias = '../x'; }, 'empty alias': s => { s.steamAccount.alias = ''; },
+  'missing generation': s => { delete s.steamAccount.generation; }, 'short generation': s => { s.steamAccount.generation = b64uEncode(new Uint8Array(15)); }, 'array generation': s => { s.steamAccount.generation = ['AAAAAAAAAAAAAAAAAAAAAA']; }, 'padded generation': s => { s.steamAccount.generation = 'AAAAAAAAAAAAAAAAAAAAAA=='; },
   'unknown alg': s => { s.steamAccount.fingerprint.alg = 'md5'; }, 'short salt': s => { s.steamAccount.fingerprint.salt = b64uEncode(new Uint8Array(15)); }, 'padded salt': s => { s.steamAccount.fingerprint.salt = SALT + '=='; },
   'array fingerprint value': s => { s.steamAccount.fingerprint.value = [VECTOR]; }, 'array alias': s => { s.steamAccount.alias = ['my-steam']; }, 'array salt': s => { s.steamAccount.fingerprint.salt = [SALT]; }, 'array time': s => { s.steamAccount.approvedAt = ['2026-11-26T00:00:00Z']; }, 'array alg': s => { s.steamAccount.fingerprint.alg = [BINDING_ALG]; },
   'uppercase value': s => { s.steamAccount.fingerprint.value = VECTOR.toUpperCase(); }, 'short value': s => { s.steamAccount.fingerprint.value = VECTOR.slice(1); }, 'bad time': s => { s.steamAccount.approvedAt = 'yesterday'; }, 'missing time': s => { delete s.steamAccount.approvedAt; },

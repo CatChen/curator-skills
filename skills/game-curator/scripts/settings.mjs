@@ -23,13 +23,14 @@ export const newSalt = () => b64uEncode(crypto.randomBytes(16));
 export const saltCheckOf = saltB64u => crypto.createHash('sha256').update(b64uDecode(saltB64u) ?? new Uint8Array()).digest('hex').slice(0, 8);
 
 export function parseSteamAccount(a) {
-  if (!isPlain(a) || !keysAre(a, ['alias', 'fingerprint', 'approvedAt'])) throw new Error('invalid steamAccount record');
+  if (!isPlain(a) || !keysAre(a, ['alias', 'fingerprint', 'approvedAt', 'generation'])) throw new Error('invalid steamAccount record');
   const f = a.fingerprint;
   if (typeof a.alias !== 'string' || !ALIAS.test(a.alias) || !isIso(a.approvedAt)) throw new Error('invalid steamAccount alias or timestamp');
   if (!isPlain(f) || !keysAre(f, ['alg', 'salt', 'value']) || f.alg !== BINDING_ALG || typeof f.value !== 'string' || !/^[0-9a-f]{64}$/.test(f.value)) throw new Error('invalid steamAccount fingerprint');
-  const salt = b64uDecode(f.salt);
+  const salt = b64uDecode(f.salt), generation = b64uDecode(a.generation);
   if (!salt || salt.length !== 16) throw new Error('invalid steamAccount salt');
-  return {alias: a.alias, approvedAt: a.approvedAt, fingerprint: {alg: f.alg, salt: f.salt, value: f.value}};
+  if (!generation || generation.length !== 16) throw new Error('invalid steamAccount generation');
+  return {alias: a.alias, approvedAt: a.approvedAt, generation: a.generation, fingerprint: {alg: f.alg, salt: f.salt, value: f.value}};
 }
 
 // Dispatch by version. Returns {version, persistence, steamAccount|null}. Never infers authorization for an unknown version.
