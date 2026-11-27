@@ -9,7 +9,9 @@ Without --evidence it looks for SNAPSHOT.json.evidence.json beside the snapshot.
 import hashlib
 import json
 import os
+import re
 import sys
+from datetime import datetime
 
 FORMAT = 'book-curator-amazon-content'
 SOURCE_TYPES = ('KindleEBook', 'KindleEBookSample', 'KindlePDoc')
@@ -26,18 +28,38 @@ def text(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+# Positive convention used by existing sidecars: the identity claim starts with "user-confirmed" and the
+# verification statement with "User confirmed". Anything else, or any negation, is unknown. This reads the
+# sidecar's own claim; no authentication is implied.
+CLAIM = re.compile(r'^user-confirmed\b', re.I)
+VERIFICATION = re.compile(r'^user confirmed\b', re.I)
+NEGATIVE = re.compile(r"\b(not|no|never|unable|cannot|unverified|unknown|unconfirmed|without)\b|n't", re.I)
+
+
+def valid_time(value):
+    if not text(value):
+        return False
+    try:
+        datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+        return True
+    except ValueError:
+        return False
+
+
 def identity(sidecar, associated):
-    """Association (integrity) is separate from recorded identity; unknown unless explicitly recorded."""
+    """Association (integrity) is separate from the sidecar's recorded identity claim; unknown otherwise."""
     if sidecar is None:
         return 'unknown', 'no-sidecar'
     if not associated:
         return 'unknown', 'sidecar-does-not-match-snapshot'
-    claim = sidecar.get('accountIdentity')
-    if not (text(sidecar.get('accountAlias')) and text(claim) and text(sidecar.get('accountVerification'))):
+    claim, verification = sidecar.get('accountIdentity'), sidecar.get('accountVerification')
+    if not (text(sidecar.get('accountAlias')) and text(claim) and text(verification)):
         return 'unknown', 'alias-or-verification-not-recorded'
-    if any(word in claim.lower() for word in ('unverified', 'unknown', 'not verified')):
-        return 'unknown', 'sidecar-states-identity-unverified'
-    return 'recorded', 'alias-and-verification-recorded'
+    if not (CLAIM.match(claim.strip()) and VERIFICATION.match(verification.strip())):
+        return 'unknown', 'unrecognized-evidence-convention'
+    if NEGATIVE.search(claim) or NEGATIVE.search(verification):
+        return 'unknown', 'evidence-contains-negative-statement'
+    return 'recorded', 'sidecar-claims-user-confirmation'
 
 
 def summarize(snapshot_path, evidence_path=None):
@@ -94,7 +116,7 @@ def summarize(snapshot_path, evidence_path=None):
         checks = {'digestMatches': sidecar.get('sha256') == digest,
                   'nameMatches': sidecar.get('snapshot') == os.path.basename(snapshot_path),
                   'categoryMatches': sidecar.get('category') == snap['category'],
-                  'capturedAtMatches': sidecar.get('capturedAt') == snap.get('capturedAt')}
+                  'capturedAtMatches': valid_time(snap.get('capturedAt')) and sidecar.get('capturedAt') == snap.get('capturedAt')}
         if not all(checks.values()):
             problems.append('evidence sidecar mismatch')
     state, reason = identity(sidecar, bool(checks) and all(checks.values()))
@@ -106,8 +128,9 @@ def summarize(snapshot_path, evidence_path=None):
         'displayedTotal': total, 'snapshotWarningCount': len(warnings) if isinstance(warnings, list) else None,
         'sha256': digest, 'evidenceAssociation': checks,
         'identity': state, 'identityReason': reason,
+        'scope': 'unknown', 'scopeReason': 'sidecar scope text is free-form and not verified here',
         'problems': problems,
-        'note': 'Historical capture; current Amazon access and freshness are not claimed. Association is integrity, not proof of account or scope; identity is "recorded" only when the sidecar states an alias and verification, and is never independently verified here.',
+        'note': 'Historical capture; current Amazon access and freshness are not claimed. Association is integrity, not proof of account or scope; identity is "recorded" only when the sidecar own claim and verification follow the recognized positive convention, is never independently verified here, and scope stays unknown.',
     }
 
 

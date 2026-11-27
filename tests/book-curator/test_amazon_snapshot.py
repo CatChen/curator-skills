@@ -69,11 +69,22 @@ class AmazonSnapshotTests(unittest.TestCase):
     def test_matching_association_without_verified_identity_stays_unknown(self):
         for name, override in [('null-alias', {'accountAlias': None}), ('no-alias', {'accountAlias': ''}),
                                ('no-verification', {'accountVerification': None}),
-                               ('unverified', {'accountIdentity': 'unverified account'})]:
+                               ('unverified', {'accountIdentity': 'unverified account'}),
+                               ('negated', {'accountVerification': 'User confirmed nothing; account not verified'}),
+                               ('unrecognized', {'accountIdentity': 'some identity', 'accountVerification': 'checked somehow'})]:
             report, _ = self.report(f'books-{name}.json', snapshot(), **override)
             self.assertTrue(all(report['evidenceAssociation'].values()), name)
             self.assertEqual(report['identity'], 'unknown', name)
             self.assertEqual(report['problems'], [], name)
+
+    def test_null_capture_time_never_matches_and_scope_is_unknown(self):
+        path, digest = self.write('books-t.json', snapshot(capturedAt=None))
+        self.evidence(path, digest, capturedAt=None)
+        report = json.loads(self.run_script(path).stdout)
+        self.assertFalse(report['evidenceAssociation']['capturedAtMatches'])
+        self.assertEqual(report['identity'], 'unknown')
+        good, _ = self.report('books-s.json', snapshot(), accessScope='visible category')
+        self.assertEqual((good['identity'], good['scope']), ('recorded', 'unknown'))
 
     def test_missing_or_mismatched_sidecar_means_unknown_identity(self):
         path, digest = self.write('books-y.json', snapshot())
