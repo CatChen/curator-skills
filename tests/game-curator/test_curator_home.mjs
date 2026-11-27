@@ -116,6 +116,11 @@ try {
   r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: linked}); assert.equal(r.status, 1); assert.match(r.stderr, /resolves outside that home/); assert.equal(fs.readdirSync(outside).length, 0);
   r = run(binder, ['status'], {CURATOR_HOME: linked}); assert.equal(r.status, 1);
 
+  // a dangling cache symlink is refused outright (never treated as a plain name), and nothing is created through it
+  const dangling = path.join(root, 'dangling-home'); fs.mkdirSync(path.join(dangling, 'cache'), {recursive: true}); fs.writeFileSync(path.join(dangling, 'settings.json'), settingsText()); const missingTarget = path.join(root, 'missing-target'); fs.symlinkSync(missingTarget, path.join(dangling, 'cache/steam'));
+  r = run(hook, [], {CURATOR_HOME: dangling}, payload(capture)); assert.match(ctx(r), /nothing was staged/); assert.ok(!fs.existsSync(missingTarget), 'nothing created through a dangling link');
+  r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: dangling}); assert.equal(r.status, 1); assert.match(r.stderr, /dangling symbolic link/); assert.ok(!fs.existsSync(missingTarget));
+
   // ---- direct API callers (no command-line wrapper): the selected-home boundary is enforced at the shared entry points, including rechecks
   const withEnv = (value, fn) => { const old = process.env.CURATOR_HOME; if (value === undefined) delete process.env.CURATOR_HOME; else process.env.CURATOR_HOME = value; try { return fn(); } finally { if (old === undefined) delete process.env.CURATOR_HOME; else process.env.CURATOR_HOME = old; } };
   const decoyCache = path.join(decoy, 'cache/steam'), decoySettings = path.join(decoy, 'settings.json'), customCache = path.join(custom, 'cache/steam'), customSettings = path.join(custom, 'settings.json');
@@ -128,6 +133,8 @@ try {
     assert.throws(() => planBinding(decoySettings, {op: 'revoke'}), refused); assert.throws(() => planPersistence(decoySettings, {steamCache: false}), refused);
     assert.ok(planPersistence(customSettings, {steamCache: false}).applied === false, 'the selected home\'s own settings are plannable');
     assert.throws(() => readVerifiedStaging(defaultStaged, decoyCache), refused);
+    assert.throws(() => readVerifiedStaging(defaultStaged, customCache, {defaultDest: decoyCache}), refused, 'an overriding defaultDest cannot reach the default home\'s staged pair');
+    assert.deepEqual(fs.readFileSync(defaultStaged), defaultStagedBytes);
     assert.match(handleHook(JSON.parse(payload(capture)), {dest: decoyCache, settings: decoySettings}), /nothing was staged/);
     assert.match(handleHook(JSON.parse(payload(capture)), {dest: decoyCache}), /nothing was staged/);
     assert.equal(staged(decoy).length, 1, 'only the pre-existing staged pair is in the default home');

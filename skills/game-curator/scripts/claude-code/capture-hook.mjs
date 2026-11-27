@@ -112,7 +112,7 @@ function prune(dir, now) {
 }
 
 // Decide and act on one hook payload. Returns the additionalContext text to show the model, or null to stay silent.
-export function handleHook(payload, {dest, settings, skillDir = here, now = Date.now(), processEnv = process.env, homedir = os.homedir()} = {}) {
+export function handleHook(payload, {dest, settings, skillDir = here, now = Date.now()} = {}) {
   if (!payload || payload.hook_event_name !== 'PostToolUse' || !HOOK_TOOLS.includes(payload.tool_name)) return null;
   const call = identifyCall(payload.tool_input, skillDir);
   if (!call) {
@@ -133,7 +133,7 @@ export function handleHook(payload, {dest, settings, skillDir = here, now = Date
   if (errors.length) return refuse(`it failed validation: ${errors.slice(0, 3).join('; ')}`);
   // The Curator Home is resolved HERE, from the process environment only (default home, or CURATOR_HOME as Claude Code's `env` setting provides it to hooks):
   // never from the page or the envelope, and a selected home that is unusable stops the hook instead of falling back to the default.
-  if (dest === undefined) { try { dest = resolveCuratorHome({env: processEnv, homedir}).cache; } catch (e) { return refuse(String(e.message ?? e)); } }
+  if (dest === undefined) { try { dest = resolveCuratorHome().cache; } catch (e) { return refuse(String(e.message ?? e)); } }
   try { checkCacheAuthorized(dest, settings); } catch (e) { return refuse(String(e.message ?? e).replace(/^Cache not authorized: /, 'cache not authorized: ')); }
   const dir = privateDir(path.join(dest, STAGING_DIR));
   prune(dir, now);

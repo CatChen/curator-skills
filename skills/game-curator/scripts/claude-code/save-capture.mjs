@@ -559,12 +559,14 @@ const HOOK_META_KEYS = ['bytes', 'call', 'capturedAt', 'deliver', 'kind', 'scrip
 // still the verified one. Throws on any mismatch.
 export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest = resolveCuratorHome().cache, authorize = () => {}} = {}) {
   guardSelectedHome({dest}); // before the staged file is looked at
+  guardSelectedHome({dest: defaultDest}); // an overriding defaultDest cannot name another home while one is selected
   const real = p => fs.realpathSync(p);
   const name = path.basename(file);
   if (!/^gc-[a-z]+-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$/.test(name)) throw new Error('hook-capture: unexpected staged file name');
   let dir; try { dir = real(path.dirname(file)); } catch { throw new Error('hook-capture: the staged file does not exist'); }
-  // The hook stages under the default cache location it is authorized for; a saver run against another destination (for example a private
-  // scratch cache) may still consume it, but only while that default location's own consent holds too (checked by the caller from `root`).
+  // The hook stages under the SELECTED home's cache (the default home unless CURATOR_HOME names another). With no selected home a saver run against
+  // another destination (for example a private scratch cache) may still consume a staged file from the default cache, but only while that default
+  // location's own consent holds too (checked by the caller from `root`); while a custom home is selected, only that home's staging is eligible.
   const root = [dest, defaultDest].find(d => { try { return fs.existsSync(d) && path.join(real(d), STAGING_DIR) === dir; } catch { return false; } });
   if (root === undefined) throw new Error('hook-capture: the file is not in the skill\'s private staging directory');
   const sd = fs.lstatSync(dir);
@@ -843,7 +845,7 @@ if (isMain()) {
       if (file === '-') throw new Error('--provenance hook-capture needs the staged file path, not stdin');
       // A staged file is data the skill retained under the cache consent of the home that staged it. That home's OWN settings.json must authorize
       // it before either file is opened (and again before the commit), in addition to the destination's: neither `--settings` nor a destination that
-      // is another spelling of the standard home can stand in for it.
+      // is another spelling of the selected home can stand in for it.
       sourceConsent = root => {
         const r = path.resolve(root);
         if (realOrSelf(r) === realOrSelf(defaultCache)) checkCacheAuthorized(defaultCache); // the standard home: its own settings.json, never --settings

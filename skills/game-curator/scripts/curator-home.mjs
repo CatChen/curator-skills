@@ -34,7 +34,16 @@ export function resolveCuratorHome({env = process.env, homedir = os.homedir()} =
 // resolve (through a symbolic link) to somewhere outside the home.
 export function assertWithinSelectedHome(selected, {dest, settings} = {}) {
   if (selected.source !== 'env') return;
-  const real = p => { let q = path.resolve(p); const tail = []; while (!fs.existsSync(q)) { tail.unshift(path.basename(q)); q = path.dirname(q); } return path.join(fs.realpathSync(q), ...tail); };
+  // Resolve through symbolic links; a dangling link (a link whose target is missing) is an error, never treated as a plain name.
+  const real = p => {
+    let q = path.resolve(p); const tail = [];
+    for (;;) {
+      let st; try { st = fs.lstatSync(q); } catch { const up = path.dirname(q); if (up === q) break; tail.unshift(path.basename(q)); q = up; continue; }
+      if (st.isSymbolicLink() && !fs.existsSync(q)) throw new CuratorHomeError('a path resolves through a dangling symbolic link; refusing to use it');
+      break;
+    }
+    return path.join(fs.realpathSync(q), ...tail);
+  };
   const homeReal = real(selected.home), cacheReal = real(selected.cache);
   if (cacheReal !== homeReal && !cacheReal.startsWith(homeReal + path.sep)) throw new CuratorHomeError('the selected Curator Home\'s cache directory resolves outside that home (a symbolic link); refusing to use it');
   if (dest !== undefined && real(dest) !== cacheReal) throw new CuratorHomeError('CURATOR_HOME selects a custom Curator Home: --dest must be omitted or be that home\'s own cache/steam directory');
