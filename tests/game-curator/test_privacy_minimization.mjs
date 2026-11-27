@@ -46,8 +46,8 @@ try {
   assert.ok(!('urlPath' in min.diagnostics)); assert.deepEqual(min.records, library.records);
   assert.ok(library.diagnostics.urlPath, 'the input is not mutated');
   // The Claude Code page script also records the list path; both go.
-  const both = minimizeForStorage({source: 'reviews', diagnostics: {urlPath: `/id/${VANITY}/recommended`}, records: [{appid: 1, reviewUrl: `https://steamcommunity.com/id/${VANITY}/recommended/1/`, review: 'x'}]});
-  assert.ok(!JSON.stringify(both).includes(VANITY)); assert.deepEqual(both.diagnostics.attestations.minimized.omitted, ['diagnostics.urlPath', 'records[].reviewUrl']);
+  const both = minimizeForStorage({source: 'reviews', diagnostics: {urlPath: `/id/${VANITY}/recommended`, viewAtStop: {path: `/id/${VANITY}/recommended`, pageKey: `https://steamcommunity.com/id/${VANITY}/recommended?p=2`}}, records: [{appid: 1, reviewUrl: `https://steamcommunity.com/id/${VANITY}/recommended/1/`, review: 'x'}]});
+  assert.ok(!JSON.stringify(both).includes(VANITY)); assert.deepEqual(both.diagnostics.attestations.minimized.omitted, ['diagnostics.urlPath', 'diagnostics.viewAtStop', 'records[].reviewUrl']);
   // Nothing to omit: unchanged, with no attestation noise.
   assert.deepEqual(minimizeForStorage({source: 'wishlist', diagnostics: {}, records: []}), {source: 'wishlist', diagnostics: {}, records: []});
   console.log('privacy minimization ok');
