@@ -9,6 +9,8 @@ import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprin
 import {parseSettings, fingerprintSync, newSalt, saltCheckOf, BINDING_ALG} from '../../skills/game-curator/scripts/settings.mjs';
 import {parseCacheSettings, checkCacheAuthorized} from '../../skills/game-curator/scripts/cache.mjs';
 import {collectIdentity} from '../../skills/game-curator/scripts/browser/steam.mjs';
+import {buildCodexIdentity, buildPathFingerprint} from '../../skills/game-curator/scripts/browser/build-codex-identity.mjs';
+import {checkBindProbe} from '../../skills/game-curator/scripts/bind-account.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
 const ID_A = '76561197960278073', ACC_A = 12345, ID_B = '76561197960320049', ACC_B = 54321; // synthetic
@@ -154,18 +156,49 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
 // ---- Codex collector: same fingerprints, and an honest unobserved result when the runtime refuses page evaluation (fixture; the real Codex runtime is exercised live)
 {
   const e = env({userConfig: uc(ID_A, ACC_A)});
-  const tab = {playwright: {evaluate: async fn => {
-    const ctx = vm.createContext({window: e.win, document: e.doc, location: e.loc, crypto: globalThis.crypto, TextEncoder, btoa, atob, JSON, Object, Array, Error, Promise, Uint8Array, BigInt, String, Number, Math, Set, Map, RegExp});
-    ctx.UserConfig = e.win.UserConfig;
-    return j(await vm.runInContext('(' + fn.toString() + ')()', ctx));
+  const tab = {playwright: {evaluate: async (fn,input) => {
+    const ctx = vm.createContext({window: e.win, document: e.doc, location: e.loc, crypto: undefined, TextEncoder: undefined, btoa: undefined, atob: undefined, Uint8Array: undefined, BigInt: undefined, input});
+    return j(await vm.runInContext('(' + fn.toString() + ')(input)', ctx));
   }}};
+  const probeFixture = async e2 => {
+    const tab2 = {playwright:{evaluate:async (fn,input)=>{
+      const ctx = vm.createContext({window:e2.win,document:e2.doc,location:e2.loc,crypto:undefined,TextEncoder:undefined,btoa:undefined,atob:undefined,Uint8Array:undefined,BigInt:undefined,input});
+      return j(await vm.runInContext('(' + fn.toString() + ')(input)',ctx));
+    }}};
+    const got = j(await collectIdentity(tab2,{salt:SALT}));
+    assert.equal(got.available,true); delete got.available;
+    assert.deepEqual(got,j(await observeIdentity({salt:SALT},e2)));
+    return got;
+  };
+  for (const [id,account,expected] of [
+    ['76561197960265728',0,'b4d6ea67741358a8b9d6a1f9d862aa96d6d3c35aa0afb4abd712229c6f19b250'],
+    ['76561202255233023',4294967295,'7cb9725bba8f9dd849c8bfb57dfd41fd5597c4b60272ca4294f9cc7080c160e0'],
+  ]) assert.equal((await probeFixture(env({userConfig:uc(id,account)}))).sessionFingerprint,expected);
+  for (const n of [1,255,65536,999999999,1234567890,4294967294]) {
+    const id = (76561197960265728n + BigInt(n)).toString();
+    const got = await probeFixture(env({userConfig:uc(id,n)}));
+    assert.equal(got.sessionFingerprint,fingerprintSync(SALT,id));
+  }
+  for (const e2 of [env({}),env({userConfig:uc(ID_A,ACC_B)}),env({userConfig:{logged_in:false,steamid:ID_A,accountid:ACC_A}}),env({rawAttr:'{'}),env({userConfig:uc(ID_A,ACC_A),g:ID_B}),env({g:ID_A,pathname:'/profiles/'+ID_B+'/games'})]) await probeFixture(e2);
+  const throwing = uc(ID_A,ACC_A); Object.defineProperty(throwing,'steamid',{get(){throw Error('SECRET');}});
+  const thrown = await probeFixture(env({userConfig:throwing})); assert.ok(thrown.problems.includes('unreadable-marker')); assert.ok(!JSON.stringify(thrown).includes('SECRET'));
   const r = j(await collectIdentity(tab, {salt: SALT}));
   assert.equal(r.available, true); assert.equal(r.sessionFingerprint, VECTOR); leak(r);
-  const c = j(await collectIdentity(tab, {candidate: true})); assert.equal(c.sessionFingerprint, fingerprintSync(c.salt, ID_A));
+  const c = j(await collectIdentity(tab, {candidate: true})); assert.equal(c.sessionFingerprint, fingerprintSync(c.salt, ID_A)); assert.equal(c.origin, e.loc.origin); assert.deepEqual(checkBindProbe(c), []);
+  assert.ok(checkBindProbe({...c, origin: 'https://example.invalid'}).length);
+  assert.ok(checkBindProbe({...c, origin: undefined}).length);
+  const foreignEnv = env({userConfig: uc(ID_A, ACC_A)}); foreignEnv.loc.origin = 'https://private.example.invalid';
+  const foreign = await collectIdentity({playwright:{evaluate:async (fn,input) => { const ctx = vm.createContext({window:foreignEnv.win, document:foreignEnv.doc, location:foreignEnv.loc,input}); return j(await vm.runInContext('(' + fn.toString() + ')(input)',ctx)); }}},{candidate:true});
+  assert.equal(foreign.origin, undefined); assert.ok(checkBindProbe(foreign).length);
+  let originReads = 0;
+  const changingLoc = {get origin() { return ++originReads < 3 ? 'https://store.steampowered.com' : 'https://steamcommunity.com'; }, pathname:'/'};
+  const changedOrigin = await collectIdentity({playwright:{evaluate:async (fn,input) => { const ctx=vm.createContext({window:e.win,document:e.doc,location:changingLoc,input}); return j(await vm.runInContext('(' + fn.toString() + ')(input)',ctx)); }}},{candidate:true});
+  assert.equal(changedOrigin.available,false);
+
   assert.deepEqual(j(await collectIdentity({}, {salt: SALT})), {available: false, reason: 'no read-only page evaluation in this runtime'});
   const refused = j(await collectIdentity({playwright: {evaluate: async () => { throw new Error('evaluation is not permitted SECRET'); }}}, {salt: SALT}));
   assert.equal(refused.available, false); assert.ok(!('sessionFingerprint' in refused)); assert.equal(refused.reason, 'page evaluation was refused or failed'); assert.ok(!JSON.stringify(refused).includes('SECRET'), 'runtime exception text is never returned');
-  const nosalt = j(await collectIdentity({playwright: {evaluate: async fn => { const ctx = vm.createContext({crypto: globalThis.crypto, TextEncoder, btoa, atob, window: {}, document: e.doc, location: e.loc, Error, Promise, JSON}); return j(await vm.runInContext('(' + fn.toString() + ')()', ctx)); }}}, {}));
+  const nosalt = j(await collectIdentity({playwright: {evaluate: async (fn,input) => { const ctx = vm.createContext({window: {}, document: e.doc, location: e.loc,input}); return j(await vm.runInContext('(' + fn.toString() + ')(input)', ctx)); }}}, {}));
   assert.equal(nosalt.available, false, 'neither salt nor candidate: refused, never a guess');
 }
 
@@ -205,3 +238,6 @@ assert.ok(!JSON.stringify(parseSettings(goodV2())).includes(ID_A), 'no identifie
 }
 
 console.log('identity core fixture checks passed');
+
+assert.equal(fs.readFileSync(new URL('../../skills/game-curator/scripts/browser/codex-identity-page.mjs',import.meta.url),'utf8'),buildCodexIdentity(),'generated Codex identity callback is current');
+assert.equal(fs.readFileSync(new URL('../../skills/game-curator/scripts/browser/path-fingerprint.mjs',import.meta.url),'utf8'),buildPathFingerprint(),'generated Codex path callback is current');

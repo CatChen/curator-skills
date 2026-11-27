@@ -43,7 +43,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import {normalizeLibraryRecord} from '../browser/library-rows.mjs';
-import {equivalentRecords, textCoverageLost} from '../cache-semantics.mjs';
+import {equivalentRecords, textCoverageLost, stable} from '../cache-semantics.mjs';
 
 export const MAX_BACKUPS = 2; // Only backups created under the managed-v1 namespace are rotated.
 export const MAX_SEPARATE = 5;
@@ -275,8 +275,8 @@ export function canonicalize(env) {
 // Validate the fields it actually emitted; missing completeness, owner and view
 // observations remain explicit gaps and can never authorize promotion.
 function validateCodex(env, {account, accessScope, incoming}) {
-  const errors = [], incomplete = ['Codex capture lacks verified enumeration, owner or view evidence'];
-  const rules = SOURCES[env.source];
+  const errors = [], incomplete = [];
+  const rules = SOURCES[env.source], d = env.diagnostics ?? {};
   const envelopeValid = rules && env.format === 'game-curator-steam-export' && env.version === 1 && isIso(env.capturedAt)
     && ['partial', 'complete'].includes(env.coverage) && Array.isArray(env.warnings) && env.warnings.every(w => typeof w === 'string')
     && isPlainObject(env.diagnostics) && Array.isArray(env.records);
@@ -291,8 +291,20 @@ function validateCodex(env, {account, accessScope, incoming}) {
   }
   if (account !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(account)) errors.push('unsafe account alias');
   if (!['signed-in', 'public', 'unknown'].includes(accessScope)) errors.push('invalid access scope');
-  if (accessScope === 'signed-in') errors.push('signed-in scope cannot be established from this Codex capture');
+  if (accessScope === 'signed-in' && (d.recordsChecksum === undefined || rules?.ownerEvidence?.(d) !== true)) (incoming ? errors : incomplete).push('signed-in scope cannot be established from this Codex capture without host checksum and owner evidence');
   if (incoming && env.diagnostics?.attestations) errors.push('a page transfer must not carry diagnostics.attestations');
+  const hostChecksum = env.diagnostics?.recordsChecksum;
+  if (hostChecksum !== undefined) {
+    if (!isPlainObject(hostChecksum) || Object.keys(hostChecksum).sort().join(',') !== 'scope,sha256' || hostChecksum.scope !== 'host-records' || typeof hostChecksum.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(hostChecksum.sha256)) errors.push('invalid host records checksum');
+    else if (env.source === 'replay' && env.diagnosticsScope === 'original-multi-year-capture') {
+      // The host checksum describes the original multi-year capture. A split file
+      // retains it as context and verifies its own single record separately.
+      const split = env.diagnostics?.attestations?.split;
+      if (!Array.isArray(env.records) || env.records.length !== 1 || !isPlainObject(split) || split.year !== env.records[0]?.year || typeof split.recordSha256 !== 'string' || sha256(JSON.stringify(env.records[0])) !== split.recordSha256) errors.push('Replay split record checksum mismatch');
+      const years = env.diagnostics?.years;
+      if (!Array.isArray(years) || !years.every(y => Number.isInteger(y) && y >= 2000 && y <= 2099) || new Set(years).size !== years.length || !years.includes(split?.year) || !Number.isSafeInteger(split?.originalRecords) || split.originalRecords !== years.length || env.diagnostics?.uniqueCount !== years.length) errors.push('Replay split original-capture metadata is inconsistent');
+    } else if (!Array.isArray(env.records) || sha256(JSON.stringify(stable(rules?.observedRecords ? rules.observedRecords(env.records) : env.records))) !== hostChecksum.sha256) errors.push('host records checksum mismatch');
+  }
   if (rules && Array.isArray(env.records)) {
     const keys = new Set(rules.recordOrder);
     env.records.forEach((r, i) => {
@@ -300,6 +312,30 @@ function validateCodex(env, {account, accessScope, incoming}) {
       for (const k of Object.keys(r)) if (!keys.has(k)) errors.push(`record ${i} has unexpected field ${k}`);
       rules.validateKey?.(r, i, errors); rules.validateRecord(r, i, errors, env);
     });
+  }
+  // Evidence determines completeness independently of the separate transfer gate.
+  const recs = Array.isArray(env.records) ? env.records : [];
+  const splitReplayCapture = env.source === 'replay' && env.diagnosticsScope === 'original-multi-year-capture';
+  const originalCount = splitReplayCapture ? d.years?.length : recs.length;
+  if (!hostChecksum || d.complete !== true || d.stopReason !== 'complete') incomplete.push('Codex capture lacks complete enumeration and host integrity evidence');
+  if (!Number.isSafeInteger(originalCount) || originalCount < 1 || d.uniqueCount !== originalCount || d.expectedCount !== originalCount) incomplete.push('displayed count and collected records are not verified');
+  if ((env.source === 'library' || env.source === 'wishlist') && d.pathChecked !== true) incomplete.push('source page path continuity is not verified');
+  if (env.source === 'wishlist' && (!Number.isSafeInteger(d.ranksObserved) || d.ranksObserved !== recs.length || d.placeholderNameRows !== 0 || !Array.isArray(d.missingRanks) || d.missingRanks.length || !recs.every((r,i)=>r.rank === i+1))) incomplete.push('wishlist ranks or loaded rows are incomplete');
+  if (env.source === 'reviews') {
+    if (d.boxesVerified !== true || !Number.isSafeInteger(d.pagesVisited) || d.pagesVisited < 1 || d.pagesPending !== 0 || !Number.isSafeInteger(d.pageAttempts) || d.pageAttempts < d.pagesVisited) incomplete.push('review pagination or row coverage is not verified');
+    const parents = new Set(recs.map(r => typeof r?.reviewUrl === 'string' ? r.reviewUrl.replace(/\/\d+\/?$/, '') : null));
+    if (parents.size !== 1 || parents.has(null)) incomplete.push('review records do not establish one collected list');
+  }
+  if (env.source === 'replay' && (d.yearsPending !== 0 || !Array.isArray(d.unsettledYears) || d.unsettledYears.length || !Array.isArray(d.truncatedYears) || d.truncatedYears.length || !Array.isArray(d.ownerYears) || d.ownerYears.length !== originalCount || new Set(d.ownerYears.map(y=>y?.year)).size !== originalCount || !d.ownerYears.every(y => y.ownerControls === true && d.years?.includes(y.year)))) incomplete.push('Replay coverage or per-year ownership is not verified');
+  if (d.identity !== undefined) errors.push(...checkObservation(d.identity));
+  if (rules && !rules.viewOk(env)) incomplete.push('the source view is not verified');
+  if (env.source === 'reviews' && Array.isArray(env.records)) {
+    const named = env.records.filter(r => r && ('name' in r || 'nameSource' in r)).length, e = env.diagnostics?.attestations?.enrichment;
+    if (incoming && named) errors.push('a page transfer must not carry game names; names are added only by the verified enrichment step');
+    else if (named && !(isPlainObject(e) && e.namedRecords === named && typeof e.librarySha256 === 'string' && /^[0-9a-f]{64}$/.test(e.librarySha256) && e.names === 'verified-library-capture')) {
+      if (hostChecksum !== undefined) errors.push('names are present without a matching verified enrichment attestation bound to a library snapshot');
+      else incomplete.push('legacy review names lack a verified enrichment attestation');
+    }
   }
   return {errors, incomplete};
 }
@@ -310,7 +346,9 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
   const errors = [], incomplete = [];
   const known = new Set(ENVELOPE_ORDER);
   if (!isPlainObject(env)) return {errors: ['not an object'], incomplete};
-  if (env.method === 'browser-dom' && !env.diagnostics?.recordsSha256) return validateCodex(env, {account, accessScope, incoming});
+  if (env.diagnostics?.recordsChecksum !== undefined && env.method !== 'browser-dom') return {errors: ['host records checksum is incompatible with the capture method'], incomplete};
+  if (env.method === 'browser-dom' && env.diagnostics?.recordsSha256 !== undefined) return {errors: ['page records checksum is incompatible with browser-dom captures'], incomplete};
+  if (env.method === 'browser-dom') return validateCodex(env, {account, accessScope, incoming});
   for (const k of Object.keys(env)) if (!known.has(k)) errors.push(`unexpected envelope field: ${k}`);
   if (env.format !== 'game-curator-steam-export' || env.version !== 1) errors.push('unsupported format/version');
   const cfg = SOURCES[env.source];
@@ -458,6 +496,7 @@ const VERIFIED_TRANSFER_LEVELS = new Set(['runtime-tool-result', 'hook-tool-resp
 const verifiedTransfer = env => {
   const t = env?.diagnostics?.attestations?.transfer;
   if (!t || !VERIFIED_TRANSFER_LEVELS.has(t.level)) return false;
+  if (env?.method === 'browser-dom') return false; // Codex host-result files do not become verified by relabeling their transfer.
   const expected = t.level === 'runtime-tool-result' ? 'tool-result' : t.level === 'hook-tool-response' ? 'hook-capture' : 'download';
   if (t.provenance !== expected || !Number.isSafeInteger(t.receivedBytes) || t.receivedBytes < 0 || !/^[a-f0-9]{64}$/.test(t.localSha256Fingerprint ?? '') || !['matched', 'unavailable'].includes(t.sourceDigest)) return false;
   if (t.level === 'download-summary-and-source-digest' && t.sourceDigest !== 'matched') return false;
@@ -807,8 +846,11 @@ export function splitReplay(env) {
   // Each annual file carries ONLY the identity observation made on its own report page (plus the run's continuity), never another year's.
   const {identityYears, identity: runIdentity, ...baseDiag} = env.diagnostics ?? {};
   const own = year => { const e = Array.isArray(identityYears) ? identityYears.find(x => x?.year === year) : null; if (!e) return {}; const {year: y, ...obs} = e; return {identity: {...obs, ...(runIdentity?.continuity ? {continuity: runIdentity.continuity} : {})}}; };
-  return [...records].sort((a, b) => a.year - b.year).map(r => canonicalize({...rest, diagnosticsScope: 'original-multi-year-capture', records: [r],
-    diagnostics: {...baseDiag, ...own(r.year), attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(r)), originalRecords: n}}}}));
+  return [...records].sort((a, b) => a.year - b.year).map(r => {
+    const canonicalRecord = canonicalize({...rest, records: [r]}).records[0];
+    return canonicalize({...rest, diagnosticsScope: 'original-multi-year-capture', records: [canonicalRecord],
+      diagnostics: {...baseDiag, ...own(r.year), attestations: {...env.diagnostics.attestations, split: {year: r.year, recordSha256: sha256(JSON.stringify(canonicalRecord)), originalRecords: n}}}});
+  });
 }
 
 // True only when this file is the process entry point, including when invoked through a symlink or a path

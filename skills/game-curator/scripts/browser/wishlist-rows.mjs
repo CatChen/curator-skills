@@ -19,7 +19,11 @@ export function snapshotWishlist() {
     rows.push({appid: Number(m[1]), rank: Number(m[2]) + 1, name: link?.innerText.trim() || raw.split('\n')[0] || null,
       pageText: raw, membershipSource: 'wishlist-row', complete: !!link});
   }
-  return {expected: count ? Number(count[1].replace(/,/g, '')) : null, rows};
+  const sort = [...document.querySelectorAll('button')].find(b => /^Sort by:/i.test(b.innerText.trim()));
+  const box = document.querySelector?.('input[placeholder*="Search by name"]');
+  return {expected: count ? Number(count[1].replace(/,/g, '')) : null, rows,
+    view: {sort: sort ? sort.innerText.replace(/^Sort by:\s*/i, '').trim() : null,
+      search: box ? (box.value.trim() ? 'active' : 'empty') : 'unknown', filters: 'unknown'}, reorderHandles: rows.length > 0};
 }
 
 // Merge one observed row into a Map keyed by AppID. A loaded row is never replaced by a placeholder,

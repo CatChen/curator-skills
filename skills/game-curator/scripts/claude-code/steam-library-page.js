@@ -32,7 +32,10 @@ await (window.__gcLibraryRun = async (opts = {}) => {
       if (!rows.has(id)) rows.set(id, {appid: id, name, pageText: row.innerText.trim(), membershipSource: 'all-games-row'});
       else if (!rows.get(id).name && name) rows.get(id).name = name;
     }
-    return {expected: count ? Number(count[1].replace(/,/g, '')) : null, records: [...rows.values()]};
+    const box = document.querySelector?.('input[placeholder="Find a game"]');
+    const tab = /(?:^|[?&])tab=([^&]*)/.exec(location.search || '');
+    return {expected: count ? Number(count[1].replace(/,/g, '')) : null, records: [...rows.values()],
+      view: {tab: tab ? tab[1] : null, search: box ? (box.value.trim() ? 'active' : 'empty') : 'unknown', language: document.documentElement?.lang || null}};
   }
   function libraryLabelCount(record) {
     const n = normalizeLibraryRecord(record);
