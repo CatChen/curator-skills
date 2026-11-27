@@ -289,6 +289,37 @@ try {
     }
   }
 
+  { // known observations win over missing continuity; a run that changed identity can never become a manual fallback; late identity is never retroactive
+    const h = home(), b = bindAs(h), salt = b.salt, mk = (o = {}) => { const x = obs(b, ID_A, o); return x; };
+    const noCont = id => { const o = obs(b, id); delete o.continuity; return o; };
+    const binding = settingsOf(h).steamAccount;
+    assert.equal(evaluateIdentity({binding, observation: noCont(ID_B), ownerEvidence: true}).result, 'mismatch', 'a mismatch is not hidden by missing continuity');
+    const contra = noCont(ID_A); contra.pathFingerprint = fingerprintSync(salt, ID_B);
+    assert.deepEqual([evaluateIdentity({binding, observation: contra, ownerEvidence: true}).result, evaluateIdentity({binding, observation: contra, ownerEvidence: true}).ownership], ['ambiguous', 'contradicted']);
+    assert.equal(evaluateIdentity({binding, observation: noCont(ID_A), ownerEvidence: true}).result, 'unobserved', 'no continuity and no conflict: still only unobserved');
+    const gone = [['final observation failed', mk({continuity: {checks: 3, stable: false, broke: true, covered: true}, error: 'observation-failed', loggedIn: null, sessionFingerprint: null, consistent: false, owner: null})],
+      ['final page has no markers', mk({continuity: {checks: 3, stable: false, broke: true, covered: true}, loggedIn: null, sessionFingerprint: null})], ['final page signed out', mk({continuity: {checks: 3, stable: false, broke: true, covered: true}, loggedIn: false, sessionFingerprint: null})]];
+    for (const [name, identity] of gone) {
+      assert.equal(evaluateIdentity({binding, observation: identity, ownerEvidence: true}).result, 'ambiguous', name);
+      const r = runSaver(h, capture('2026-03-01T00:00:00Z', {identity}), []); assert.equal(r.json.action, 'separate', name);
+      assert.equal(runSaver(h, capture('2026-03-02T00:00:00Z', {identity}), ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1, name + ': no manual fallback');
+      fs.readdirSync(h.dest).filter(n => n.includes('.partial.')).forEach(n => fs.unlinkSync(path.join(h.dest, n)));
+    }
+    const stopped = capture('2026-03-03T00:00:00Z'); stopped.diagnostics.stopReason = 'identity-changed'; stopped.diagnostics.complete = false;
+    assert.equal(evaluateIdentity({binding, observation: undefined, ownerEvidence: true, identityChanged: true}).result, 'ambiguous');
+    assert.equal(runSaver(h, stopped, ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1, 'stopReason identity-changed without any observation is not a manual fallback');
+    const late = mk({continuity: {checks: 3, stable: true, broke: false, covered: false}});
+    assert.equal(evaluateIdentity({binding, observation: late, ownerEvidence: true}).result, 'unobserved', 'identity added on a resume call is not attested for earlier batches');
+    assert.match(runSaver(h, capture('2026-03-04T00:00:00Z', {identity: late}), []).json.reason, /not observed|not confirmed/);
+    // a malformed observation is rejected before it is consumed: never downgraded to unobserved and then confirmed manually
+    const bad = {...obs(b, ID_A), sessionFingerprint: [obs(b, ID_A).sessionFingerprint]};
+    assert.throws(() => save(Object.assign(capture('2026-03-05T00:00:00Z', {identity: bad}), {accessScope: 'signed-in'}), h.dest, {dryRun: true, transferVerified: true, manualAccount: 'my-steam'}), /Invalid capture/);
+    // a probe without an origin is not a binding candidate; a symlinked settings.json is edited through the link
+    assert.throws(() => planBinding(h.file, {op: 'change', probe: {...probeFor(ID_B), origin: undefined}, alias: 'x'}), /supported Steam origin/);
+    const h2 = home(), real = path.join(h2.root, 'real-settings.json'); fs.renameSync(h2.file, real); fs.symlinkSync(real, h2.file);
+    approve(h2.file, {op: 'bind', probe: probeFor(ID_A), alias: 'a'}); assert.ok(fs.lstatSync(h2.file).isSymbolicLink(), 'the link survives'); assert.equal(readSettingsFile(real).settings.steamAccount.alias, 'a');
+  }
+
   // ---- policy unit checks
   {
     const salt = newSalt(), binding = parseSettings({version: 2, persistence: {profileAndFeedback: true, steamCache: true}, steamAccount: {alias: 'a', approvedAt: '2026-01-01T00:00:00Z', generation: newSalt(), fingerprint: {alg: 'sha256-salted-v1', salt, value: fingerprintSync(salt, ID_A)}}}).steamAccount;

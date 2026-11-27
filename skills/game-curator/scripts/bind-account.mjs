@@ -35,7 +35,7 @@ export function checkBindProbe(p) {
   const salt = b64uDecode(p.salt);
   if (!salt || salt.length !== 16) bad.push('the probe has no valid 16-byte salt (run it with candidate: true)');
   else if (p.saltCheck !== saltCheckOf(p.salt)) bad.push('the probe salt does not match its salt check');
-  if (typeof p.origin === 'string' && !['https://store.steampowered.com', 'https://steamcommunity.com'].includes(p.origin)) bad.push('the probe ran on an unsupported origin');
+  if (typeof p.origin !== 'string' || !['https://store.steampowered.com', 'https://steamcommunity.com'].includes(p.origin)) bad.push('the probe did not run on a supported Steam origin');
   return bad;
 }
 
@@ -45,12 +45,13 @@ function commit(file, current, text, check, {apply, expect, plan, hooks}) {
   if (!apply) return {...full, applied: false, next: 'Show this plan to the user. Only after their explicit approval run again with --apply --expect-settings <settingsSha256> --expect-candidate <candidateSha256>.'};
   if (!expect || expect.settingsSha256 !== settingsSha256 || expect.candidateSha256 !== plan.candidateSha256) throw new Error('refused: --apply needs the settings revision and candidate digests of the plan the user approved, and they differ from the current ones (the settings file or the candidate changed)');
   // Atomic replacement: private temp file in the same directory, refuse if the file changed since it was read, rename, read back.
-  const dir = path.dirname(file), tmp = path.join(dir, `.settings.${process.pid}.tmp`);
+  const target = fs.realpathSync(file); // a symlinked settings.json is edited in place of its target, never replaced by a regular file
+  const dir = path.dirname(target), tmp = path.join(dir, `.settings.${process.pid}.tmp`);
   fs.writeFileSync(tmp, text, {flag: 'wx', mode: 0o600});
   try {
     hooks.beforeCommit?.(); // test seam for the read-to-rename window
     if (readSettingsFile(file).sha256 !== settingsSha256) throw new Error('settings.json changed while the change was prepared; nothing was written');
-    fs.renameSync(tmp, file);
+    fs.renameSync(tmp, target);
   } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
   const back = readSettingsFile(file);
   if (!back.bytes.equals(Buffer.from(text)) || !check(back.settings)) throw new Error('read-back of settings.json did not match the intended record');

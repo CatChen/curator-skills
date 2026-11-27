@@ -218,6 +218,56 @@ try {
     const env = await drive(site, {identity: {salt: h.salt}}); const r = saveNative(h, env); assert.ok(r.json.years.every(y => y.action === 'separate'));
   }
 
+  // ======== identity added only on a resume call (or re-salted) never attests the earlier batches
+  {
+    const h = home(), site = makeReviewsSite({total: 25, perPage: 10}); setUser(site, B); // the first batches are collected as ANOTHER account, without the option
+    const first = j(await site.runFile({})); assert.equal(first.status, 'continue');
+    setUser(site, A); // then the bound account signs in and the resume call adds the identity option
+    site.navigate(first.next); let r = j(await site.runFile({identity: {salt: h.salt}}));
+    for (let i = 0; r.status === 'continue' && i < 10; i++) { site.navigate(r.next); r = j(await site.runFile({})); }
+    assert.equal(r.diagnostics.identity.continuity.covered, false); const s = saveNative(h, r);
+    assert.equal(s.json.action, 'separate'); assert.match(s.json.reason, /not observed|not confirmed/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')), 'B\'s rows were not promoted as the bound account');
+  }
+  {
+    const h = home(), p = makeWishlistPage({n: 30}); setUser(p.state, B);
+    let r = j(await p.run({callBudgetMs: 1})); assert.ok(r.inProgress, 'a long first call hands control back without identity');
+    setUser(p.state, A); r = j(await p.run({identity: {salt: h.salt}})); for (let i = 0; i < 400 && !r.format; i++) r = j(await p.run({}));
+    assert.equal(r.diagnostics.identity.continuity.covered, false); assert.equal(saveNative(h, r).json.action, 'separate');
+    const h2 = home(), p2 = makeWishlistPage({n: 30}); setUser(p2.state, A); // a different salt on resume restarts continuity as not covered
+    let r2 = j(await p2.run({callBudgetMs: 1, identity: {salt: h2.salt}})); assert.ok(r2.inProgress);
+    r2 = j(await p2.run({identity: {salt: newSalt()}})); for (let i = 0; i < 400 && !r2.format; i++) r2 = j(await p2.run({}));
+    assert.equal(r2.diagnostics.identity.continuity.covered, false);
+  }
+
+  // ======== bound review-name enrichment: both captures must be verified under the SAME binding generation
+  {
+    const h = home(), lib = makeLibraryPage({n: 20, appidOf: i => 4000 + i, nameOf: i => 'Synthetic Game ' + i}); setUser(lib.state, A);
+    const libEnv = await runLibrary(lib, {identity: {salt: h.salt}}); assert.equal(saveNative(h, libEnv).json.action, 'create');
+    const reviewsEnv = async () => { const site = makeReviewsSite({total: 12, perPage: 10}); setUser(site, A); return drive(site, {identity: {salt: h.salt}}); };
+    const libFile = path.join(h.dest, 'library.json');
+    let r = saveNative(h, await reviewsEnv(), ['--names-from', libFile]); assert.equal(r.status, 0, r.err); assert.equal(r.json.action, 'create');
+    const saved = JSON.parse(fs.readFileSync(path.join(h.dest, 'reviews.json'), 'utf8')); assert.ok(saved.records.some(x => x.nameSource === 'verified-library-capture'), 'names were added'); assert.equal(saved.diagnostics.attestations.enrichment.generation, h.gen); assert.equal(saved.diagnostics.attestations.identity.result, 'match');
+    // manual library alias cannot stand in while bound
+    const neg1 = saveNative(h, await reviewsEnv(), ['--names-from', libFile, '--library-account', 'my-steam']); assert.equal(neg1.status, 1); assert.match(neg1.err, /cannot be used while an account is bound/);
+    // the reviews capture itself must be a verified match (another account signed in: no names)
+    const other = makeReviewsSite({total: 12, perPage: 10}); setUser(other, B); const neg2 = saveNative(h, await drive(other, {identity: {salt: h.salt}}), ['--names-from', libFile]); assert.equal(neg2.status, 1);
+    // a library capture of an EARLIER generation with the same alias cannot supply names to the new binding
+    const planR = planBinding(h.file, {op: 'revoke'}); planBinding(h.file, {op: 'revoke', apply: true, expect: {settingsSha256: planR.settingsSha256, candidateSha256: planR.candidateSha256}});
+    const probe2 = {format: 'game-curator-identity-probe', version: 1, sources: ['user-config'], loggedIn: true, consistent: true, problems: [], origin: 'https://store.steampowered.com', saltCheck: saltCheckOf(h.salt), sessionFingerprint: fingerprintSync(h.salt, ID_A), pathFingerprint: null, salt: h.salt};
+    const planB = planBinding(h.file, {op: 'bind', probe: probe2, alias: 'my-steam'}); planBinding(h.file, {op: 'bind', probe: probe2, alias: 'my-steam', apply: true, expect: {settingsSha256: planB.settingsSha256, candidateSha256: planB.candidateSha256}});
+    assert.notEqual(readSettingsFile(h.file).settings.steamAccount.generation, h.gen);
+    fs.unlinkSync(path.join(h.dest, 'reviews.json'));
+    const neg3 = saveNative(h, await reviewsEnv(), ['--names-from', libFile]); assert.equal(neg3.status, 1); assert.match(neg3.err, /not verified under the current account binding/);
+    // a legacy manual library capture (saved while unbound, alias only) cannot supply names to a bound reviews capture
+    const hl = home(); const cleanFile = fs.readFileSync(hl.file); fs.writeFileSync(hl.file, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: true}}) + '\n'); void cleanFile;
+    const libL = makeLibraryPage({n: 20, appidOf: i => 4000 + i}); setUser(libL.state, A);
+    const legacyEnv = await runLibrary(libL, {}); assert.equal(saveNative(hl, legacyEnv, ['--account', 'my-steam', '--access-scope', 'signed-in']).json.action, 'create');
+    const probeL = {...probe2, salt: hl.salt, saltCheck: saltCheckOf(hl.salt), sessionFingerprint: fingerprintSync(hl.salt, ID_A)};
+    const pl = planBinding(hl.file, {op: 'bind', probe: probeL, alias: 'my-steam'}); planBinding(hl.file, {op: 'bind', probe: probeL, alias: 'my-steam', apply: true, expect: {settingsSha256: pl.settingsSha256, candidateSha256: pl.candidateSha256}});
+    const siteL = makeReviewsSite({total: 12, perPage: 10}); setUser(siteL, A);
+    const neg4 = saveNative(hl, await drive(siteL, {identity: {salt: hl.salt}}), ['--names-from', path.join(hl.dest, 'library.json')]); assert.equal(neg4.status, 1); assert.match(neg4.err, /not verified under the current account binding/);
+  }
+
   // ======== no identity anywhere in the scratch homes
   for (const root of tmp) scan(path.join(root, 'cache', 'steam'));
   console.log('identity collector integration checks passed');
