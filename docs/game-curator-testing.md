@@ -65,3 +65,7 @@ For scratch-cache tests, pass the saver's arguments as an explicit array (never 
 ## Account identity and binding
 
 Development tests: `node tests/game-curator/test_identity.mjs` (fingerprints, narrow extraction, settings v1/v2) and `node tests/game-curator/test_account_binding.mjs` (bind, change, revoke, saver verdicts) use synthetic identifiers and scratch homes only. Never bind, change or migrate the production `settings.json` as a test. For a live pass use a scratch settings file and a scratch cache, record which scenarios were live and which fixture, and keep identifiers out of reports; the scenarios, their status and the known runtime restrictions are in [account identity](game-curator-identity.md).
+
+## Curator Home isolation
+
+`node tests/game-curator/test_curator_home.mjs` covers default-home behavior, `CURATOR_HOME` selection for the hook, saver and binder, unusable or unauthorized selected homes (no fallback), explicit `--dest`/`--settings` limits, staged files from another home, and page-supplied destinations, all in scratch directories with a decoy stand-in for the production home. For live acceptance, select a scratch home with the session's `env` setting and never run the hook against the production home.

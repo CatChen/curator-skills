@@ -25,6 +25,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {resolveCuratorHome} from '../curator-home.mjs';
 import {canonicalize, validate, checkCacheAuthorized, HOOK_TOOLS, STAGING_DIR} from './save-capture.mjs';
 
 export const MAX_STAGED_BYTES = 16 * 1024 * 1024;
@@ -111,7 +112,7 @@ function prune(dir, now) {
 }
 
 // Decide and act on one hook payload. Returns the additionalContext text to show the model, or null to stay silent.
-export function handleHook(payload, {dest = path.join(os.homedir(), '.curator/game-curator/cache/steam'), settings, skillDir = here, now = Date.now()} = {}) {
+export function handleHook(payload, {dest, settings, skillDir = here, now = Date.now()} = {}) {
   if (!payload || payload.hook_event_name !== 'PostToolUse' || !HOOK_TOOLS.includes(payload.tool_name)) return null;
   const call = identifyCall(payload.tool_input, skillDir);
   if (!call) {
@@ -130,6 +131,9 @@ export function handleHook(payload, {dest = path.join(os.homedir(), '.curator/ga
   if (env.source !== call.source) return refuse(`the result is a ${env.source} envelope but the call was a ${call.source} run`);
   const {errors} = validate(env, {incoming: true, accessScope: 'unknown'}) // identity and scope are the saver's caller attestations, not the hook's;
   if (errors.length) return refuse(`it failed validation: ${errors.slice(0, 3).join('; ')}`);
+  // The Curator Home is resolved HERE, from the process environment only (default home, or CURATOR_HOME as Claude Code's `env` setting provides it to hooks):
+  // never from the page or the envelope, and a selected home that is unusable stops the hook instead of falling back to the default.
+  if (dest === undefined) { try { dest = resolveCuratorHome().cache; } catch (e) { return refuse(String(e.message ?? e)); } }
   try { checkCacheAuthorized(dest, settings); } catch (e) { return refuse(String(e.message ?? e).replace(/^Cache not authorized: /, 'cache not authorized: ')); }
   const dir = privateDir(path.join(dest, STAGING_DIR));
   prune(dir, now);
@@ -141,7 +145,7 @@ export function handleHook(payload, {dest = path.join(os.homedir(), '.curator/ga
   const saver = path.join(skillDir, 'save-capture.mjs');
   return `Game Curator hook: staged the complete ${env.source} result (${env.records.length} records, ${bytes.length} bytes, sha256 ${digest.slice(0, 16)}...) privately at ${file}. `
     + `Provenance is hook-capture: the runtime-processed tool response as the hook received it, not a native tool-result file and not a browser download. Validate and save it with `
-    + `node ${saver} ${file} --provenance hook-capture --account <alias> --access-scope <scope> [--view unfiltered] --dry-run, then without --dry-run; the saver removes the staged pair after a successful save. Do not retype the data.`;
+    + `node ${saver} ${file} --provenance hook-capture [--view unfiltered] --dry-run (the selected Curator Home needs no --dest/--settings; read curatorHome and destination in the output; add --account <alias> --access-scope <scope> only as the manual fallback when no account is bound or identity was unobservable), then without --dry-run; the saver removes the staged pair after a successful save. Do not retype the data.`;
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
