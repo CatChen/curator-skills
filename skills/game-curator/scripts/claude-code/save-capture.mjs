@@ -646,7 +646,7 @@ export function removeIfUnchanged(identity) {
 // Dispatch by version without inferring authorization for unknown versions.
 export function parseCacheSettings(s) { return parseSettings(s).persistence; } // v1 and v2; the binding is read with parseSettings
 
-// Persistence consent: strict settings.json v1 or v2 (persistence.md "Durable scope record"). Fails closed.
+// Persistence consent: strict settings.json v1 or v2 (SKILL.md "Persistence"). Fails closed.
 export function checkCacheAuthorized(dest, settingsPath) {
   guardSelectedHome({dest, settings: settingsPath}); // a selected custom home bounds every caller, not only the command-line wrappers
   let file = settingsPath;

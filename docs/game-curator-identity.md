@@ -1,6 +1,6 @@
 # Game Curator account identity: design status, tests and collector gaps
 
-The procedure for agents is in [account identity](../skills/game-curator/references/identity.md); settings fields are in [persistence](../skills/game-curator/references/persistence.md). This page records the development decisions, what has been verified and how, and what is still missing. It contains no personal identifiers.
+The procedure for agents is in [account identity](../skills/game-curator/references/acquisition.md#4-account-identity); settings fields are in [persistence](../skills/game-curator/SKILL.md#persistence). This page records the development decisions, what has been verified and how, and what is still missing. It contains no personal identifiers.
 
 ## Decisions
 
