@@ -95,7 +95,7 @@ export function planBinding(file, {op, probe, alias, apply = false, expect, now 
   const plan = {op, file, fromVersion: settings.version, toVersion: 2, alias: next.steamAccount?.alias ?? null, persistencePreserved: true,
     previousAlias: settings.steamAccount?.alias ?? null, candidateSha256: sha256(JSON.stringify(candidate)),
     followUp: op === 'revoke' ? 'Caches and personal files were not touched; later captures need a manual account confirmation.'
-      : op === 'change' ? 'Ask the user explicitly whether the existing profile and feedback may be reused for the new account; reuse is the user\'s decision, never assumed. Nothing was deleted, rewritten or reassigned, and caches captured under the previous binding are not merged or promoted.' : null};
+      : op === 'change' ? 'Ask the user explicitly whether the existing profile and feedback may be reused for the new account; reuse is the user\'s decision, never assumed. Nothing was deleted, rewritten or reassigned, and caches captured under the previous binding are not merged or reassigned.' : null};
   return commit(file, current, text, s => JSON.stringify(s.persistence) === JSON.stringify(settings.persistence) && bindingKey(s.steamAccount) === bindingKey(next.steamAccount), {apply, expect, plan, hooks});
 }
 

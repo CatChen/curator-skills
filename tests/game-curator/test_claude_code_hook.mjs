@@ -174,9 +174,7 @@ for (const s of ['wishlist', 'library', 'reviews', 'replay']) {
   const real = runSaver(f, file, extra); assert.equal(real.status, 0, `${s} save: ${real.stderr}`);
   assert.deepEqual(f.staged(), [], 'the staged pair is removed after a successful save'); assert.match(real.stderr, /removed the staged hook capture/);
   const target = s === 'replay' ? path.join(f.dest, 'replay', `${ENV.replay.records[0].year}.json`) : path.join(f.dest, `${s}.json`);
-  const saved = JSON.parse(fs.readFileSync(target, 'utf8')), t = saved.diagnostics.attestations.transfer;
-  assert.equal(t.provenance, 'hook-capture'); assert.equal(t.level, 'hook-tool-response'); assert.equal(t.hook.tool, HOOK_TOOLS[0]); assert.equal(t.hook.call, 'run'); assert.equal(t.sourceDigest ?? 'unavailable', 'unavailable');
-  assert.match(t.note, /not a native tool-result file, not a download/); assert.ok(t.hook.sha256 && t.hook.stagedAt);
+  const saved = JSON.parse(fs.readFileSync(target, 'utf8'));
   assert.equal(saved.records.length, s === 'replay' ? 1 : ENV[s].records.length);
 }
 { // Negatives: each leaves the cache untouched and the staged pair in place.
@@ -205,11 +203,6 @@ for (const s of ['wishlist', 'library', 'reviews', 'replay']) {
   fs.writeFileSync(f.settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: false}}));
   const r = runSaver(f, file, ['--provenance', 'hook-capture']); assert.equal(r.status, 1); assert.match(r.stderr, /steamCache false/); assert.equal(f.staged().length, 2);
 }
-{ // A failed check inside the saver (here a wrong source digest) also keeps the pair and writes no cache file.
-  const f = fixture(); handleHook(payload('library', ENV.library), f.opts); const file = path.join(f.dest, STAGING_DIR, f.staged().find(n => !n.endsWith('.meta.json')));
-  const r = runSaver(f, file, ['--provenance', 'hook-capture', '--source-sha256', '0'.repeat(64)]); assert.equal(r.status, 1); assert.match(r.stderr, /does not match --source-sha256/); assert.equal(f.staged().length, 2); assert.ok(!fs.existsSync(path.join(f.dest, 'library.json')));
-}
-
 { // Acceptance-style split: staged under the default cache location, saved into another (scratch) cache that has its own consent record.
   const f = fixture(); handleHook(payload('reviews', ENV.reviews), f.opts);
   const file = path.join(f.dest, STAGING_DIR, f.staged().find(n => !n.endsWith('.meta.json')));

@@ -23,26 +23,46 @@ try {
   ];
   for (const result of results) {
     const input=path.join(root,`${result.source}.json`); fs.writeFileSync(input,JSON.stringify(result),{mode:0o600});
-    const run=spawnSync(process.execPath,[cli,input,'--provenance','host-result','--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
+    const run=spawnSync(process.execPath,[cli,input,'--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
     assert.equal(run.status,0,`${result.source}: ${run.stderr}`);
     const saved=JSON.parse(run.stdout), outcomes=result.source==='replay' ? saved.years : [saved];
     assert.ok(outcomes.length>0);
-    for(const outcome of outcomes) assert.equal(outcome.action,'separate',`${result.source} cannot be promoted`);
+    for(const outcome of outcomes) assert.equal(outcome.action,'create',`${result.source} should create a snapshot`);
     const changed=structuredClone(result); changed.records[0][result.source==='replay'?'semanticText':result.source==='reviews'?'review':'name']='Tampered';
     fs.writeFileSync(input,JSON.stringify(changed),{mode:0o600});
-    const bad=spawnSync(process.execPath,[cli,input,'--provenance','host-result','--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
+    const bad=spawnSync(process.execPath,[cli,input,'--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
     assert.notEqual(bad.status,0,`${result.source} tampering must be rejected`);
     assert.match(bad.stderr,/host records checksum mismatch/);
   }
   // A mixed-identity run cannot be rescued by a manually confirmed alias.
   const salt='AQIDBAUGBwgJCgsMDQ4PEA', id='76561197960278073', fp=fingerprintSync(salt,id);
   fs.writeFileSync(path.join(root,'settings.json'),JSON.stringify({version:2,persistence:{profileAndFeedback:false,steamCache:true},steamAccount:{alias:'fixture',approvedAt:'2026-01-01T00:00:00Z',generation:'AAAAAAAAAAAAAAAAAAAAAA',fingerprint:{alg:'sha256-salted-v1',salt,value:fp}}}));
+  // A matching bound Codex Library run lacks observable owner controls. User confirmation
+  // permits that narrow case and is recorded honestly; it cannot override conflicts.
+  const identity = {version:1,sources:['userinfo-attr'],loggedIn:true,consistent:true,problems:[],saltCheck:saltCheckOf(salt),sessionFingerprint:fp,pathFingerprint:null};
+  const libraryTab={playwright:{evaluate:async fn=>fn===pagePathFingerprint?'c'.repeat(64):fn===codexIdentityPage?structuredClone(identity):{expected:1,view:{tab:'all',search:'empty',language:'en'},records:[{appid:1,name:'Fixture',pageText:'Fixture\nDOWNLOAD',membershipSource:'all-games-row'}]}},scroll:async()=>{}};
+  const library = await collectLibrary(libraryTab,{identity:{salt}});
+  assert.equal(library.diagnostics.complete,true); assert.equal(library.diagnostics.ownerControls,null); assert.equal(library.diagnostics.identity.owner,null);
+  const libraryInput=path.join(root,'bound-library.json');
+  const saveLibrary=(capture, account='fixture')=>{fs.writeFileSync(libraryInput,JSON.stringify(capture));return spawnSync(process.execPath,[cli,libraryInput,...(account?['--account',account]:[])],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}})};
+  const unconfirmed=saveLibrary(library,null); assert.notEqual(unconfirmed.status,0); assert.match(unconfirmed.stderr,/ownership is not verified/);
+  const confirmed=saveLibrary(library); assert.equal(confirmed.status,0,confirmed.stderr);
+  const stored=JSON.parse(fs.readFileSync(path.join(root,'cache/steam/library.json')));
+  assert.equal(stored.diagnostics.attestations.identity.ownership,'confirmed'); assert.equal(stored.diagnostics.attestations.identity.by,'user');
+  for (const mutate of [
+    c=>{c.diagnostics.identity.pathFingerprint='b'.repeat(64)},
+    c=>{c.diagnostics.identity.sessionFingerprint='b'.repeat(64)},
+    c=>{c.diagnostics.identity.continuity.broke=true},
+    c=>{c.diagnostics.identity.continuity.covered=false},
+    c=>{c.diagnostics.identity.owner=false},
+    c=>{c.diagnostics.ownerControls=false},
+  ]) { const bad=structuredClone(library); mutate(bad); const r=saveLibrary(bad); assert.notEqual(r.status,0,r.stdout); assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root,'cache/steam/library.json'))),stored); }
   let checks=0, batch=0;
   const tab={playwright:{evaluate:async fn=>fn===pagePathFingerprint?'c'.repeat(64):fn===codexIdentityPage?{version:1,sources:['userinfo-attr'],loggedIn:true,consistent:true,problems:[],saltCheck:saltCheckOf(salt),sessionFingerprint:++checks<4?fp:'b'.repeat(64),pathFingerprint:null}:{expected:2,view:{sort:'Your Rank',search:'empty',filters:'unknown'},reorderHandles:true,rows:[{appid:++batch,rank:batch,name:'Fixture',pageText:'Fixture',membershipSource:'wishlist-row',complete:true}]}},scroll:async()=>{}};
   const conflict=await collectWishlist(tab,{identity:{salt},maxScrolls:2});
   assert.equal(conflict.diagnostics.stopReason,'identity-changed');
   const conflictFile=path.join(root,'conflict.json'); fs.writeFileSync(conflictFile,JSON.stringify(conflict));
-  const refused=spawnSync(process.execPath,[cli,conflictFile,'--provenance','host-result','--access-scope','unknown','--account','fixture'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
-  assert.notEqual(refused.status,0); assert.match(refused.stderr,/cannot override a known observation/);
+  const refused=spawnSync(process.execPath,[cli,conflictFile,'--access-scope','unknown','--account','fixture'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
+  assert.notEqual(refused.status,0); assert.match(refused.stderr,/known account identity conflict|cannot override a known observation/);
   console.log('synthetic Codex collector-to-saver checks passed');
 } finally {fs.rmSync(root,{recursive:true,force:true});}
