@@ -38,22 +38,22 @@ During ordinary use do not edit installed skill files, add dependencies, commit 
 
 Needs `steamCache: true` in the Curator Home settings (the saver checks again and fails closed); a current instruction can revoke or decline it, never grant beyond it. Keep the complete result in memory (or a private staging file) until the write is verified; never pass whole captures through model context.
 
-Run the saver from the skill directory: `node scripts/claude-code/save-capture.mjs <file> --provenance <tool-result|hook-capture|download|host-result> … --dry-run`, read the decision, `curatorHome` and `destination`, then repeat without `--dry-run`. Provenance is declared by you and checked by the saver, never inferred. The saver validates the envelope, keeps incomplete, public, unverified-account or unverified-transfer captures as separate snapshots, never replaces a richer or foreign-account capture, rechecks consent before committing, and prints the verdict. Trust its decision and report it. Use `--keep-separate` when the user asks. `--dest` and `--settings` are for a user-named location and must match a selected `CURATOR_HOME`. Do not pass saver flags through an unquoted shell variable. Select saved captures for use with `selectSnapshots` in `scripts/cache.mjs`, passing the verified account and scope (and year for Replay) and `{binding}` so only captures verified under the current binding generation qualify; a capture whose own attestation records mismatch, ambiguous, signed-out or unproven page ownership is not evidence at all, not even supporting. With no verified account use the evidence with its caveats. If the cache is full of separate snapshots, keep the new result in memory and ask the user to review retained evidence before retrying.
+Run `node scripts/claude-code/save-capture.mjs <file> --dry-run`, inspect `curatorHome` and `destination`, then repeat without `--dry-run`. Use `--provenance hook-capture` only for a hook-staged file. The same policy applies to either runtime: a successful full snapshot replaces the canonical source file, with no merging or field comparisons. Clearly failed or incomplete collections and known account conflicts are rejected without changing the cache. Missing legacy coverage or transfer evidence alone does not block replacement. The saver checks consent and account binding again before an atomic write and verifies the result by reading it back. Preserve an unsaved partial result privately if useful, and report it; the saver does not manage partial snapshots or backups. `--dest` and `--settings` must belong to the selected Curator Home. Read existing v1 files with their recorded identity and coverage caveats; do not migrate or delete them.
 
 ## 4. Account identity
 
-Game Curator is single-user: at most one Steam account is bound. Browser sign-in, observed identity, approved binding, page ownership, cache consent, scope/completeness/transfer, and host permissions are separate facts; approving one never approves another. Identity is read narrowly (`logged_in`, `steamid`, `accountid` by name, on the two Steam origins) and returned only as a salted fingerprint; a display name or vanity URL is never identity.
+Game Curator is single-user: at most one Steam account is bound. Browser sign-in, observed identity, approved binding, page ownership, cache consent, scope/completeness, and host permissions are separate facts; approving one never approves another. Identity is read narrowly (`logged_in`, `steamid`, `accountid` by name, on the two Steam origins) and returned only as a salted fingerprint; a display name or vanity URL is never identity.
 
 - **Bound:** `node scripts/bind-account.mjs status --settings <settings>` prints the alias and the binding's salt. Pass `identity: {salt: '<salt>'}` on the first collector call (the Codex form is in [codex](codex.md)); the collector checks identity at the start, at every navigation and at the end, and stops with `identity-changed` if it changes. The saver derives the verdict itself; with a verified match you need no `--account` and no question.
 - **Not bound or not observable:** ask which account this is and for a local alias, pass `--account <alias>` (recorded as manual confirmation, never as a match), and use `--access-scope signed-in` only if the page showed owner-only controls.
 
 | Verdict | Effect |
 | --- | --- |
-| match, ownership verified | proceed; normal scope, completeness and transfer rules still apply |
-| match, ownership unverified | separate snapshot; never replaces a signed-in capture |
+| match, ownership verified | proceed; normal completeness rules still apply |
+| match, ownership unverified | do not save; establish the page owner |
 | mismatch (different account signed in) | write nothing to the verified cache; the user can switch accounts or explicitly change the binding |
-| ambiguous (unusable or contradictory markers, identity changed during the run, partial observation) | separate snapshot; stop and report; a manual alias cannot override it |
-| signed-out | separate snapshot; the user signs in; a manual alias cannot override it |
+| ambiguous (unusable or contradictory markers, identity changed during the run, partial observation) | do not save; stop and report; a manual alias cannot override it |
+| signed-out | do not save; the user signs in; a manual alias cannot override it |
 | unobserved, unbound | manual flow above; no match claimed |
 
 A capture is current evidence only under the binding generation it was verified under; alias equality never proves the same binding. Never attribute an older capture without an account to the bound account, and never merge unknown or different accounts.

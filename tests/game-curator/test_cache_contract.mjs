@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {buildPageScript, PAGES} from '../../development/game-curator/claude-code/build-page-script.mjs';
+import {canonicalize, parseToolResult, enrichReviewNames, verifyNameAttribution} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+const records=[{appid:1,rank:1,name:'Fixture',pageText:'Fixture',membershipSource:'wishlist-row'}];
+const env={format:'game-curator-steam-export',version:1,source:'wishlist',capturedAt:'2026-01-01T00:00:00Z',method:'browser-dom-claude-code',coverage:'partial',warnings:[],diagnostics:{},records};
+const sorted=v=>Array.isArray(v)?v.map(sorted):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,sorted(v[k])])):v;
+const runtime=JSON.stringify([{type:'text',text:JSON.stringify(sorted(env))+'\n\n(captured at origin https://store.steampowered.com)'},{type:'text',text:'\n\nTab Context:'}]);
+assert.deepEqual(canonicalize(parseToolResult(runtime)),env);
+const library={...env,source:'library',account:'fixture',accessScope:'signed-in',records:[{appid:1,name:'Fixture',pageText:'Fixture'}]};
+const review={...env,source:'reviews',account:'fixture',records:[{appid:1,review:'Good'},{appid:2,review:'Also good'}]};
+const result=enrichReviewNames(review,library,{librarySha256:'a'.repeat(64)});
+assert.equal(result.env.records[0].name,'Fixture'); assert.equal(result.env.records[1].name,undefined);
+assert.deepEqual(verifyNameAttribution(result.env,library),[]);
+assert.throws(()=>enrichReviewNames({...review,account:'other'},library,{librarySha256:'a'.repeat(64)}),/same account/);
+assert.throws(()=>enrichReviewNames(review,library,{librarySha256:'bad'}),/SHA-256/);
+assert.ok(verifyNameAttribution({...result.env,records:[{...result.env.records[0],name:'Wrong'}]},library).length);
+console.log('cache parsing and enrichment checks passed');
+
+for (const name of Object.keys(PAGES)) assert.equal(fs.readFileSync(new URL(`../../skills/game-curator/scripts/claude-code/steam-${name}-page.js`,import.meta.url),'utf8'),buildPageScript(name));

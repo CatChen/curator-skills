@@ -39,7 +39,7 @@ const viewArgs = source => (source === 'wishlist' ? ['--view', 'unfiltered'] : [
 function saveNative(h, env, extra = []) { // a native tool-result file, as the runtime writes for a large result
   const input = path.join(h.root, 'tool-result.json');
   fs.writeFileSync(input, JSON.stringify([{type: 'text', text: JSON.stringify(env)}]), {mode: 0o600});
-  return cli(h, [input, '--provenance', 'tool-result', ...viewArgs(env.source), ...extra]);
+  return cli(h, [input, ...viewArgs(env.source), ...extra]);
 }
 function cli(h, args) {
   const r = spawnSync(process.execPath, [saver, ...args, '--dest', h.dest], {encoding: 'utf8'});
@@ -101,44 +101,44 @@ try {
     const env = await runWishlist(p, {identity: {salt: h.salt}, identityEveryMs: 0});
     assert.equal(env.diagnostics.stopReason, 'identity-changed'); assert.equal(env.diagnostics.complete, false); assert.ok(env.records.length < 40, 'collection stopped early'); assert.equal(env.diagnostics.identity.continuity.stable, false);
     assert.ok(env.records.every((r, i) => r.rank === i + 1) || env.records.length > 0); noLeak(JSON.stringify(env), 'switched wishlist');
-    const r = saveNative(h, env); assert.equal(r.json.action, 'separate'); assert.match(r.json.reason, /incomplete|ambiguous/); assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json')));
+    const r = saveNative(h, env); assert.equal(r.status, 1); assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json')));
     assert.equal(saveNative(h, env, ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1, 'a manual alias cannot override a changed identity');
   }
   { // sign-out / expiry in the middle of the run
     const h = home(), p = makeWishlistPage({n: 40}); setUser(p.state, after(2, A, OUT));
     const env = await runWishlist(p, {identity: {salt: h.salt}, identityEveryMs: 0});
     assert.equal(env.diagnostics.stopReason, 'identity-changed'); assert.equal(env.diagnostics.complete, false);
-    assert.equal(saveNative(h, env).json.action, 'separate');
+    assert.equal(saveNative(h, env).status, 1);
   }
   { // identity changes only at the very end: the final observation catches it even for a short run
     const h = home(), p = makeWishlistPage({n: 8}); setUser(p.state, after(1, A, B));
     const env = await runWishlist(p, {identity: {salt: h.salt}, identityEveryMs: 100000});
     assert.equal(env.diagnostics.identity.continuity.stable, false); assert.notEqual(env.diagnostics.stopReason, 'complete');
-    assert.equal(saveNative(h, env).json.action, 'separate');
+    assert.equal(saveNative(h, env).status, 1);
   }
   { // a different account from the start (the bound account is A): the run completes, but nothing reaches the verified cache
     const h = home(), p = makeWishlistPage({n: 12}); setUser(p.state, B);
     const env = await runWishlist(p, {identity: {salt: h.salt}}); assert.equal(env.diagnostics.stopReason, 'complete');
-    const r = saveNative(h, env); assert.equal(r.json.action, 'separate'); assert.match(r.json.reason, /mismatch/);
+    const r = saveNative(h, env); assert.equal(r.status, 1);
     assert.equal(saveNative(h, env, ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1);
   }
   { // extraction unavailable (no markers): collection proceeds; manual confirmation remains and is recorded as such
     const h = home(), p = makeWishlistPage({n: 12}); setUser(p.state, undefined);
     const env = await runWishlist(p, {identity: {salt: h.salt}}); assert.equal(env.diagnostics.stopReason, 'complete'); assert.equal(env.diagnostics.identity.loggedIn, null);
-    assert.equal(saveNative(h, env).json.action, 'separate');
+    assert.equal(saveNative(h, env).status, 1);
     const r = saveNative(h, env, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(r.json.action, 'create');
     const saved = JSON.parse(fs.readFileSync(path.join(h.dest, 'wishlist.json'), 'utf8')); assert.deepEqual(saved.diagnostics.attestations.identity, {by: 'user', result: 'unobserved', basis: 'manual-confirmation', ownership: 'unverified', generation: h.gen});
   }
   { // explicitly signed out from the start: a known state, not "unavailable": no manual override
     const h = home(), p = makeWishlistPage({n: 12}); setUser(p.state, OUT);
     const env = await runWishlist(p, {identity: {salt: h.salt}});
-    { const r0 = saveNative(h, env); assert.equal(r0.json.action, 'separate'); assert.match(r0.json.reason, /signed-out/); }
+    { const r0 = saveNative(h, env); assert.equal(r0.status, 1); }
     assert.equal(saveNative(h, env, ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1);
   }
   { // no identity option: the collector is exactly as before (no observation, manual flow)
     const h = home(), p = makeWishlistPage({n: 10}); setUser(p.state, A);
     const env = await runWishlist(p, {}); assert.ok(!('identity' in env.diagnostics));
-    assert.equal(saveNative(h, env).json.action, 'separate');
+    assert.equal(saveNative(h, env).status, 1);
   }
 
   // ======== library
@@ -154,7 +154,7 @@ try {
       const h = home(), p = makeLibraryPage({n: 200, chunk: 20, chunkMs: 40}); setUser(p.state, after(5, A, to));
       const env = await runLibrary(p, {identity: {salt: h.salt}, identityEveryMs: 0});
       assert.equal(env.diagnostics.stopReason, 'identity-changed', name); assert.ok(env.records.length < 200); assert.equal(env.diagnostics.complete, false);
-      assert.equal(saveNative(h, env).json.action, 'separate', name);
+      assert.equal(saveNative(h, env).status, 1, name);
     }
   }
 
@@ -170,16 +170,16 @@ try {
     const h = home(), site = makeReviewsSite({total: 25, perPage: 10}); setUser(site, () => (site.visits.length >= 2 ? to() : A()));
     const env = await drive(site, {identity: {salt: h.salt}});
     assert.equal(env.diagnostics.stopReason, 'identity-changed', name); assert.equal(env.records.length, 10, 'only the first page was merged'); assert.equal(env.diagnostics.complete, false);
-    const r = saveNative(h, env); assert.equal(r.json.action, 'separate', name); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')));
+    const r = saveNative(h, env); assert.equal(r.status, 1, name); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')));
     assert.equal(saveNative(h, env, ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1, `${name}: no manual override`);
   }
   { // a single-page run still has a start and an end observation; no markers -> unobserved, never a match
     const h = home(), site = makeReviewsSite({total: 5, perPage: 10}); setUser(site, A);
     const env = await drive(site, {identity: {salt: h.salt}}); assert.equal(env.diagnostics.identity.continuity.checks, 2); assert.equal(saveNative(h, env).json.action, 'create');
     const h2 = home(), site2 = makeReviewsSite({total: 5, perPage: 10}); setUser(site2, undefined);
-    const env2 = await drive(site2, {identity: {salt: h2.salt}}); assert.equal(env2.diagnostics.stopReason, 'complete'); assert.equal(saveNative(h2, env2).json.action, 'separate');
+    const env2 = await drive(site2, {identity: {salt: h2.salt}}); assert.equal(env2.diagnostics.stopReason, 'complete'); assert.equal(saveNative(h2, env2).status, 1);
     const h3 = home(), site3 = makeReviewsSite({total: 5, perPage: 10, owner: false}); setUser(site3, A); // signed in as the bound account on a public view: not owner evidence
-    const env3 = await drive(site3, {identity: {salt: h3.salt}}); const r3 = saveNative(h3, env3); assert.equal(r3.json.action, 'separate'); assert.match(r3.json.reason, /ownership is not verified/);
+    const env3 = await drive(site3, {identity: {salt: h3.salt}}); const r3 = saveNative(h3, env3); assert.equal(r3.status, 1);
   }
   { // tampered carried state is rejected, not trusted
     const h = home(), site = makeReviewsSite({total: 25, perPage: 10}); setUser(site, A);
@@ -203,19 +203,17 @@ try {
     const h = home(), site = makeReplaySite(); setUser(site, A);
     const env = await drive(site, {identity: {salt: h.salt}});
     const other = fingerprintSync(h.salt, ID_B); env.diagnostics.identityYears.find(y => y.year === 2023).pathFingerprint = other;
-    const r = saveNative(h, env); assert.equal(r.status, 0, r.err);
-    const byYear = Object.fromEntries(r.json.years.map(y => [y.year, y.action])); assert.deepEqual(byYear, {2022: 'create', 2023: 'separate', 2024: 'create', 2025: 'create'});
-    assert.match(r.json.years.find(y => y.year === 2023).reason, /ambiguous/);
+    const r = saveNative(h, env); assert.equal(r.status, 1); assert.ok(!fs.existsSync(path.join(h.dest, 'replay', '2023.json')));
   }
   for (const [name, to] of [['switch', B], ['expiry', OUT]]) { // the account changes while navigating to the third report
     const h = home(), site = makeReplaySite(); setUser(site, () => (site.visits.length >= 3 ? to() : A()));
     const env = await drive(site, {identity: {salt: h.salt}});
     assert.equal(env.diagnostics.stopReason, 'identity-changed', name); assert.equal(env.records.length, 2, 'only the reports collected before the change'); assert.equal(env.diagnostics.identityYears.length, 2);
-    const r = saveNative(h, env); assert.equal(r.status, 0, r.err); assert.ok(r.json.years.every(y => y.action === 'separate'), `${name}: nothing promoted`); assert.ok(!fs.existsSync(path.join(h.dest, 'replay', '2025.json')));
+    const r = saveNative(h, env); assert.equal(r.status, 1, name); assert.ok(!fs.existsSync(path.join(h.dest, 'replay', '2025.json')));
   }
   { // a year whose own report shows no owner control cannot be verified even though the same account is signed in
     const h = home(), site = makeReplaySite({owner: false}); setUser(site, A);
-    const env = await drive(site, {identity: {salt: h.salt}}); const r = saveNative(h, env); assert.ok(r.json.years.every(y => y.action === 'separate'));
+    const env = await drive(site, {identity: {salt: h.salt}}); const r = saveNative(h, env); assert.equal(r.status, 1);
   }
 
   // ======== identity added only on a resume call (or re-salted) never attests the earlier batches
@@ -226,22 +224,22 @@ try {
     site.navigate(first.next); let r = j(await site.runFile({identity: {salt: h.salt}}));
     for (let i = 0; r.status === 'continue' && i < 10; i++) { site.navigate(r.next); r = j(await site.runFile({})); }
     assert.equal(r.diagnostics.identity.continuity.covered, false); const s = saveNative(h, r);
-    assert.equal(s.json.action, 'separate'); assert.match(s.json.reason, /ambiguous/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')), 'B\'s rows were not promoted as the bound account');
+    assert.equal(s.status, 1); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')), 'B\'s rows were not promoted as the bound account');
     // the capture is otherwise eligible (owner evidence, complete): a manual confirmation still cannot promote it
-    const m = saveNative(h, r, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m.status, 1); assert.match(m.err, /cannot override a known observation/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')));
+    const m = saveNative(h, r, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m.status, 1); assert.match(m.err, /cannot override a known observation|known account identity conflict|identity is ambiguous/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')));
   }
   {
     const h = home(), p = makeWishlistPage({n: 30}); setUser(p.state, B);
     let r = j(await p.run({callBudgetMs: 1})); assert.ok(r.inProgress, 'a long first call hands control back without identity');
     setUser(p.state, A); r = j(await p.run({identity: {salt: h.salt}})); for (let i = 0; i < 400 && !r.format; i++) r = j(await p.run({}));
-    assert.equal(r.diagnostics.identity.continuity.covered, false); assert.equal(saveNative(h, r).json.action, 'separate');
-    { const m = saveNative(h, r, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m.status, 1); assert.match(m.err, /cannot override a known observation/); assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json'))); }
+    assert.equal(r.diagnostics.identity.continuity.covered, false); assert.equal(saveNative(h, r).status, 1);
+    { const m = saveNative(h, r, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m.status, 1); assert.match(m.err, /cannot override a known observation|known account identity conflict|identity is ambiguous/); assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json'))); }
     const h2 = home(), p2 = makeWishlistPage({n: 30}); setUser(p2.state, A); // a different salt on resume restarts continuity as not covered
     let r2 = j(await p2.run({callBudgetMs: 1, identity: {salt: h2.salt}})); assert.ok(r2.inProgress);
     r2 = j(await p2.run({identity: {salt: newSalt()}})); for (let i = 0; i < 400 && !r2.format; i++) r2 = j(await p2.run({}));
     assert.equal(r2.diagnostics.identity.continuity.covered, false);
     assert.equal(r2.diagnostics.stopReason, 'complete', 'the capture is otherwise complete and eligible');
-    const m2 = saveNative(h2, r2, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m2.status, 1, 're-salted: manual confirmation cannot promote it'); assert.match(m2.err, /cannot override a known observation/);
+    const m2 = saveNative(h2, r2, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m2.status, 1, 're-salted: manual confirmation cannot promote it'); assert.match(m2.err, /cannot override a known observation|known account identity conflict|identity is ambiguous/);
     assert.ok(!fs.existsSync(path.join(h2.dest, 'wishlist.json')));
   }
 

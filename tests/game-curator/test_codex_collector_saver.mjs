@@ -23,14 +23,14 @@ try {
   ];
   for (const result of results) {
     const input=path.join(root,`${result.source}.json`); fs.writeFileSync(input,JSON.stringify(result),{mode:0o600});
-    const run=spawnSync(process.execPath,[cli,input,'--provenance','host-result','--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
+    const run=spawnSync(process.execPath,[cli,input,'--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
     assert.equal(run.status,0,`${result.source}: ${run.stderr}`);
     const saved=JSON.parse(run.stdout), outcomes=result.source==='replay' ? saved.years : [saved];
     assert.ok(outcomes.length>0);
-    for(const outcome of outcomes) assert.equal(outcome.action,'separate',`${result.source} cannot be promoted`);
+    for(const outcome of outcomes) assert.equal(outcome.action,'create',`${result.source} should create a snapshot`);
     const changed=structuredClone(result); changed.records[0][result.source==='replay'?'semanticText':result.source==='reviews'?'review':'name']='Tampered';
     fs.writeFileSync(input,JSON.stringify(changed),{mode:0o600});
-    const bad=spawnSync(process.execPath,[cli,input,'--provenance','host-result','--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
+    const bad=spawnSync(process.execPath,[cli,input,'--access-scope','unknown'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
     assert.notEqual(bad.status,0,`${result.source} tampering must be rejected`);
     assert.match(bad.stderr,/host records checksum mismatch/);
   }
@@ -42,7 +42,7 @@ try {
   const conflict=await collectWishlist(tab,{identity:{salt},maxScrolls:2});
   assert.equal(conflict.diagnostics.stopReason,'identity-changed');
   const conflictFile=path.join(root,'conflict.json'); fs.writeFileSync(conflictFile,JSON.stringify(conflict));
-  const refused=spawnSync(process.execPath,[cli,conflictFile,'--provenance','host-result','--access-scope','unknown','--account','fixture'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
-  assert.notEqual(refused.status,0); assert.match(refused.stderr,/cannot override a known observation/);
+  const refused=spawnSync(process.execPath,[cli,conflictFile,'--access-scope','unknown','--account','fixture'],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}});
+  assert.notEqual(refused.status,0); assert.match(refused.stderr,/known account identity conflict|cannot override a known observation/);
   console.log('synthetic Codex collector-to-saver checks passed');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

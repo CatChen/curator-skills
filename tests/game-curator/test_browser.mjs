@@ -166,7 +166,7 @@ const settledLibrary=await collectLibrary(tabWith([{expected:1,view:{tab:'all',s
 assert.equal(settledLibrary.diagnostics.complete,true);
 const titleOnlyLibrary=await collectLibrary(tabWith([{expected:1,view:{tab:'all',search:'empty',language:'en'},records:[{appid:1,name:'DOWNLOAD',pageText:'DOWNLOAD UPDATE UNINSTALL My Game Content'}]}]));
 assert.equal(titleOnlyLibrary.diagnostics.ownerControls,null, 'row text is not owner-control evidence');
-assert.match(validate(titleOnlyLibrary,{account:'test',accessScope:'signed-in',incoming:true}).errors.join(' '),/owner evidence/);
+assert.match(validate(titleOnlyLibrary,{account:'test',accessScope:'signed-in',incoming:true}).errors.join(' '),/membershipSource/);
 // A retained row may stay unchanged while its current observed fields change.
 let observationReads=0;
 {

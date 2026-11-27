@@ -5,7 +5,7 @@
 //   page ownership          (ownership): whether the page that was collected belongs to that account: verified | unverified | contradicted
 //   manual confirmation     (basis):    the user's own statement when extraction was UNAVAILABLE; never a fingerprint match, never a way
 //                                       to override a known signed-out, conflicting or mismatching observation
-//   capture completeness / transfer provenance / persistence consent: decided elsewhere (validate, decide, checkCacheAuthorized)
+//   capture completeness / persistence consent: decided elsewhere (validate, checkCacheAuthorized)
 // A binding is created or changed only by bind-account.mjs on an explicit instruction, never from an observation.
 import {saltCheckOf} from './settings.mjs';
 
@@ -91,7 +91,7 @@ export function knownConflict(capture) {
 
 export const generationOf = capture => capture?.diagnostics?.attestations?.identity?.generation ?? null;
 
-// Combine the evaluation with the caller's manual alias into what is recorded and a reason that blocks promotion.
+// Combine the evaluation with the caller's manual alias into what is recorded and a reason that blocks saving.
 // Returns {account, scope, block, attestation}. Throws when a manual alias would contradict a KNOWN observation.
 // Manual confirmation stands in only where extraction was unavailable (unbound or unobserved); it is recorded as such and is never a match.
 export function identityPolicy({binding, evaluation, manualAccount}) {

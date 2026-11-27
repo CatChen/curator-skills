@@ -171,7 +171,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
     const done = stopReason === 'complete' && pending === 0;
     const warnings = [...S.warnings];
     if (pending) warnings.push('Year discovery stopped with unvisited reports.');
-    if (S.unsettled.length || S.truncated.length) warnings.push('Reports flagged as unsettled or truncated are kept as partial records and are never promoted (see diagnostics.unsettledYears and diagnostics.truncatedYears).');
+    if (S.unsettled.length || S.truncated.length) warnings.push('Reports flagged as unsettled or truncated are incomplete and must not replace cached reports (see diagnostics.unsettledYears and diagnostics.truncatedYears).');
     if (!done) warnings.push(`Incomplete capture (stop reason: ${stopReason}); do not treat it as every annual report.`);
     if (viewAtStop) warnings.push('The tab moved to a different account while collecting; only the reports collected before the change are included, and diagnostics.viewAtStop describes where it stopped.');
     if (!S.owner) warnings.push('Owner-only controls were not seen on every report, so this may be a public view.');
