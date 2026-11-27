@@ -43,16 +43,18 @@ export function equivalentRecords(a, b) {
   return left !== null && left === right;
 }
 
-// Detect evidence that disappeared, rather than ordinary substitutions. Unknown
-// text is never ignored; uncertain one-for-one edits remain meaningful changes.
+// Treat unrecognized text changes as potentially incomplete. A numeric value
+// substitution with the same surrounding label is a change, not missing text.
 export function textCoverageLost(source, oldText, newText) {
   const clean = source === 'library' ? libraryText : source === 'wishlist' ? wishlistText : x => x;
-  const oldLines = String(clean(oldText) ?? '').split('\n').map(x => x.trim()).filter(Boolean);
-  const newLines = String(clean(newText) ?? '').split('\n').map(x => x.trim()).filter(Boolean);
-  const remaining = [...newLines];
-  const removed = [];
-  for (const line of oldLines) { const i = remaining.indexOf(line); if (i < 0) removed.push(line); else remaining.splice(i, 1); }
-  if (removed.length > remaining.length) return true;
-  // A shortened section that is plainly contained in its predecessor is also loss.
-  return removed.some(line => remaining.some(next => next.length > 0 && next.length < line.length && line.includes(next)));
+  const lines = text => String(clean(text) ?? '').split('\n').map(x => x.trim()).filter(Boolean);
+  const remaining = lines(newText);
+  const shape = line => line.replace(/\b(?:ENGLISH|OVERALL) REVIEWS:/gi, 'REVIEWS:').replace(/\d[\d,.]*/g, '#');
+  for (const oldLine of lines(oldText)) {
+    let i = remaining.indexOf(oldLine);
+    if (i < 0) i = remaining.findIndex(line => shape(line) === shape(oldLine));
+    if (i < 0) return true;
+    remaining.splice(i, 1);
+  }
+  return false;
 }

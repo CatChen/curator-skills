@@ -609,6 +609,9 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
 }
 
 export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent, stem: stemOverride, ...policy} = {}) {
+  const checked = validate(env, {account: env?.account, accessScope: env?.accessScope ?? 'unknown'});
+  if (checked.errors.length) throw new Error(`Invalid capture: ${checked.errors.join('; ')}`);
+  incomplete = [...new Set([...incomplete, ...checked.incomplete])];
   const stem = stemOverride ?? cfgOf(env).file, main = path.join(destDir, `${stem}.json`), lock = path.join(destDir, `.${stem}.lock`);
   const decisionBytes = readIfExists(main);
   let existing = null;
