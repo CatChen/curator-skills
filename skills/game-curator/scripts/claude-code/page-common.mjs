@@ -56,12 +56,12 @@ export async function deliverEnvelope(envelope, o) {
 
 // Identity continuity across a collection (only when the caller passed identity: {salt}). Each call of a collector observes who is signed in
 // and compares it with the first observation of the run, so a switch, a sign-out or an expiry between batches, resume calls or navigations is
-// noticed (the run then stops and keeps its coherent partial evidence). The state is plain JSON: {checks, stable, broke, first, last}. An observation
+// noticed (the run then stops and keeps its coherent partial evidence). The state is plain JSON: {checks, stable, broke, covered, first, last}; covered is false when identity was added (or its salt changed) on a resume call, so earlier batches are never attested retroactively. An observation
 // that fails, or shows anything but one consistent signed-in account, makes the state unstable. ownerNow() reports whether this page shows
 // owner-only controls; it is evaluated only when given, so the final observation is tied to the page that was collected.
-export async function identityStep(state, identityOpt, ownerNow) {
+export async function identityStep(state, identityOpt, ownerNow, covered = true) {
   if (!identityOpt) return state ?? null;
-  const st = state ?? {checks: 0, stable: true, broke: false, first: null, last: null};
+  const st = state ?? {checks: 0, stable: true, broke: false, covered: covered !== false, first: null, last: null}; // covered: identity was active from the FIRST batch of the run
   let obs = null;
   try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
   if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
@@ -76,7 +76,7 @@ export async function identityStep(state, identityOpt, ownerNow) {
   return st;
 }
 export function identityOf(st) {
-  return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable}} : undefined;
+  return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable, broke: st.broke, covered: st.covered}} : undefined;
 }
 
 // Validators for identity state kept in the site's sessionStorage between navigations (data only; nothing read back is ever evaluated).
@@ -89,7 +89,7 @@ export function identityObsValid(o) {
 }
 export function identityStateValid(st) {
   if (st === null) return true;
-  return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'first', 'last'].includes(k))
-    && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean'
+  return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'covered', 'first', 'last'].includes(k))
+    && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean' && typeof st.covered === 'boolean'
     && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
 }

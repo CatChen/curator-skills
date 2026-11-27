@@ -36,7 +36,7 @@ function approve(file, args) {
 }
 const bindAs = (h, id = ID_A, alias = 'my-steam', salt) => { const probe = probeFor(id, salt); approve(h.file, {op: 'bind', probe, alias}); return {salt: probe.salt, alias, probe}; };
 const settingsOf = h => readSettingsFile(h.file).settings;
-const obs = (b, id, o = {}) => ({version: 1, sources: ['user-config'], loggedIn: true, consistent: true, problems: [], saltCheck: saltCheckOf(b.salt), sessionFingerprint: fingerprintSync(b.salt, id), pathFingerprint: null, owner: true, continuity: {checks: 2, stable: true}, ...o});
+const obs = (b, id, o = {}) => ({version: 1, sources: ['user-config'], loggedIn: true, consistent: true, problems: [], saltCheck: saltCheckOf(b.salt), sessionFingerprint: fingerprintSync(b.salt, id), pathFingerprint: null, owner: true, continuity: {checks: 2, stable: true, broke: false, covered: true}, ...o});
 const capture = (at, {identity, handles = true, rows = records} = {}) => ({format: 'game-curator-steam-export', version: 1, source: 'wishlist', capturedAt: at, method: 'browser-dom-claude-code', coverage: 'partial', warnings: [],
   diagnostics: {expectedCount: rows.length, uniqueCount: rows.length, ranksObserved: rows.length, placeholderNameRows: 0, complete: true, stopReason: 'complete', reorderHandles: handles, view: {sort: 'Your Rank', search: 'empty', filters: 'unknown'}, recordsSha256: sha(JSON.stringify(rows)), ...(identity ? {identity} : {})},
   accessScope: 'unknown', records: rows});
@@ -164,7 +164,7 @@ try {
     const main = fs.readFileSync(path.join(h.dest, 'wishlist.json'));
     for (const [name, rx, identity] of [['mismatch', /mismatch/, obs(b, ID_B)], ['ambiguous (conflict)', /ambiguous/, obs(b, ID_A, {consistent: false, problems: ['id-conflict'], sessionFingerprint: null})],
       ['signed out', /signed-out/, obs(b, ID_A, {loggedIn: false, sessionFingerprint: null})], ['login-state conflict', /ambiguous/, obs(b, ID_A, {consistent: false, problems: ['login-state-conflict'], sessionFingerprint: null})],
-      ['continuity broke', /ambiguous/, obs(b, ID_A, {continuity: {checks: 3, stable: false}})]]) {
+      ['continuity broke', /ambiguous/, obs(b, ID_A, {continuity: {checks: 3, stable: false, broke: true, covered: true}})]]) {
       const r = runSaver(h, capture('2026-01-05T00:00:00Z', {identity}), []);
       assert.equal(r.json.action, 'separate', name); assert.match(r.json.reason, rx); assert.deepEqual(fs.readFileSync(path.join(h.dest, 'wishlist.json')), main, `${name} leaves the verified cache untouched`);
       const manual = runSaver(h, capture('2026-01-06T00:00:00Z', {identity}), ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(manual.status, 1, `${name}: a manual alias cannot override`); assert.match(manual.err, /cannot override a known observation/);
@@ -178,7 +178,7 @@ try {
     for (const [name, identity] of [['no observation', () => undefined], ['wrong salt', b => obs(b, ID_A, {saltCheck: '00000000'})],
       ['page failed', () => ({version: 1, sources: [], loggedIn: null, consistent: false, problems: [], saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed'})],
       ['unsupported origin', () => ({version: 1, sources: [], loggedIn: null, consistent: false, problems: ['unsupported-origin'], saltCheck: 'abcdef01', sessionFingerprint: null, pathFingerprint: null})],
-      ['no markers', b => obs(b, ID_A, {loggedIn: null, sessionFingerprint: null})], ['continuity not established', b => obs(b, ID_A, {continuity: {checks: 1, stable: true}})], ['no continuity record', b => { const o = obs(b, ID_A); delete o.continuity; return o; }]]) {
+      ['no markers', b => obs(b, ID_A, {loggedIn: null, sessionFingerprint: null})], ['continuity not established', b => obs(b, ID_A, {continuity: {checks: 1, stable: true, broke: false, covered: true}})], ['no continuity record', b => { const o = obs(b, ID_A); delete o.continuity; return o; }]]) {
       const h2 = home(), b2 = bindAs(h2), gen = settingsOf(h2).steamAccount.generation, id2 = identity(b2);
       const none = runSaver(h2, capture('2026-01-01T00:00:00Z', {identity: id2}), []);
       assert.equal(none.json.action, 'separate', `${name}: unconfirmed → separate`); assert.match(none.json.reason, /not observed|not confirmed/);
@@ -204,7 +204,7 @@ try {
   { // an invalid embedded observation is rejected, never trusted (every fingerprint must be an actual string, no stray fields)
     const h = home(), b = bindAs(h);
     for (const bad of [{...obs(b, ID_A), salt: b.salt}, {...obs(b, ID_A), steamid: ID_A}, {...obs(b, ID_A), sessionFingerprint: 'zz'}, {...obs(b, ID_A), sessionFingerprint: [obs(b, ID_A).sessionFingerprint]}, {...obs(b, ID_A), pathFingerprint: [obs(b, ID_A).sessionFingerprint]},
-      {...obs(b, ID_A), saltCheck: [saltCheckOf(b.salt)]}, {...obs(b, ID_A), version: 2}, {...obs(b, ID_A), problems: ['made-up']}, {...obs(b, ID_A), problems: 'none'}, {...obs(b, ID_A), continuity: {checks: 0, stable: true}}, {...obs(b, ID_A), continuity: {checks: 2, stable: 'yes'}}, {...obs(b, ID_A), owner: 'yes'}, 'text']) {
+      {...obs(b, ID_A), saltCheck: [saltCheckOf(b.salt)]}, {...obs(b, ID_A), version: 2}, {...obs(b, ID_A), problems: ['made-up']}, {...obs(b, ID_A), problems: 'none'}, {...obs(b, ID_A), continuity: {checks: 0, stable: true, broke: false, covered: true}}, {...obs(b, ID_A), continuity: {checks: 2, stable: 'yes', broke: false, covered: true}}, {...obs(b, ID_A), owner: 'yes'}, 'text']) {
       const r = runSaver(h, capture('2026-01-01T00:00:00Z', {identity: bad}), []); assert.equal(r.status, 1); assert.match(r.err, /diagnostics\.identity|Rejected/);
     }
     assert.deepEqual(files(h), []);
@@ -249,7 +249,16 @@ try {
     const binding2 = settingsOf(h).steamAccount;
     const sel = selectSnapshots(read(), {source: 'wishlist', accessScope: 'signed-in', binding: binding2});
     assert.ok(!sel.selected || generationOf(sel.selected) === gen2, 'nothing of the old generation is selected');
-    assert.ok(sel.supporting.some(x => generationOf(x.capture) === gen1 && x.reasons.includes('captured under a different or no account binding')), 'the old generation is supporting evidence only');
+    assert.ok(sel.rejected.some(x => generationOf(x.capture) === gen1 && /prior account binding/.test(x.reasons[0])), 'prior-generation evidence is rejected, not supporting');
+    assert.ok(!sel.supporting.some(x => generationOf(x.capture) === gen1));
+    { // genuinely unattributed (legacy or manual) captures stay separately caveated; with no binding supplied, mixed generations are never one verified account
+      const legacy = JSON.parse(JSON.stringify(read().find(c => generationOf(c) === gen1))); delete legacy.diagnostics.attestations.identity; legacy.capturedAt = '2025-11-01T00:00:00Z';
+      const sel3 = selectSnapshots([legacy], {source: 'wishlist', accessScope: 'signed-in', binding: binding2});
+      assert.equal(sel3.selected, null); assert.ok(sel3.supporting.some(x => /outside any account binding/.test(x.reasons.join())), 'legacy: caveated supporting evidence');
+      const g1cap = read().find(c => generationOf(c) === gen1), g2cap = JSON.parse(JSON.stringify(g1cap)); g2cap.diagnostics.attestations.identity.generation = gen2; g2cap.capturedAt = '2026-02-01T00:00:00Z';
+      const mixed = selectSnapshots([g1cap, g2cap], {source: 'wishlist', account: 'my-steam', accessScope: 'signed-in'});
+      assert.equal(mixed.selected, null, 'no binding supplied: neither generation is silently current'); assert.equal(mixed.supporting.length, 2); assert.ok(mixed.supporting.every(x => /not supplied/.test(x.reasons.join())));
+    }
     assert.throws(() => selectSnapshots(read(), {source: 'wishlist', account: 'other', accessScope: 'signed-in', binding: binding2}), /differs from the bound account/);
     // once a capture is verified under the new generation it is selectable, and the old one is not
     fs.unlinkSync(path.join(h.dest, 'wishlist.json'));
@@ -283,12 +292,12 @@ try {
   // ---- policy unit checks
   {
     const salt = newSalt(), binding = parseSettings({version: 2, persistence: {profileAndFeedback: true, steamCache: true}, steamAccount: {alias: 'a', approvedAt: '2026-01-01T00:00:00Z', generation: newSalt(), fingerprint: {alg: 'sha256-salted-v1', salt, value: fingerprintSync(salt, ID_A)}}}).steamAccount;
-    const o = (id, extra = {}) => ({version: 1, sources: ['userinfo-attr'], loggedIn: true, consistent: true, problems: [], saltCheck: saltCheckOf(salt), sessionFingerprint: fingerprintSync(salt, id), pathFingerprint: fingerprintSync(salt, ID_A), owner: true, continuity: {checks: 2, stable: true}, ...extra});
+    const o = (id, extra = {}) => ({version: 1, sources: ['userinfo-attr'], loggedIn: true, consistent: true, problems: [], saltCheck: saltCheckOf(salt), sessionFingerprint: fingerprintSync(salt, id), pathFingerprint: fingerprintSync(salt, ID_A), owner: true, continuity: {checks: 2, stable: true, broke: false, covered: true}, ...extra});
     assert.deepEqual(evaluateIdentity({binding, observation: o(ID_A), ownerEvidence: true}), {source: 'userinfo-attr', result: 'match', ownership: 'verified', note: 'bound account, owner evidence present on the observed page'});
     assert.equal(evaluateIdentity({binding, observation: o(ID_B), ownerEvidence: true}).result, 'mismatch');
     assert.equal(evaluateIdentity({binding: null, observation: o(ID_A), ownerEvidence: true}).result, 'unbound');
-    assert.equal(evaluateIdentity({binding, observation: o(ID_A, {continuity: {checks: 2, stable: false}}), ownerEvidence: true}).result, 'ambiguous');
-    assert.equal(evaluateIdentity({binding, observation: o(ID_A, {continuity: {checks: 1, stable: true}}), ownerEvidence: true}).result, 'unobserved');
+    assert.equal(evaluateIdentity({binding, observation: o(ID_A, {continuity: {checks: 2, stable: false, broke: true, covered: true}}), ownerEvidence: true}).result, 'ambiguous');
+    assert.equal(evaluateIdentity({binding, observation: o(ID_A, {continuity: {checks: 1, stable: true, broke: false, covered: true}}), ownerEvidence: true}).result, 'unobserved');
     assert.equal(evaluateIdentity({binding, observation: o(ID_A, {loggedIn: false, sessionFingerprint: null}), ownerEvidence: true}).result, 'signed-out');
     assert.equal(evaluateIdentity({binding, observation: o(ID_A, {problems: ['invalid-account-id'], consistent: false, sessionFingerprint: null}), ownerEvidence: true}).result, 'ambiguous');
     assert.equal(identityPolicy({binding: null, evaluation: {result: 'unbound'}, manualAccount: 'x'}).account, 'x');

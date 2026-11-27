@@ -93,10 +93,12 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     S ??= fresh();
     S.calls++;
     if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    const priorIdOpt = S.opts.identity;
     for (const k of ['maxPages', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const idOpt = S.opts.identity, ownerNow = () => !!document.querySelector('.review_box .control_block');
     // Who is signed in on THIS page, before its rows are merged: a change or loss since the first page of the run stops the run and these rows are not added.
-    if (idOpt) { S.identity = await identityStep(S.identity ?? null, idOpt, ownerNow); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
+    const lateId = S.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt);
+    if (idOpt) { S.identity = await identityStep(lateId ? null : (S.identity ?? null), idOpt, ownerNow, !lateId); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxPages = Math.min(S.opts.maxPages ?? 20, HARD.pages);
     const seen = new Set(S.rows.map(r => r.reviewUrl));
 

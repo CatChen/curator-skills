@@ -113,11 +113,13 @@ await (window.__gcReplayRun = async (opts = {}) => {
     S ??= fresh();
     S.calls++;
     if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    const priorIdOpt = S.opts.identity;
     for (const k of ['maxYears', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     S.identityYears ??= [];
     const idOpt = S.opts.identity, ownerNow = () => !!snap.ownerControls;
     // Who is signed in on THIS report page, before it is merged: each year gets its own observation, and a change since the first report stops the run.
-    if (idOpt) { S.identity = await identityStep(S.identity ?? null, idOpt, ownerNow); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
+    const lateId = S.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt);
+    if (idOpt) { S.identity = await identityStep(lateId ? null : (S.identity ?? null), idOpt, ownerNow, !lateId); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxYears = Math.min(S.opts.maxYears ?? 20, HARD.years);
     const target = year => `${location.origin}${S.accountPath}/${year}`;
 

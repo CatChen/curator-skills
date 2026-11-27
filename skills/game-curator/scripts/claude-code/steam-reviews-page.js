@@ -181,9 +181,9 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     });
     return {callStart, left, sleep, outOfCall, nextMutation};
   }
-  async function identityStep(state, identityOpt, ownerNow) {
+  async function identityStep(state, identityOpt, ownerNow, covered = true) {
     if (!identityOpt) return state ?? null;
-    const st = state ?? {checks: 0, stable: true, broke: false, first: null, last: null};
+    const st = state ?? {checks: 0, stable: true, broke: false, covered: covered !== false, first: null, last: null}; // covered: identity was active from the FIRST batch of the run
     let obs = null;
     try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
     if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
@@ -198,7 +198,7 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     return st;
   }
   function identityOf(st) {
-    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable}} : undefined;
+    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable, broke: st.broke, covered: st.covered}} : undefined;
   }
   function identityObsValid(o) {
     const hex = v => v === null || (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
@@ -209,8 +209,8 @@ await (window.__gcReviewsRun = async (opts = {}) => {
   }
   function identityStateValid(st) {
     if (st === null) return true;
-    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'first', 'last'].includes(k))
-      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean'
+    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'covered', 'first', 'last'].includes(k))
+      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean' && typeof st.covered === 'boolean'
       && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
   }
   async function deliverEnvelope(envelope, o) {
@@ -301,10 +301,12 @@ await (window.__gcReviewsRun = async (opts = {}) => {
     S ??= fresh();
     S.calls++;
     if (opts.identity !== undefined && !(opts.identity && typeof opts.identity === 'object' && Object.keys(opts.identity).join() === 'salt' && typeof opts.identity.salt === 'string' && /^[A-Za-z0-9_-]{22}$/.test(opts.identity.salt))) throw new Error('identity must be {salt: <22-character base64url salt>}');
+    const priorIdOpt = S.opts.identity;
     for (const k of ['maxPages', 'retainMs', 'identity']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const idOpt = S.opts.identity, ownerNow = () => !!document.querySelector('.review_box .control_block');
     // Who is signed in on THIS page, before its rows are merged: a change or loss since the first page of the run stops the run and these rows are not added.
-    if (idOpt) { S.identity = await identityStep(S.identity ?? null, idOpt, ownerNow); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
+    const lateId = S.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt);
+    if (idOpt) { S.identity = await identityStep(lateId ? null : (S.identity ?? null), idOpt, ownerNow, !lateId); if (S.identity.broke && stopReason === null) stopReason = 'identity-changed'; }
     const maxPages = Math.min(S.opts.maxPages ?? 20, HARD.pages);
     const seen = new Set(S.rows.map(r => r.reviewUrl));
 

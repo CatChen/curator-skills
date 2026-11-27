@@ -418,17 +418,23 @@ export function fieldLosses(existing, next) { return cfgOf(next).fieldLosses(exi
 // Add game names to a reviews envelope from a library capture that is verified to be the same account. The review page never shows
 // a name, so this is the only source; every name added is marked nameSource "verified-library-capture" and the library capture's
 // time and size are recorded. A review whose game is absent from the library simply stays without a name. Returns {env, enrichment}.
-export function enrichReviewNames(env, library, {libraryAccount, librarySha256} = {}) {
+export function enrichReviewNames(env, library, {libraryAccount, librarySha256, binding = null, identity = null} = {}) {
   if (env?.source !== 'reviews') throw new Error('name enrichment applies only to a reviews capture');
   if (!validExisting(library, 'library')) throw new Error('the names source is not a valid library capture');
-  const account = library.account ?? libraryAccount;
-  if (!env.account || !account || account !== env.account) throw new Error('names can only be added from a library capture verified as the same account (both captures must carry the same account alias; use --library-account only for a library file the user confirmed)');
+  if (binding) { // an account is bound: both captures must be verified under THIS binding generation; no manual alias can stand in
+    if (libraryAccount !== undefined) throw new Error('--library-account cannot be used while an account is bound: the library capture must itself be verified under the current binding');
+    if (!(identity?.result === 'match' && identity.ownership === 'verified')) throw new Error('names can only be added to a reviews capture verified as the bound account');
+    const att = library.diagnostics?.attestations?.identity;
+    if (library.account !== binding.alias || !(att?.by === 'binding' && att.result === 'match' && att.ownership === 'verified' && att.generation === binding.generation)) throw new Error('the library capture was not verified under the current account binding (a different generation, a legacy or manual capture, or another alias cannot supply names)');
+  }
+  const account = binding ? binding.alias : (library.account ?? libraryAccount);
+  if (!binding && (!env.account || !account || account !== env.account)) throw new Error('names can only be added from a library capture verified as the same account (both captures must carry the same account alias; use --library-account only for a library file the user confirmed)');
   if (!['signed-in', 'public'].includes(library.accessScope)) throw new Error('the library capture has no established access scope');
   const names = new Map(library.records.filter(r => typeof r.name === 'string' && r.name.trim()).map(r => [r.appid, r.name]));
   let named = 0;
   const records = env.records.map(r => { if (!names.has(r.appid)) return r; named++; return {...r, name: names.get(r.appid), nameSource: 'verified-library-capture'}; });
   if (typeof librarySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(librarySha256)) throw new Error('enrichment must be bound to the exact library snapshot: the SHA-256 of its bytes is required (a local digest identifies the file; it does not authenticate its source)');
-  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length, librarySha256, libraryAccount: account};
+  const enrichment = {names: 'verified-library-capture', namedRecords: named, recordsWithoutName: records.length - named, libraryCapturedAt: library.capturedAt, libraryRecords: library.records.length, librarySha256, libraryAccount: account, ...(binding ? {generation: binding.generation} : {})};
   const warnings = records.length - named ? [...env.warnings, 'Some review names are missing from the verified library capture.'] : env.warnings;
   return {env: {...env, records, warnings}, enrichment};
 }
@@ -508,6 +514,8 @@ export function selectSnapshots(captures, {source, account, accessScope, year, b
     if (source === 'replay' && capture.records[0]?.year !== year) continue;
     const conflict = knownConflict(capture);
     if (conflict) { rejected.push({capture, reasons: [conflict]}); continue; } // a known conflict is never supporting evidence, whether or not an alias was saved
+    const gen = generationOf(capture);
+    if (binding && gen !== null && gen !== binding.generation) { rejected.push({capture, reasons: ['verified under a prior account binding (a different generation) that shared this alias']}); continue; } // never current-account evidence
     const v = validate(capture, {account: capture.account, accessScope: capture.accessScope ?? 'unknown'});
     const inconsistentTransfer = VERIFIED_TRANSFER_LEVELS.has(capture.diagnostics?.attestations?.transfer?.level) && !verifiedTransfer(capture);
     if (v.errors.length || inconsistentTransfer || (capture.account && capture.account !== account) || (capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope)) {
@@ -516,7 +524,8 @@ export function selectSnapshots(captures, {source, account, accessScope, year, b
     }
     const reasons = [...v.incomplete, ...(source === 'replay' ? SOURCES.replay.yearIncomplete(capture.diagnostics, capture.records[0]) : [])];
     if (capture.account !== account) reasons.push('account identity differs or is unknown');
-    if (binding && generationOf(capture) !== binding.generation) reasons.push('captured under a different or no account binding');
+    if (binding && gen === null) reasons.push('captured outside any account binding (legacy or manual): caveated, not verified under this binding');
+    if (!binding && gen !== null) reasons.push('verified under an account binding that was not supplied: pass the current binding to treat it as current evidence');
     if (capture.accessScope !== accessScope) reasons.push('access scope differs or is unknown');
     if (!cfgOf(capture).viewOk(capture)) reasons.push('view is not verified');
     if (!verifiedTransfer(capture)) reasons.push('transfer provenance is not verified');
@@ -662,10 +671,11 @@ function writeNew(file, text) { // exclusive creation, owner-only, read back
 export function applyIdentity(env, binding, manualAccount) {
   const out = JSON.parse(JSON.stringify(env)), d = out.diagnostics ?? {};
   const observation = d.identity;
+  if (observation !== undefined) { const bad = checkObservation(observation); if (bad.length) throw new Error(`Invalid capture: ${bad.join('; ')}`); } // validated BEFORE it is consumed: a malformed observation is never downgraded to unobserved
   if (isPlainObject(out.diagnostics)) delete out.diagnostics.identity;
   if (!binding) { if (manualAccount !== undefined && out.account === undefined) out.account = manualAccount; return {env: canonicalize(out), block: null, identity: null}; }
   const ownerEvidence = SOURCES[out.source]?.ownerEvidence?.(d) === true;
-  const evaluation = evaluateIdentity({binding, observation, ownerEvidence});
+  const evaluation = evaluateIdentity({binding, observation, ownerEvidence, identityChanged: d.stopReason === 'identity-changed'});
   const pol = identityPolicy({binding, evaluation, manualAccount}); // only an explicit manualAccount counts: an alias merely present on the envelope is not a confirmation
   if (pol.account === undefined) delete out.account; else out.account = pol.account;
   if (isPlainObject(out.diagnostics)) {
@@ -688,6 +698,9 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
     if (bindingKey(readSettingsFile(settingsFile).settings.steamAccount) !== bindingKey(bound0)) throw new Error('The account binding changed during the save; nothing more was written');
     extraCheck?.();
   };
+  const enr = env?.diagnostics?.attestations?.enrichment;
+  if (enr && bound0 && enr.generation !== bound0.generation) throw new Error('review names were attached under a different (or no) account binding than the one in force; nothing was written');
+  if (enr && !bound0 && enr.generation !== undefined) throw new Error('review names were attached under an account binding that is no longer in force; nothing was written');
   const applied = applyIdentity(env, bound0, manualAccount);
   env = applied.env;
   if (applied.block && !policy.identityBlock) policy.identityBlock = applied.block;
@@ -889,7 +902,8 @@ if (isMain()) {
         if (!libBytes) throw new Error('names source does not exist');
         library = JSON.parse(libBytes.toString('utf8'));
       } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
-      const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes)});
+      const pre = binding ? applyIdentity(env, binding, accountArg) : null; // the same binding revision save() will use; the observation stays on env for save() to consume
+      const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes), binding, identity: pre?.identity ? {result: pre.identity.result, ownership: pre.identity.ownership} : null});
       const bad = verifyNameAttribution(result.env, library);
       if (bad.length) throw new Error(`name attribution failed verification:\n- ${bad.join('\n- ')}`);
       toSave = result.env; attestations.enrichment = result.enrichment;

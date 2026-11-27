@@ -33,7 +33,7 @@ export function checkObservation(o) {
   if ('owner' in o && !(o.owner === true || o.owner === false || o.owner === null)) bad.push('diagnostics.identity owner is invalid');
   if ('continuity' in o) {
     const c = o.continuity;
-    if (!isPlain(c) || Object.keys(c).sort().join() !== 'checks,stable' || !Number.isSafeInteger(c.checks) || c.checks < 1 || typeof c.stable !== 'boolean') bad.push('diagnostics.identity continuity is invalid');
+    if (!isPlain(c) || Object.keys(c).sort().join() !== 'broke,checks,covered,stable' || !Number.isSafeInteger(c.checks) || c.checks < 1 || typeof c.stable !== 'boolean' || typeof c.broke !== 'boolean' || typeof c.covered !== 'boolean') bad.push('diagnostics.identity continuity is invalid');
   }
   return bad;
 }
@@ -41,15 +41,21 @@ export function checkObservation(o) {
 const unobservedNote = {noObservation: 'the capture carries no identity observation', malformed: 'the identity observation is malformed'};
 
 // Evaluate authenticated identity and page ownership against the binding.
-//   binding        parsed steamAccount or null
-//   observation    diagnostics.identity from the page (or undefined)
-//   ownerEvidence  true when the collector observed the page's owner-only controls (existing, per-source evidence)
-export function evaluateIdentity({binding, observation, ownerEvidence = false}) {
+//   binding          parsed steamAccount or null
+//   observation      diagnostics.identity from the page (or undefined); it must already have passed checkObservation
+//   ownerEvidence    true when the collector observed the page's owner-only controls (existing, per-source evidence)
+//   identityChanged  the collector itself stopped the run because the signed-in identity changed or was lost
+// Known observations win over missing evidence: a changed identity, a mismatching account and a contradiction between owner controls and the
+// URL are decided BEFORE continuity is judged, so none of them can be turned into "unobserved" (and then a manual fallback) by dropping
+// the continuity record or by a final observation that failed or found no markers.
+export function evaluateIdentity({binding, observation, ownerEvidence = false, identityChanged = false}) {
   if (!binding) return {result: 'unbound', ownership: 'unverified', note: 'no account is bound'};
   const un = note => ({result: 'unobserved', ownership: 'unverified', note});
-  if (observation === undefined) return un(unobservedNote.noObservation);
-  if (checkObservation(observation).length) return un(unobservedNote.malformed);
-  const source = observation.sources[0] ?? null, base = {source, ownership: 'unverified'};
+  const changed = {result: 'ambiguous', ownership: 'unverified', note: 'the signed-in identity changed or was lost during the run'};
+  if (observation === undefined) return identityChanged ? changed : un(unobservedNote.noObservation);
+  if (checkObservation(observation).length) return identityChanged ? changed : un(unobservedNote.malformed);
+  const source = observation.sources[0] ?? null, base = {source, ownership: 'unverified'}, c = observation.continuity;
+  if (identityChanged || c?.broke === true) return {...changed, source};
   if (observation.error) return un('the page could not read its identity');
   // Extraction unavailable (nothing was read) is different from evidence that is present but unusable or contradictory.
   if (observation.problems.length === 1 && observation.problems[0] === 'unsupported-origin') return un('the page is not a supported Steam origin, so no identity was read');
@@ -57,16 +63,14 @@ export function evaluateIdentity({binding, observation, ownerEvidence = false}) 
   if (observation.loggedIn === false) return {...base, result: 'signed-out', note: 'the page reports an explicitly signed-out session'};
   if (observation.loggedIn === null || observation.sessionFingerprint === null) return un('no signed-in identity markers were found on the page');
   if (observation.saltCheck !== saltCheckOf(binding.fingerprint.salt)) return un('the observation was computed with a different salt than the binding');
-  // Continuity: the account must have been the same at the start, at every checked boundary and at the end of the run.
-  if (!observation.continuity || observation.continuity.checks < 2) return un('identity was not checked at the start and end of the run, so continuity across the collection is not established');
-  if (observation.continuity.stable !== true) return {...base, result: 'ambiguous', note: 'the signed-in identity changed or was lost during the run'};
   if (observation.sessionFingerprint !== binding.fingerprint.value) return {...base, result: 'mismatch', note: 'the signed-in account is not the bound account'};
-  const path = observation.pathFingerprint;
-  if (path !== null && path !== observation.sessionFingerprint) {
-    // The URL names another account. With owner-only controls on the page that is a contradiction; without them it is simply someone else's public page.
-    return ownerEvidence ? {...base, result: 'ambiguous', ownership: 'contradicted', note: 'owner controls are shown but the page URL names a different account'}
-      : {...base, result: 'match', ownership: 'unverified', note: 'signed in as the bound account, but the page viewed belongs to another account'};
-  }
+  const path = observation.pathFingerprint, foreignPath = path !== null && path !== observation.sessionFingerprint;
+  if (foreignPath && ownerEvidence) return {...base, result: 'ambiguous', ownership: 'contradicted', note: 'owner controls are shown but the page URL names a different account'};
+  // Continuity: the account must have been the same, from the FIRST batch of the run, at the start, at every checked boundary and at the end.
+  if (!c || c.checks < 2) return un('identity was not checked at the start and end of the run, so continuity across the collection is not established');
+  if (c.covered === false) return un('identity was observed only for part of the run (earlier batches were collected without it), so it is not attested for them');
+  if (c.stable !== true) return {...base, result: 'ambiguous', note: 'the signed-in identity was not the same at every check of the run'};
+  if (foreignPath) return {...base, result: 'match', ownership: 'unverified', note: 'signed in as the bound account, but the page viewed belongs to another account'};
   const owned = ownerEvidence === true && observation.owner === true;
   return {...base, result: 'match', ownership: owned ? 'verified' : 'unverified', note: owned ? 'bound account, owner evidence present on the observed page' : 'bound account is signed in, but the observed page shows no owner-only evidence'};
 }

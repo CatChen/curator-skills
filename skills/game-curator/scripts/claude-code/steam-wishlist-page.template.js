@@ -69,9 +69,11 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     }
     S = window.__gcWishlist ??= fresh();
     S.stats.calls++;
+    const priorIdOpt = S.opts.identity;
     for (const k of ['identity', 'maxMs', 'maxSteps', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k]; // remembered across resume calls
     const idOpt = S.opts.identity, idEvery = Number.isInteger(opts.identityEveryMs) && opts.identityEveryMs >= 0 ? opts.identityEveryMs : 1000; let idAt = Date.now(); // identityEveryMs: test tuning only, not remembered
-    S.identity = await identityStep(S.identity, idOpt, ownerNow); // who is signed in at the start of this call; the first call fixes the account of the run
+    const lateId = S.stats.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt); // identity added (or re-salted) on a resume call: earlier batches were collected without it and are never attested retroactively
+    S.identity = await identityStep(lateId ? null : S.identity, idOpt, ownerNow, !lateId); // who is signed in at the start of this call; the first call fixes the account of the run
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 1000;
     const {got, stats} = S;
     let expected = expected0;

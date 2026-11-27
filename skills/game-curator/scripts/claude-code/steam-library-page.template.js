@@ -58,9 +58,11 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     }
     S = window.__gcLibrary ??= fresh();
     S.stats.calls++;
+    const priorIdOpt = S.opts.identity;
     for (const k of ['identity', 'maxMs', 'maxSteps', 'retainMs', 'quietMs', 'stallMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const idOpt = S.opts.identity, idEvery = Number.isInteger(opts.identityEveryMs) && opts.identityEveryMs >= 0 ? opts.identityEveryMs : 1000; let idAt = Date.now(); // identityEveryMs: test tuning only, not remembered
-    S.identity = await identityStep(S.identity, idOpt, ownerNow); // who is signed in at the start of this call; the first call fixes the account of the run
+    const lateId = S.stats.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt); // identity added (or re-salted) on a resume call: earlier batches were collected without it and are never attested retroactively
+    S.identity = await identityStep(lateId ? null : S.identity, idOpt, ownerNow, !lateId); // who is signed in at the start of this call; the first call fixes the account of the run
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 200;
     const quietMs = S.opts.quietMs ?? 800, stallMs = S.opts.stallMs ?? 1500; // quiet period that confirms completion; stall period before scrolling
     const {got, stats} = S;

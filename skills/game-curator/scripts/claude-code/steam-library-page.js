@@ -185,9 +185,9 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     });
     return {callStart, left, sleep, outOfCall, nextMutation};
   }
-  async function identityStep(state, identityOpt, ownerNow) {
+  async function identityStep(state, identityOpt, ownerNow, covered = true) {
     if (!identityOpt) return state ?? null;
-    const st = state ?? {checks: 0, stable: true, broke: false, first: null, last: null};
+    const st = state ?? {checks: 0, stable: true, broke: false, covered: covered !== false, first: null, last: null}; // covered: identity was active from the FIRST batch of the run
     let obs = null;
     try { obs = await observeIdentity({salt: identityOpt.salt}); } catch { obs = null; }
     if (obs) { try { obs.owner = ownerNow ? !!ownerNow() : null; } catch { obs.owner = null; } }
@@ -202,7 +202,7 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     return st;
   }
   function identityOf(st) {
-    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable}} : undefined;
+    return st && st.last ? {...st.last, continuity: {checks: st.checks, stable: st.stable, broke: st.broke, covered: st.covered}} : undefined;
   }
   function identityObsValid(o) {
     const hex = v => v === null || (typeof v === 'string' && /^[0-9a-f]{64}$/.test(v));
@@ -213,8 +213,8 @@ await (window.__gcLibraryRun = async (opts = {}) => {
   }
   function identityStateValid(st) {
     if (st === null) return true;
-    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'first', 'last'].includes(k))
-      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean'
+    return !!st && typeof st === 'object' && !Array.isArray(st) && Object.keys(st).every(k => ['checks', 'stable', 'broke', 'covered', 'first', 'last'].includes(k))
+      && Number.isSafeInteger(st.checks) && st.checks >= 0 && st.checks < 10000 && typeof st.stable === 'boolean' && typeof st.broke === 'boolean' && typeof st.covered === 'boolean'
       && (st.first === null || (typeof st.first === 'string' && /^[0-9a-f]{64}$/.test(st.first))) && (st.last === null || identityObsValid(st.last));
   }
   async function deliverEnvelope(envelope, o) {
@@ -275,9 +275,11 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     }
     S = window.__gcLibrary ??= fresh();
     S.stats.calls++;
+    const priorIdOpt = S.opts.identity;
     for (const k of ['identity', 'maxMs', 'maxSteps', 'retainMs', 'quietMs', 'stallMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const idOpt = S.opts.identity, idEvery = Number.isInteger(opts.identityEveryMs) && opts.identityEveryMs >= 0 ? opts.identityEveryMs : 1000; let idAt = Date.now(); // identityEveryMs: test tuning only, not remembered
-    S.identity = await identityStep(S.identity, idOpt, ownerNow); // who is signed in at the start of this call; the first call fixes the account of the run
+    const lateId = S.stats.calls > 1 && !!opts.identity && (!S.identity || priorIdOpt?.salt !== opts.identity.salt); // identity added (or re-salted) on a resume call: earlier batches were collected without it and are never attested retroactively
+    S.identity = await identityStep(lateId ? null : S.identity, idOpt, ownerNow, !lateId); // who is signed in at the start of this call; the first call fixes the account of the run
     const maxMs = S.opts.maxMs ?? 150000, maxSteps = S.opts.maxSteps ?? 200;
     const quietMs = S.opts.quietMs ?? 800, stallMs = S.opts.stallMs ?? 1500; // quiet period that confirms completion; stall period before scrolling
     const {got, stats} = S;
