@@ -18,6 +18,10 @@ FIELDS = {
     "Original Publication Year": "original_publication_year", "Number of Pages": "pages",
 }
 
+# Columns kept verbatim under `original`: the mapped fields plus reread and ownership signals. Other export columns
+# (private notes, purchase details, recommenders, condition) are not needed for curation and are not retained.
+KEPT_COLUMNS = set(FIELDS) | {"Read Count", "Owned Copies"}
+
 def clean_identifier(value):
     value = value.strip()
     # Goodreads exports may wrap ISBN in a spreadsheet formula, e.g. ="123".
@@ -64,8 +68,10 @@ def normalize(stream, captured_at=None):
                 warnings.append(f'Row {line}: repeated Goodreads book ID; retained separately')
         else:
             ids[book_id] = item.copy()
-        item['original'] = row
+        item['original'] = {k: v for k, v in row.items() if k in KEPT_COLUMNS}
         records.append(item)
+    if headers and (omitted := [h for h in headers if h not in KEPT_COLUMNS]):
+        warnings.insert(0, f'{len(omitted)} export columns (such as private notes) were not retained.')
     return {'format': 'book-curator-goodreads-normalized', 'version': 1,
             'source': 'goodreads-csv', 'method': 'local-csv-normalization',
             'processedAt': captured_at or datetime.now(timezone.utc).isoformat(),

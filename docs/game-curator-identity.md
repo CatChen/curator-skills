@@ -4,7 +4,7 @@ The procedure for agents is in [account identity](../skills/game-curator/referen
 
 ## Identity and cache policy
 
-One user may bind one Steam account. The binding stores a salted fingerprint and generation in settings; binding, cache consent and host permission are independent. Bind, change or revoke only at the user's explicit request. Do not store raw account identifiers in captures or reports.
+One user may bind one Steam account. The binding stores a salted fingerprint and generation in settings. The salt is stored beside the fingerprint and SteamID64 values come from a small, enumerable range, so the fingerprint is a pseudonym for change detection, not a way to hide the account: anyone who can read `settings.json` could recover the ID by enumeration; binding, cache consent and host permission are independent. Bind, change or revoke only at the user's explicit request. Do not store raw account identifiers in captures or reports.
 
 The saver rejects known account conflicts, broken identity continuity, signed-out observations and incompatible binding generations. For unbound replacement of an attributed cache, explicitly confirm and supply its alias. A capture without a binding generation is unverified; one from another generation is not current-account evidence even if aliases match. A successfully confirmed new capture may replace an unattributed legacy file.
 
@@ -30,4 +30,4 @@ Run 2026-11-26/27 against one signed-in account, read-only, with a **scratch** s
 
 ## Privacy audit notes (existing fields, tracked narrowly)
 
-Navigation targets are not persisted identifiers. Replay's `next` navigation URL carries the numeric account path so the run can continue; it is used inside the run and is never written to a capture. Separately, existing collectors persist a page path in `diagnostics.urlPath` and review URLs, which contain the public profile vanity name; that is existing behavior, not part of this change, and a candidate for a focused scrub or opt-out. Public reports from tests and acceptance stay sanitized (no vanity names, persona names or numeric IDs).
+Navigation targets are not persisted identifiers. Replay's `next` navigation URL carries the numeric account path so the run can continue; it is used inside the run and is never written to a capture. Collectors still read the page path and review URLs to validate that every review belongs to the collected list, but the saver omits `diagnostics.urlPath` and each review's `reviewUrl` before writing (the profile path holds the vanity name or SteamID64), and records what it omitted in `diagnostics.attestations.minimized`. Caches saved before this change may still contain them; they are not rewritten, and the user may delete those fields. Public reports from tests and acceptance stay sanitized (no vanity names, persona names or numeric IDs).
