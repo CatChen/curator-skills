@@ -165,9 +165,17 @@ const settledLibrary=await collectLibrary(tabWith([{expected:1,view:{tab:'all',s
 assert.equal(settledLibrary.diagnostics.complete,true);
 // A retained row may stay unchanged while its current observed fields change.
 let observationReads=0;
-const changingLibrary=await collectLibrary({playwright:{evaluate:async()=>({expected:1,records:[{appid:1,name:++observationReads<3?'Old':'New',pageText:'Fixture'}]})}});
-assert.equal(changingLibrary.diagnostics.complete,true);
-assert.ok(observationReads>=7, 'settling restarts after current observations change');
+{
+  const realNow=Date.now, realTimeout=globalThis.setTimeout;
+  let clock=0;
+  try {
+    Date.now=()=>clock;
+    globalThis.setTimeout=(callback,delay)=>{ clock+=delay; queueMicrotask(callback); return 0; };
+    const changingLibrary=await collectLibrary({playwright:{evaluate:async()=>({expected:1,records:[{appid:1,name:++observationReads<3?'Old':'New',pageText:'Fixture'}]})}});
+    assert.equal(changingLibrary.diagnostics.complete,true);
+    assert.ok(observationReads>=7, 'settling restarts after current observations change');
+  } finally { Date.now=realNow; globalThis.setTimeout=realTimeout; }
+}
 const library=await collectLibrary(tabWith([{expected:2,records:[{appid:1,name:'One'}]}]));
 assert.ok(library.warnings.some(x=>x.includes('collected 1')));
 const changedLibrary=await collectLibrary(tabWith([
