@@ -289,7 +289,7 @@ fs.rmSync(tmp, {recursive: true});
   const stamped = {...dl, capturedAt: '2026-11-26T04:30:01.000Z'}; fs.writeFileSync(path.join(home2, 'x.json'), JSON.stringify(stamped));
   // malformed arguments are errors, never silently skipped
   for (const [label, args2, re] of [['summary not JSON', ['--provenance', 'download', '--page-summary', '{nope'], /not valid JSON/], ['summary without download provenance', ['--page-summary', sumArg], /applies only with --provenance download/],
-    ['unknown provenance', ['--provenance', 'trust-me'], /must be tool-result or download/], ['missing provenance value', ['--provenance'], /needs a value/], ['missing summary value', ['--provenance', 'download', '--page-summary'], /needs a value/]]) {
+    ['unknown provenance', ['--provenance', 'trust-me'], /must be tool-result, download or hook-capture/], ['missing provenance value', ['--provenance'], /needs a value/], ['missing summary value', ['--provenance', 'download', '--page-summary'], /needs a value/]]) {
     const r2 = run(dlFile, ...baseFlags, ...args2); assert.notEqual(r2.status, 0, label); assert.match(r2.stderr, re, label);
   }
   // an array-shaped file does not by itself establish tool-result provenance

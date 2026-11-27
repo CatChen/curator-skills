@@ -24,11 +24,12 @@
 // the script runs; it is NOT removed by a timer, so an abandoned run leaves its data in this tab's sessionStorage until it is cancelled,
 // discarded by a later run, or the tab closes.
 // The leading `await` matters: Claude in Chrome's tool does not await a trailing promise (it returns {}).
-// Options (object literal on the last line; maxYears, deliver and retainMs are remembered across years):
+// Options (object literal on the last line; maxYears and retainMs are remembered across years; deliver is not (pass it on every call: restored state never starts a download)):
 //   maxYears (20, at most 30)  fresh (discard saved state)  cancel (remove the saved state and stop)  callBudgetMs (20000)
 //   settleMs (1200) / settleCapMs (10000): how long the report's text and game references must stay unchanged before it is taken, and the most time
 //   spent waiting for that (test seams; leave them alone)
-//   deliver 'return' | 'download' and retainMs: see page-common.mjs
+//   deliver 'return' | 'download' | 'hook' and retainMs: see page-common.mjs ('hook' returns the envelope exactly like 'return' and only
+//   states that this call opts into the skill's PostToolUse hook staging it privately; the page itself does nothing different)
 await (window.__gcReplayRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();
   /*@@SHARED@@*/
@@ -80,8 +81,8 @@ await (window.__gcReplayRun = async (opts = {}) => {
       if (![S.born, S.touched].every(t => isInt(t, 1e14)) || !isInt(S.activeMs, 1e9)) return 'bad timestamps';
       if (![S.repeats, S.attempts, S.calls].every(n => isInt(n, 10000)) || typeof S.owner !== 'boolean') return 'bad counters or owner flag';
       if (!Array.isArray(S.warnings) || S.warnings.length > HARD.warnings || !S.warnings.every(w => typeof w === 'string' && w.length <= 600)) return 'bad warnings';
-      if (!has(S.opts, ['maxYears', 'deliver', 'retainMs']) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
-        || !(S.opts.deliver === undefined || ['return', 'download'].includes(S.opts.deliver)) || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
+      if (!has(S.opts, ['maxYears', 'retainMs']) || !(S.opts.maxYears === undefined || (Number.isInteger(S.opts.maxYears) && S.opts.maxYears >= 1 && S.opts.maxYears <= HARD.years))
+        || !(S.opts.retainMs === undefined || (Number.isFinite(S.opts.retainMs) && S.opts.retainMs >= 1000 && S.opts.retainMs <= 3600000))) return 'bad options';
       if (!has(S.view, ['kind', 'language']) || S.view.kind !== 'annual-report' || !isText(S.view.language, 20)) return 'bad view';
       for (const list of [S.visited, S.pending]) if (!Array.isArray(list) || list.length > HARD.years || !list.every(isYear) || new Set(list).size !== list.length) return 'bad year list';
       if (!(S.requested === null || isYear(S.requested))) return 'bad requested year';
@@ -110,7 +111,7 @@ await (window.__gcReplayRun = async (opts = {}) => {
     }
     S ??= fresh();
     S.calls++;
-    for (const k of ['maxYears', 'deliver', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
+    for (const k of ['maxYears', 'retainMs']) if (opts[k] !== undefined) S.opts[k] = opts[k];
     const maxYears = Math.min(S.opts.maxYears ?? 20, HARD.years);
     const target = year => `${location.origin}${S.accountPath}/${year}`;
 
@@ -176,6 +177,6 @@ await (window.__gcReplayRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: S.opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
   }
 })({})
