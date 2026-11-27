@@ -93,8 +93,8 @@ export const generationOf = capture => capture?.diagnostics?.attestations?.ident
 
 // Combine the evaluation with the caller's manual alias into what is recorded and a reason that blocks saving.
 // Returns {account, scope, block, attestation}. Throws when a manual alias would contradict a KNOWN observation.
-// Manual confirmation stands in only where extraction was unavailable (unbound or unobserved); it is recorded as such and is never a match.
-export function identityPolicy({binding, evaluation, manualAccount}) {
+// Manual confirmation can also establish ownership of a library page when owner controls are unavailable; it never overrides a known conflict.
+export function identityPolicy({binding, evaluation, manualAccount, confirmPageOwnership = false}) {
   if (!binding) return {account: manualAccount, scope: undefined, block: null, attestation: null}; // unbound: exactly the manual flow
   const e = evaluation, gen = binding.generation;
   const record = {result: e.result, ownership: e.ownership, ...(e.source ? {source: e.source} : {}), generation: gen};
@@ -102,7 +102,8 @@ export function identityPolicy({binding, evaluation, manualAccount}) {
     if (manualAccount !== undefined && manualAccount !== binding.alias) throw new Error('the manual alias conflicts with the bound account; change the binding explicitly instead');
     return {account: binding.alias, scope: 'signed-in', block: null, attestation: {by: 'binding', ...record}};
   }
-  if (e.result === 'match') { // signed in as the bound account, but this page is not shown to be that account's own
+  if (e.result === 'match') { // signed in as the bound account, but ownership could not be observed
+    if (confirmPageOwnership && manualAccount === binding.alias) return {account: binding.alias, scope: undefined, block: null, attestation: {by: 'user', ...record, ownership: 'confirmed', basis: 'manual-confirmation'}};
     if (manualAccount !== undefined) throw new Error(`a manual alias cannot establish page ownership: ${e.note}`);
     return {account: undefined, scope: undefined, block: `page ownership is not verified (${e.note})`, attestation: {by: 'binding', ...record}};
   }

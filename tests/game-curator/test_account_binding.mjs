@@ -58,7 +58,8 @@ try {
     const r = runSaver(h, capture('2026-01-01T00:00:00Z'), ['--account', 'my-steam', '--access-scope', 'signed-in']);
     assert.equal(r.json.action, 'create');
     const e = stored(h); assert.equal(e.account, 'my-steam'); assert.ok(!('identity' in e.diagnostics.attestations)); assert.equal(e.diagnostics.attestations.account, 'my-steam');
-    assert.equal(runSaver(h, capture('2026-01-02T00:00:00Z'), []).json.action, 'replace');
+    const anonymous = runSaver(h, capture('2026-01-02T00:00:00Z'), []); assert.equal(anonymous.status, 1); assert.match(anonymous.err, /Confirm the existing cache account/);
+    assert.equal(runSaver(h, capture('2026-01-02T00:00:00Z'), ['--account', 'my-steam']).json.action, 'replace');
   }
 
   // ---- bind / change / revoke: plan first, apply only the approved plan; persistence preserved; nothing automatic
@@ -151,6 +152,20 @@ try {
     assert.throws(() => save(foreign, h.dest), /conflicts with the capture or binding/);
     const result = runSaver(h, foreign); assert.equal(result.status, 1); assert.match(result.err, /conflicts with the capture or binding/);
     assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json')));
+  }
+
+  // A revoked or re-created binding cannot inherit an old cache by reusing its alias.
+  {
+    const h = home(), b = bindAs(h);
+    assert.equal(runSaver(h, capture('2026-01-01T00:00:00Z', {identity: obs(b, ID_A)})).status, 0);
+    const before = fs.readFileSync(path.join(h.dest, 'wishlist.json'));
+    approve(h.file, {op:'revoke'});
+    const revoked = runSaver(h, capture('2026-01-02T00:00:00Z'), ['--account', 'my-steam']);
+    assert.equal(revoked.status, 1); assert.match(revoked.err, /different account binding/);
+    const b2 = bindAs(h, ID_A, 'my-steam');
+    const rebound = runSaver(h, capture('2026-01-03T00:00:00Z', {identity: obs(b2, ID_A)}));
+    assert.equal(rebound.status, 1); assert.match(rebound.err, /different account binding/);
+    assert.deepEqual(fs.readFileSync(path.join(h.dest, 'wishlist.json')), before);
   }
 
   // ---- policy unit checks

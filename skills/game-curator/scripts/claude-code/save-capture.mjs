@@ -386,7 +386,8 @@ export function applyIdentity(env, binding, manualAccount) {
   if (!binding) { if (manualAccount !== undefined && out.account === undefined) out.account = manualAccount; return {env: canonicalize(out), block: null, identity: null}; }
   const ownerEvidence = SOURCES[out.source]?.ownerEvidence?.(d) === true;
   const evaluation = evaluateIdentity({binding, observation, ownerEvidence, identityChanged: d.stopReason === 'identity-changed'});
-  const pol = identityPolicy({binding, evaluation, manualAccount}); // only an explicit manualAccount counts: an alias merely present on the envelope is not a confirmation
+  const confirmPageOwnership = out.source === 'library' && d.ownerControls === null && observation?.owner === null && (!observation.pathFingerprint || observation.pathFingerprint === observation.sessionFingerprint);
+  const pol = identityPolicy({binding, evaluation, manualAccount, confirmPageOwnership}); // only an explicit manualAccount counts: an alias merely present on the envelope is not a confirmation
   if (pol.account === undefined) delete out.account; else out.account = pol.account;
   if (isPlainObject(out.diagnostics)) {
     const att = {...(out.diagnostics.attestations ?? {}), identity: pol.attestation};
@@ -427,8 +428,10 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
     try { existing = JSON.parse(before.toString('utf8')); } catch { throw new Error('Existing cache is malformed; preserved untouched'); }
     if (!validExisting(existing, env.source)) throw new Error('Existing cache is invalid; preserved untouched');
     if (knownConflict(existing) || (existing.account && env.account && existing.account !== env.account)) throw new Error('Existing cache belongs to a conflicting account');
+    if (existing.account && !bound0 && manualAccount !== existing.account) throw new Error('Confirm the existing cache account with --account before replacement');
+    if (existing.account && !env.account) throw new Error('The new capture has no account attribution');
     const oldGeneration = generationOf(existing), newGeneration = generationOf(env);
-    if (oldGeneration !== null && newGeneration !== null && oldGeneration !== newGeneration) throw new Error('Existing cache belongs to a different account binding');
+    if (oldGeneration !== null && oldGeneration !== newGeneration) throw new Error('Existing cache belongs to a different account binding');
     if (env.source === 'replay' && existing.records[0].year !== env.records[0].year) throw new Error('Existing cache has a different year');
   }
   const text = JSON.stringify(env, null, 2) + '\n';

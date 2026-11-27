@@ -37,6 +37,26 @@ try {
   // A mixed-identity run cannot be rescued by a manually confirmed alias.
   const salt='AQIDBAUGBwgJCgsMDQ4PEA', id='76561197960278073', fp=fingerprintSync(salt,id);
   fs.writeFileSync(path.join(root,'settings.json'),JSON.stringify({version:2,persistence:{profileAndFeedback:false,steamCache:true},steamAccount:{alias:'fixture',approvedAt:'2026-01-01T00:00:00Z',generation:'AAAAAAAAAAAAAAAAAAAAAA',fingerprint:{alg:'sha256-salted-v1',salt,value:fp}}}));
+  // A matching bound Codex Library run lacks observable owner controls. User confirmation
+  // permits that narrow case and is recorded honestly; it cannot override conflicts.
+  const identity = {version:1,sources:['userinfo-attr'],loggedIn:true,consistent:true,problems:[],saltCheck:saltCheckOf(salt),sessionFingerprint:fp,pathFingerprint:null};
+  const libraryTab={playwright:{evaluate:async fn=>fn===pagePathFingerprint?'c'.repeat(64):fn===codexIdentityPage?structuredClone(identity):{expected:1,view:{tab:'all',search:'empty',language:'en'},records:[{appid:1,name:'Fixture',pageText:'Fixture\nDOWNLOAD',membershipSource:'all-games-row'}]}},scroll:async()=>{}};
+  const library = await collectLibrary(libraryTab,{identity:{salt}});
+  assert.equal(library.diagnostics.complete,true); assert.equal(library.diagnostics.ownerControls,null); assert.equal(library.diagnostics.identity.owner,null);
+  const libraryInput=path.join(root,'bound-library.json');
+  const saveLibrary=(capture, account='fixture')=>{fs.writeFileSync(libraryInput,JSON.stringify(capture));return spawnSync(process.execPath,[cli,libraryInput,...(account?['--account',account]:[])],{encoding:'utf8',env:{...process.env,CURATOR_HOME:root}})};
+  const unconfirmed=saveLibrary(library,null); assert.notEqual(unconfirmed.status,0); assert.match(unconfirmed.stderr,/ownership is not verified/);
+  const confirmed=saveLibrary(library); assert.equal(confirmed.status,0,confirmed.stderr);
+  const stored=JSON.parse(fs.readFileSync(path.join(root,'cache/steam/library.json')));
+  assert.equal(stored.diagnostics.attestations.identity.ownership,'confirmed'); assert.equal(stored.diagnostics.attestations.identity.by,'user');
+  for (const mutate of [
+    c=>{c.diagnostics.identity.pathFingerprint='b'.repeat(64)},
+    c=>{c.diagnostics.identity.sessionFingerprint='b'.repeat(64)},
+    c=>{c.diagnostics.identity.continuity.broke=true},
+    c=>{c.diagnostics.identity.continuity.covered=false},
+    c=>{c.diagnostics.identity.owner=false},
+    c=>{c.diagnostics.ownerControls=false},
+  ]) { const bad=structuredClone(library); mutate(bad); const r=saveLibrary(bad); assert.notEqual(r.status,0,r.stdout); assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root,'cache/steam/library.json'))),stored); }
   let checks=0, batch=0;
   const tab={playwright:{evaluate:async fn=>fn===pagePathFingerprint?'c'.repeat(64):fn===codexIdentityPage?{version:1,sources:['userinfo-attr'],loggedIn:true,consistent:true,problems:[],saltCheck:saltCheckOf(salt),sessionFingerprint:++checks<4?fp:'b'.repeat(64),pathFingerprint:null}:{expected:2,view:{sort:'Your Rank',search:'empty',filters:'unknown'},reorderHandles:true,rows:[{appid:++batch,rank:batch,name:'Fixture',pageText:'Fixture',membershipSource:'wishlist-row',complete:true}]}},scroll:async()=>{}};
   const conflict=await collectWishlist(tab,{identity:{salt},maxScrolls:2});
