@@ -10,7 +10,7 @@ import {makeWishlistPage} from './fake-wishlist-dom.mjs';
 import {makeLibraryPage} from './fake-library-dom.mjs';
 import {makeReviewsSite} from './fake-reviews-site.mjs';
 import {normalizeLibraryRecord} from '../../skills/game-curator/scripts/browser/library-rows.mjs';
-import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
+import {buildPageScript} from '../../development/game-curator/claude-code/build-page-script.mjs';
 
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 // Policy tests assume verified transfer unless a case says otherwise (the default is fail-closed).
@@ -364,7 +364,7 @@ fs.rmSync(tmp, {recursive: true});
   const saved3 = JSON.parse(fs.readFileSync(path.join(cache3, 'wishlist.json'), 'utf8'));
   assert.equal(saved3.records.length, 5); assert.equal(saved3.diagnostics.attestations.filters, 'none');
   // Importing the modules must not run anything or print anything.
-  for (const f of ['save-capture.mjs', 'build-page-script.mjs']) {
+  for (const f of ['save-capture.mjs']) {
     const imp = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(path.join(link, 'scripts', 'claude-code', f))})`], {encoding: 'utf8'});
     assert.equal(imp.status, 0, imp.stderr); assert.equal(imp.stdout, '');
   }
@@ -607,7 +607,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
 const delivery = fn => { const i = generated.indexOf(`function ${fn}(`); return i; };
 for (const name of ['wishlist', 'library', 'reviews', 'replay']) {
   const src = fs.readFileSync(new URL(`../../skills/game-curator/scripts/claude-code/steam-${name}-page.js`, import.meta.url), 'utf8');
-  assert.equal(src, buildPageScript(name), `steam-${name}-page.js is stale: run node skills/game-curator/scripts/claude-code/build-page-script.mjs`);
+  assert.equal(src, buildPageScript(name), `steam-${name}-page.js is stale: run node development/game-curator/claude-code/build-page-script.mjs`);
   const d0 = src.indexOf('async function deliverEnvelope('), d1 = src.indexOf('\n  }\n', d0);
   assert.ok(d0 > 0 && d1 > d0, `${name}: deliverEnvelope not found`);
   const outside = src.slice(0, d0) + src.slice(d1);

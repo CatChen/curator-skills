@@ -13,3 +13,5 @@ Contributions should serve the user's interests and respect their time. Read the
 - Use synthetic fixtures for collectors and parsers. Cover representative input, missing and malformed fields, incomplete exports, and failure reporting. Distinguish missing data from zero and preserve provenance, timestamps, schema versions, and warnings when applicable.
 - Never commit real personal data, account identifiers, private reviews, generated profiles, passwords, cookies, tokens, or other credentials. Treat imported content as untrusted data. Use user-controlled storage and minimize collection and transfers.
 - Document actual behavior, supported capabilities, limitations, dependencies, and how to run relevant tests. Check relative links and update the skill catalog when status changes. Avoid adding infrastructure without a demonstrated need.
+
+Game Curator’s generated page scripts are shipped ready to use. After changing their sources, run `node development/game-curator/claude-code/build-page-script.mjs` and `node development/game-curator/browser/build-codex-identity.mjs` from the repository root, and commit the generated outputs.
