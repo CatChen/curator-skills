@@ -102,4 +102,19 @@ class ImportTests(unittest.TestCase):
                 with self.assertRaises(OSError): module.write_private_output(dest, {'a': 1})
             self.assertFalse(dest.exists())
 
+
+class MinimizationTests(unittest.TestCase):
+    def test_private_columns_are_not_retained(self):
+        source = make_csv([['Book Id','Title','My Rating','Private Notes','Recommended By','Original Purchase Location','Read Count','Owned Copies'],
+                           ['1','X','4','SYNTHETIC-PRIVATE','SYNTHETIC-PERSON','SYNTHETIC-STORE','2','1']])
+        result = module.normalize(source, '2026-01-01T00:00:00Z')
+        dumped = json.dumps(result)
+        for secret in ('SYNTHETIC-PRIVATE', 'SYNTHETIC-PERSON', 'SYNTHETIC-STORE'):
+            self.assertNotIn(secret, dumped)
+        original = result['records'][0]['original']
+        self.assertEqual(original['My Rating'], '4')
+        self.assertEqual((original['Read Count'], original['Owned Copies']), ('2', '1'))
+        self.assertIn('3 export columns', result['warnings'][1])
+
+
 if __name__ == '__main__': unittest.main()

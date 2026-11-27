@@ -398,6 +398,22 @@ export function applyIdentity(env, binding, manualAccount) {
   return {env: canonicalize(out), block: pol.block, identity: pol.attestation};
 }
 
+// Data minimization: review URLs and diagnostics.urlPath embed the Steam profile path (vanity name or SteamID64). They are needed only to
+// validate the incoming capture (every review belongs to the collected list), so they are checked first and then not persisted.
+// AppIDs identify reviews, and account attribution comes from the binding or alias. The attestation records what was left out;
+// the stored checksums describe the capture before this step.
+export function minimizeForStorage(env) {
+  const out = JSON.parse(JSON.stringify(env)), omitted = [];
+  if (isPlainObject(out.diagnostics) && 'urlPath' in out.diagnostics) { delete out.diagnostics.urlPath; omitted.push('diagnostics.urlPath'); }
+  if (isPlainObject(out.diagnostics) && 'viewAtStop' in out.diagnostics) { delete out.diagnostics.viewAtStop; omitted.push('diagnostics.viewAtStop'); } // holds the list path and page URL
+  if (out.source === 'reviews' && Array.isArray(out.records) && out.records.some(r => isPlainObject(r) && 'reviewUrl' in r)) {
+    out.records = out.records.map(r => { const {reviewUrl, ...rest} = r; return rest; });
+    omitted.push('records[].reviewUrl');
+  }
+  if (omitted.length && isPlainObject(out.diagnostics)) out.diagnostics.attestations = {...out.diagnostics.attestations, minimized: {omitted, note: 'Profile paths are not stored; recorded checksums describe the capture before these fields were omitted.'}};
+  return out;
+}
+
 export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {}, recheckConsent: extraCheck, settings, stem: stemOverride, manualAccount} = {}) {
   const settingsFile = checkCacheAuthorized(destDir, settings);
   const bound0 = readSettingsFile(settingsFile).settings.steamAccount;
@@ -434,7 +450,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
     if (oldGeneration !== null && oldGeneration !== newGeneration) throw new Error('Existing cache belongs to a different account binding');
     if (env.source === 'replay' && existing.records[0].year !== env.records[0].year) throw new Error('Existing cache has a different year');
   }
-  const text = JSON.stringify(env, null, 2) + '\n';
+  const text = JSON.stringify(minimizeForStorage(env), null, 2) + '\n';
   const result = {action: before ? 'replace' : 'create', target: main, bytes: Buffer.byteLength(text), sha256: sha256(text), identity: applied.identity};
   if (dryRun) return result;
   recheck();
