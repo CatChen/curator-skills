@@ -9,9 +9,9 @@ import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprin
 import {parseSettings, fingerprintSync, newSalt, saltCheckOf, BINDING_ALG} from '../../skills/game-curator/scripts/settings.mjs';
 import {parseCacheSettings, checkCacheAuthorized} from '../../skills/game-curator/scripts/cache.mjs';
 import {collectIdentity} from '../../skills/game-curator/scripts/browser/steam.mjs';
-import {buildCodexIdentity, buildPathFingerprint} from '../../skills/game-curator/scripts/browser/build-codex-identity.mjs';
+import {buildCodexIdentity, buildPathFingerprint} from '../../development/game-curator/browser/build-codex-identity.mjs';
 import {checkBindProbe} from '../../skills/game-curator/scripts/bind-account.mjs';
-import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
+import {buildPageScript} from '../../development/game-curator/claude-code/build-page-script.mjs';
 
 const ID_A = '76561197960278073', ACC_A = 12345, ID_B = '76561197960320049', ACC_B = 54321; // synthetic
 const SALT = b64uEncode(Uint8Array.from({length: 16}, (_, i) => i + 1));

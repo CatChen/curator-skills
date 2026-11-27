@@ -1,5 +1,5 @@
 // Game Curator: Steam Replay collector for Claude Code's built-in browser and Claude in Chrome (page side).
-// GENERATED FILE is steam-replay-page.js; edit this template and run `node build-page-script.mjs`.
+// GENERATED FILE is steam-replay-page.js; regenerate from the repository development sources.
 //
 // Each annual Replay report is its own navigation, which destroys all page JavaScript state (measured in both browsers: a page
 // variable is gone after navigating; sessionStorage and window.name survive). So this script is a per-year step machine and the DATA
@@ -28,7 +28,7 @@
 //   maxYears (20, at most 30)  fresh (discard saved state)  cancel (remove the saved state and stop)  callBudgetMs (20000)
 //   settleMs (1200) / settleCapMs (10000): how long the report's text and game references must stay unchanged before it is taken, and the most time
 //   spent waiting for that (test seams; leave them alone)
-//   deliver 'return' | 'download' | 'hook' and retainMs: see page-common.mjs ('hook' returns the envelope exactly like 'return' and only
+//   deliver 'return' | 'download' | 'hook' and retainMs: see references/claude-code.md ('hook' returns the envelope exactly like 'return' and only
 //   states that this call opts into the skill's PostToolUse hook staging it privately; the page itself does nothing different)
 await (window.__gcReplayRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();

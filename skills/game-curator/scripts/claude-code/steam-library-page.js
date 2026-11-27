@@ -1,5 +1,5 @@
 // Game Curator: Steam library collector for Claude Code's built-in browser and Claude in Chrome (page side).
-// GENERATED FILE is steam-library-page.js; edit this template and run `node build-page-script.mjs`.
+// GENERATED FILE is steam-library-page.js; regenerate from the repository development sources.
 //
 // Run the WHOLE generated file as the `text` of the browser tool's javascript_tool (action javascript_exec) on the verified
 // signed-in https://steamcommunity.com/id/<name>/games/?tab=all page. It is one async expression that registers itself as
@@ -13,7 +13,7 @@
 //   callBudgetMs (35000, per call)  maxMs (150000)  maxSteps (200)  fresh (discard saved state)
 //   quietMs (800: no change for this long once the displayed count is reached confirms completion)  stallMs (1500: no new rows for
 //   this long before the count is reached triggers a bounded scroll)
-//   deliver: 'return' (default) or 'download' (see page-common.mjs / references/claude-in-chrome.md): the page starts a
+//   deliver: 'return' (default) or 'download' (see references/claude-in-chrome.md): the page starts a
 //   local file download and returns a small summary of INITIATION only; retainMs (default 10 min) bounds how long the
 //   finished envelope is kept for an authorized retry via window.__gcRedeliver() / window.__gcRelease().
 //   'hook' returns the envelope exactly like 'return'; it only states that this call opts into the skill's PostToolUse hook staging

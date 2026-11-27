@@ -1,5 +1,5 @@
 // Game Curator: Steam identity probe for Claude Code's built-in browser and Claude in Chrome (page side).
-// GENERATED FILE is steam-identity-page.js; edit this template and run `node build-page-script.mjs`.
+// GENERATED FILE is steam-identity-page.js; regenerate from the repository development sources.
 //
 // Reads ONLY logged_in, steamid and accountid from Steam's own page data (window.UserConfig, #application_config[data-userinfo],
 // window.g_steamID) and returns a salted fingerprint, never an identifier. It does not read the surrounding objects, login names, tokens

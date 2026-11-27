@@ -5,11 +5,11 @@
 // committed output is stale.
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
-import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from '../browser/wishlist-rows.mjs';
-import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord, libraryLabelCount, libraryFieldsKey} from '../browser/library-rows.mjs';
-import {snapshotReviews, reviewPageKey, queueReviewPages} from '../browser/review-rows.mjs';
-import {snapshotReplay, dedupeReplayApps, replayYears} from '../browser/replay-rows.mjs';
-import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity} from '../browser/identity-probe.mjs';
+import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from '../../../skills/game-curator/scripts/browser/wishlist-rows.mjs';
+import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord, libraryLabelCount, libraryFieldsKey} from '../../../skills/game-curator/scripts/browser/library-rows.mjs';
+import {snapshotReviews, reviewPageKey, queueReviewPages} from '../../../skills/game-curator/scripts/browser/review-rows.mjs';
+import {snapshotReplay, dedupeReplayApps, replayYears} from '../../../skills/game-curator/scripts/browser/replay-rows.mjs';
+import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity} from '../../../skills/game-curator/scripts/browser/identity-probe.mjs';
 import {sha256Hex, makeWaiter, deliverEnvelope, identityStep, identityOf, identityObsValid, identityStateValid} from './page-common.mjs';
 
 const dir = new URL('.', import.meta.url);
@@ -40,7 +40,7 @@ function isMain() {
 if (isMain()) {
   for (const name of Object.keys(PAGES)) {
     if (!fs.existsSync(new URL(`steam-${name}-page.template.js`, dir))) continue;
-    fs.writeFileSync(new URL(`steam-${name}-page.js`, dir), buildPageScript(name));
+    fs.writeFileSync(new URL(`../../../skills/game-curator/scripts/claude-code/steam-${name}-page.js`, dir), buildPageScript(name));
     console.log(`wrote steam-${name}-page.js`);
   }
 }

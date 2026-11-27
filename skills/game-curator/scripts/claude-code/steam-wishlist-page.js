@@ -1,5 +1,5 @@
 // Game Curator: Steam wishlist collector for Claude Code's built-in browser (page side).
-// GENERATED FILE is steam-wishlist-page.js; edit this template and run `node build-page-script.mjs`.
+// GENERATED FILE is steam-wishlist-page.js; regenerate from the repository development sources.
 //
 // Run the WHOLE generated file as the `text` of mcp__Claude_Browser__javascript_tool (action javascript_exec)
 // on the verified signed-in https://store.steampowered.com/wishlist/... tab. It is one async expression that

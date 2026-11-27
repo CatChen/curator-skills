@@ -1,5 +1,5 @@
 // Game Curator: Steam reviews collector for Claude Code's built-in browser and Claude in Chrome (page side).
-// GENERATED FILE is steam-reviews-page.js; edit this template and run `node build-page-script.mjs`.
+// GENERATED FILE is steam-reviews-page.js; regenerate from the repository development sources.
 //
 // Reviews are paginated and each page is a real navigation, which destroys all page JavaScript state (measured in both browsers: a
 // page variable is gone after navigating; sessionStorage and window.name survive). So this script is a per-page step machine and
@@ -22,7 +22,7 @@
 // The leading `await` matters: Claude in Chrome's tool does not await a trailing promise (it returns {}).
 // Options (object literal on the last line; maxPages and retainMs are remembered across pages; deliver is not (pass it on every call: restored state never starts a download)):
 //   maxPages (20, at most 100)  fresh (discard saved state)  cancel (remove the saved state and stop)  callBudgetMs (20000)
-//   deliver 'return' | 'download' | 'hook' and retainMs: see page-common.mjs ('hook' returns the envelope exactly like 'return' and only
+//   deliver 'return' | 'download' | 'hook' and retainMs: see references/claude-code.md ('hook' returns the envelope exactly like 'return' and only
 //   states that this call opts into the skill's PostToolUse hook staging it privately; the page itself does nothing different)
 await (window.__gcReviewsRun = async (opts = {}) => {
   const startedAt = new Date().toISOString();

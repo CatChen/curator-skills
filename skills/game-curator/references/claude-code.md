@@ -6,8 +6,7 @@ Files, all under `scripts/claude-code/` unless noted:
 
 | File | Role |
 | --- | --- |
-| `steam-wishlist-page.js` | **Generated.** The standalone expression you paste into `javascript_tool`. Do not edit; run `node build-page-script.mjs` |
-| `steam-wishlist-page.template.js` + `build-page-script.mjs` | Page orchestration (seek-scrolling, resume, bounds) and the generator that inlines the shared row code |
+| `steam-wishlist-page.js` | **Generated.** The standalone expression you paste into `javascript_tool` |
 | `../browser/wishlist-rows.mjs` | Shared, self-contained row extraction and merge semantics used by this script **and** by the Codex `collectWishlist` |
 | `save-capture.mjs` | Node saver: contract validation, cache policy, safe write and read-back |
 
@@ -79,7 +78,7 @@ Row extraction (`snapshotWishlist`), merge (`mergeWishlistRow`: a loaded row is 
 
 ## Library (built-in browser; Claude in Chrome differs only in delivery)
 
-Script: `scripts/claude-code/steam-library-page.js` (generated, with the shared row semantics from `scripts/browser/library-rows.mjs` and the shared page pieces from `page-common.mjs`). The Codex collector uses the same `snapshotLibrary`, `mergeLibraryRow` and `normalizeLibraryRecord`, so Steam-specific field rules have one source.
+Script: `scripts/claude-code/steam-library-page.js` (generated, with the shared row semantics from `scripts/browser/library-rows.mjs` and shared page pieces). The Codex collector uses the same `snapshotLibrary`, `mergeLibraryRow` and `normalizeLibraryRecord`, so Steam-specific field rules have one source.
 
 1. Consent, pane, desktop-width viewport and account confirmation are as above. Open `https://steamcommunity.com/my/games/?tab=all` and check it is signed in as the expected account.
 2. Run the whole script with `javascript_tool` (it starts with `await`). In a measured session the 795 rows rendered progressively in about 2 s with no scrolling; the script waits (event driven) until the displayed "All Games (N)" count is reached and nothing changed for a quiet period (`quietMs`, 800 ms), and scrolls only if rendering stalls for `stallMs` (1500 ms), at most four times. Options: `callBudgetMs`, `maxMs`, `maxSteps`, `quietMs`, `stallMs`, `fresh`, `deliver`, `retainMs`. If it returns `{inProgress: true}`, resume with `await window.__gcLibraryRun({})`.
