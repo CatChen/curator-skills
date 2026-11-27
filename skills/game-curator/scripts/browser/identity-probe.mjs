@@ -56,15 +56,31 @@ export async function sha256HexOf(bytes) {
 }
 
 // Read ONLY the allowlisted fields. `win` and `doc` are injectable for tests; in a page they default to window and document.
+// Absent markers are simply not listed. A marker that is PRESENT but unreadable (a getter throws) or malformed (not an object, or
+// unparsable JSON) is listed with that state so it can never be mistaken for an absent one.
 export function readSessionSources(win = window, doc = document) {
   const out = [];
-  const take = (name, o) => { if (o && typeof o === 'object') out.push({name, loggedIn: o.logged_in === true ? true : o.logged_in === false ? false : null, steamid: o.steamid, accountid: o.accountid}); };
-  try { take('user-config', win.UserConfig); } catch { /* unreadable: treated as absent */ }
-  try {
-    const attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo');
-    if (attr) take('userinfo-attr', JSON.parse(attr)); // the parsed object is discarded after the three fields are copied
-  } catch { /* malformed: treated as absent */ }
-  try { if (win.g_steamID !== undefined) out.push({name: 'g-steamid', loggedIn: null, steamid: win.g_steamID, accountid: undefined}); } catch { /* absent */ }
+  const take = (name, raw, requireAccountId) => {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) { out.push({name, state: 'malformed'}); return; }
+    const lg = raw.logged_in;
+    out.push({name, state: 'ok', loggedIn: lg === true ? true : lg === false ? false : lg === undefined ? null : 'invalid', steamid: raw.steamid, accountid: raw.accountid, requireAccountId});
+  };
+  let uc, ucState = 'ok';
+  try { uc = win.UserConfig; } catch { ucState = 'unreadable'; }
+  if (ucState === 'unreadable') out.push({name: 'user-config', state: 'unreadable'});
+  else if (uc !== undefined) take('user-config', uc, true);
+  let attr = null, attrState = 'ok';
+  try { attr = doc.getElementById?.('application_config')?.getAttribute?.('data-userinfo') ?? null; } catch { attrState = 'unreadable'; }
+  if (attrState === 'unreadable') out.push({name: 'userinfo-attr', state: 'unreadable'});
+  else if (attr !== null) {
+    let parsed, ok = true;
+    try { parsed = JSON.parse(attr); } catch { ok = false; } // the parsed object is discarded after the three fields are copied
+    if (ok) take('userinfo-attr', parsed, true); else out.push({name: 'userinfo-attr', state: 'malformed'});
+  }
+  let g, gState = 'ok';
+  try { g = win.g_steamID; } catch { gState = 'unreadable'; }
+  if (gState === 'unreadable') out.push({name: 'g-steamid', state: 'unreadable'});
+  else if (g !== undefined) out.push({name: 'g-steamid', state: 'ok', loggedIn: null, steamid: g, accountid: undefined, requireAccountId: false}); // the legacy global genuinely has no accountid
   return out;
 }
 
@@ -73,38 +89,59 @@ export function readSessionSources(win = window, doc = document) {
 //   o.candidate  true: generate a fresh salt and return it as `salt` (standalone bind probe only).
 // The fingerprint of the page's own URL ID (replay/profiles paths) is returned separately so a caller can compare the page being
 // viewed with the signed-in account; a vanity URL has no ID and yields null.
+// `problems` lists, as fixed codes, every way the evidence was present but unusable or contradictory, so "no markers" (extraction
+// unavailable), "explicitly signed out" and "evidence that conflicts" stay three different states:
+//   unsupported-origin  the page is not a supported Steam origin: nothing was read
+//   unreadable-marker   a marker exists but could not be read
+//   malformed-marker    a marker exists but is not the expected shape
+//   login-state-conflict  sources disagree about being signed in, or the login state contradicts the presence of an ID
+//   invalid-id          a provided steamid is not a canonical SteamID64 string
+//   missing-account-id / invalid-account-id  accountid absent (where Steam's data always has it) or inconsistent with steamid
+//   id-conflict         two sources name different accounts
 export async function observeIdentity(o = {}, env = {}) {
   const win = env.win ?? window, doc = env.doc ?? document, loc = env.loc ?? location;
   let saltBytes = o.salt !== undefined ? b64uDecode(o.salt) : null, generated = false;
   if (o.salt === undefined && o.candidate === true) { saltBytes = crypto.getRandomValues(new Uint8Array(16)); generated = true; }
   if (!saltBytes || saltBytes.length !== 16) throw new Error('identity needs a 16-byte base64url salt (or candidate: true)');
+  const saltCheck = (await sha256HexOf(saltBytes)).slice(0, 8);
+  const finish = r => { if (generated) r.salt = b64uEncode(saltBytes); return r; };
+  if (!['https://store.steampowered.com', 'https://steamcommunity.com'].includes(loc?.origin)) {
+    return finish({version: 1, sources: [], loggedIn: null, consistent: false, problems: ['unsupported-origin'], saltCheck, sessionFingerprint: null, pathFingerprint: null});
+  }
   const sources = readSessionSources(win, doc);
-  const ids = new Set();
-  let loggedIn = null, consistent = true;
+  const problems = new Set(), ids = new Set(), states = new Set();
   for (const s of sources) {
-    if (s.loggedIn === false) loggedIn = false;
-    else if (s.loggedIn === true && loggedIn !== false) loggedIn = true;
+    if (s.state === 'unreadable') { problems.add('unreadable-marker'); continue; }
+    if (s.state === 'malformed') { problems.add('malformed-marker'); continue; }
+    if (s.loggedIn === 'invalid') { problems.add('malformed-marker'); continue; }
     const provided = s.steamid !== undefined && s.steamid !== null && s.steamid !== false && s.steamid !== '' && s.steamid !== 0 && s.steamid !== '0';
+    if (s.loggedIn === true && !provided) problems.add('login-state-conflict');
+    if (s.loggedIn === false && provided) problems.add('login-state-conflict');
+    if (s.loggedIn !== null) states.add(s.loggedIn);
     if (!provided) continue;
     const id = canonicalSteamId64(s.steamid);
-    if (!id || (s.accountid !== undefined && !accountIdMatches(id, s.accountid))) { consistent = false; continue; }
+    if (!id) { problems.add('invalid-id'); continue; }
+    if (s.accountid === undefined) { if (s.requireAccountId) { problems.add('missing-account-id'); continue; } }
+    else if (!accountIdMatches(id, s.accountid)) { problems.add('invalid-account-id'); continue; }
     ids.add(id);
-    if (s.name === 'g-steamid' && loggedIn === null) loggedIn = true;
+    if (s.name === 'g-steamid') states.add(true); // a valid ID in the legacy global means signed in
   }
-  if (ids.size > 1) consistent = false;
+  if (ids.size > 1) problems.add('id-conflict');
+  if (states.size > 1) problems.add('login-state-conflict');
+  const loggedIn = states.size === 1 ? [...states][0] : null;
+  const consistent = problems.size === 0;
   const fp = async id => sha256HexOf(fingerprintBytes(saltBytes, id));
   const sessionId = ids.size === 1 ? [...ids][0] : null;
   const pathMatch = /\/(?:replay|profiles)\/([0-9]{17})(?=\/|$)/.exec(String(loc?.pathname ?? ''));
   const pathId = pathMatch ? canonicalSteamId64(pathMatch[1]) : null;
-  const result = {
+  return finish({
     version: 1,
     sources: sources.map(s => s.name),
     loggedIn,
     consistent,
-    saltCheck: (await sha256HexOf(saltBytes)).slice(0, 8),
-    sessionFingerprint: loggedIn !== false && consistent && sessionId ? await fp(sessionId) : null,
+    problems: [...problems].sort(),
+    saltCheck,
+    sessionFingerprint: consistent && loggedIn === true && sessionId ? await fp(sessionId) : null,
     pathFingerprint: pathId ? await fp(pathId) : null,
-  };
-  if (generated) result.salt = b64uEncode(saltBytes);
-  return result;
+  });
 }

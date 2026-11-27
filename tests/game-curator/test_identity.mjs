@@ -39,13 +39,13 @@ assert.equal(b64uDecode('AQ=='), null, 'padding is not canonical');
 
 // ---- fake page environment
 const DECOY = {name: 'decoy_login_name', token: 'decoy-webapi-token-0123456789', cookie: 'decoy-session-cookie-value', persona: 'Decoy Persona'};
-function env({userConfig, attr, g, pathname = '/wishlist/id/somevanity/'} = {}) {
+function env({userConfig, attr, g, pathname = '/wishlist/id/somevanity/', origin = 'https://store.steampowered.com', rawAttr} = {}) {
   const win = {};
   if (userConfig !== undefined) win.UserConfig = userConfig;
   if (g !== undefined) win.g_steamID = g;
-  const attrs = attr === undefined ? null : JSON.stringify(attr);
+  const attrs = rawAttr !== undefined ? rawAttr : attr === undefined ? null : JSON.stringify(attr);
   const doc = {getElementById: id => id === 'application_config' ? {getAttribute: n => n === 'data-userinfo' ? attrs : n === 'data-store_user_config' ? JSON.stringify({webapi_token: DECOY.token}) : null} : null, cookie: `sessionid=${DECOY.cookie}`};
-  return {win, doc, loc: {pathname}};
+  return {win, doc, loc: {pathname, origin}};
 }
 const uc = (id, acc, extra = {}) => ({logged_in: true, steamid: id, accountid: acc, account_name: DECOY.name, persona_name: DECOY.persona, webapi_token: DECOY.token, ...extra});
 const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.values(DECOY), ID_A, ID_B, String(ACC_A), String(ACC_B)]) assert.ok(!s.includes(v), `observation leaks ${v}`); };
@@ -53,7 +53,7 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
 // ---- B. observation and verdict inputs (fixtures)
 {
   const o = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A)})));
-  assert.deepEqual(Object.keys(o), ['version', 'sources', 'loggedIn', 'consistent', 'saltCheck', 'sessionFingerprint', 'pathFingerprint']);
+  assert.deepEqual(Object.keys(o), ['version', 'sources', 'loggedIn', 'consistent', 'problems', 'saltCheck', 'sessionFingerprint', 'pathFingerprint']); assert.deepEqual(o.problems, []);
   assert.equal(o.loggedIn, true); assert.equal(o.consistent, true); assert.equal(o.sessionFingerprint, VECTOR); assert.equal(o.pathFingerprint, null);
   assert.deepEqual(o.sources, ['user-config']); assert.equal(o.saltCheck, saltCheckOf(SALT)); leak(o);
 }
@@ -83,11 +83,31 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
   const outWithId = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A, {logged_in: false})})));
   assert.equal(outWithId.sessionFingerprint, null, 'logged_in:false never yields a session fingerprint');
 }
-{ // unreadable page data degrades to absent
-  const win = {get UserConfig() { throw new Error('blocked'); }, g_steamID: ID_A};
-  const o = j(await observeIdentity({salt: SALT}, {win, doc: {getElementById: () => ({getAttribute: () => '{not json'})}, loc: {pathname: '/'}}));
-  assert.deepEqual(o.sources, ['g-steamid']);
-  assert.deepEqual(readSessionSources({}, {getElementById: () => null}), []);
+{ // present-but-unreadable or malformed markers are reported, never silently dropped
+  const win = {get UserConfig() { throw new Error('SECRET blocked text'); }, g_steamID: ID_A};
+  const o = j(await observeIdentity({salt: SALT}, {win, doc: {getElementById: () => ({getAttribute: () => '{not json'})}, loc: {pathname: '/', origin: 'https://store.steampowered.com'}}));
+  assert.deepEqual(o.sources, ['user-config', 'userinfo-attr', 'g-steamid']); assert.deepEqual(o.problems, ['malformed-marker', 'unreadable-marker']); assert.equal(o.consistent, false); assert.equal(o.sessionFingerprint, null, 'a valid g_steamID cannot rescue unreadable or malformed evidence'); assert.ok(!JSON.stringify(o).includes('SECRET'));
+  assert.deepEqual(readSessionSources({}, {getElementById: () => null}), [], 'absent markers are simply absent');
+  for (const [name, e, code] of [
+    ['user config is a string', env({userConfig: 'x'}), 'malformed-marker'], ['user config is an array', env({userConfig: []}), 'malformed-marker'], ['user config is null', env({userConfig: null}), 'malformed-marker'],
+    ['attribute is a JSON array', env({rawAttr: '[]'}), 'malformed-marker'], ['attribute is JSON null', env({rawAttr: 'null'}), 'malformed-marker'], ['logged_in is not a boolean', env({userConfig: uc(ID_A, ACC_A, {logged_in: 'yes'})}), 'malformed-marker'],
+    ['logged in without an ID', env({userConfig: {logged_in: true, accountid: ACC_A}}), 'login-state-conflict'], ['signed out but an ID is present', env({userConfig: uc(ID_A, ACC_A, {logged_in: false})}), 'login-state-conflict'],
+    ['sources disagree about being signed in', env({userConfig: uc(ID_A, ACC_A), attr: {logged_in: false}}), 'login-state-conflict'],
+    ['accountid is missing where Steam always sends it', env({userConfig: {logged_in: true, steamid: ID_A}}), 'missing-account-id'], ['accountid is invalid', env({userConfig: uc(ID_A, 'abc')}), 'invalid-account-id'],
+    ['accountid belongs to another account', env({userConfig: uc(ID_A, ACC_B)}), 'invalid-account-id'], ['steamid is invalid', env({userConfig: uc('not-an-id', ACC_A)}), 'invalid-id'], ['two sources name different accounts', env({userConfig: uc(ID_A, ACC_A), g: ID_B}), 'id-conflict'],
+  ]) { const r = j(await observeIdentity({salt: SALT}, e)); assert.ok(r.problems.includes(code), name + ': ' + JSON.stringify(r.problems)); assert.equal(r.consistent, false, name); assert.equal(r.sessionFingerprint, null, name); leak(r); }
+  { // an invalid provided accountid in one marker is never outvoted by a valid second marker
+    const r = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), attr: {logged_in: true, steamid: ID_A, accountid: 999}}))); assert.deepEqual(r.problems, ['invalid-account-id']); assert.equal(r.sessionFingerprint, null);
+    const lg = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), attr: {logged_in: false, steamid: ID_A, accountid: ACC_A}}))); assert.ok(lg.problems.includes('login-state-conflict')); assert.equal(lg.sessionFingerprint, null);
+  }
+  const g = j(await observeIdentity({salt: SALT}, env({g: ID_A}))); assert.deepEqual(g.problems, [], 'the legacy global genuinely has no accountid'); assert.equal(g.sessionFingerprint, VECTOR);
+  const out = j(await observeIdentity({salt: SALT}, env({userConfig: {logged_in: false}}))); assert.deepEqual(out.problems, []); assert.equal(out.loggedIn, false, 'explicitly signed out is its own state');
+  const none = j(await observeIdentity({salt: SALT}, env({}))); assert.deepEqual(none.problems, []); assert.equal(none.loggedIn, null, 'no markers is a different state again');
+  // only supported Steam origins are read at all
+  for (const origin of ['https://evil.example', 'https://store.steampowered.com.evil.example', 'http://store.steampowered.com', 'https://steampowered.com', 'https://steamcommunity.com:8443', '']) {
+    const r = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), pathname: `/replay/${ID_A}/2025`, origin}))); assert.deepEqual(r.problems, ['unsupported-origin'], String(origin)); assert.deepEqual(r.sources, []); assert.equal(r.sessionFingerprint, null); assert.equal(r.pathFingerprint, null); leak(r);
+  }
+  for (const origin of ['https://store.steampowered.com', 'https://steamcommunity.com']) assert.equal(j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), origin}))).sessionFingerprint, VECTOR);
 }
 { // URL ID of the page viewed is fingerprinted separately; a vanity URL carries none
   const same = j(await observeIdentity({salt: SALT}, env({userConfig: uc(ID_A, ACC_A), pathname: `/replay/${ID_A}/2025`})));
@@ -138,8 +158,8 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
   assert.equal(r.available, true); assert.equal(r.sessionFingerprint, VECTOR); leak(r);
   const c = j(await collectIdentity(tab, {candidate: true})); assert.equal(c.sessionFingerprint, fingerprintSync(c.salt, ID_A));
   assert.deepEqual(j(await collectIdentity({}, {salt: SALT})), {available: false, reason: 'no read-only page evaluation in this runtime'});
-  const refused = j(await collectIdentity({playwright: {evaluate: async () => { throw new Error('evaluation is not permitted'); }}}, {salt: SALT}));
-  assert.equal(refused.available, false); assert.ok(!('sessionFingerprint' in refused)); assert.match(refused.reason, /refused or failed/);
+  const refused = j(await collectIdentity({playwright: {evaluate: async () => { throw new Error('evaluation is not permitted SECRET'); }}}, {salt: SALT}));
+  assert.equal(refused.available, false); assert.ok(!('sessionFingerprint' in refused)); assert.equal(refused.reason, 'page evaluation was refused or failed'); assert.ok(!JSON.stringify(refused).includes('SECRET'), 'runtime exception text is never returned');
   const nosalt = j(await collectIdentity({playwright: {evaluate: async fn => { const ctx = vm.createContext({crypto: globalThis.crypto, TextEncoder, btoa, atob, window: {}, document: e.doc, location: e.loc, Error, Promise, JSON}); return j(await vm.runInContext('(' + fn.toString() + ')()', ctx)); }}}, {}));
   assert.equal(nosalt.available, false, 'neither salt nor candidate: refused, never a guess');
 }
@@ -160,6 +180,7 @@ for (const [name, bad] of Object.entries(invalids)) assert.throws(() => parseSet
 for (const [name, mutate] of Object.entries({
   'extra binding key': s => { s.steamAccount.steamid = ID_A; }, 'extra fingerprint key': s => { s.steamAccount.fingerprint.extra = 1; }, 'unsafe alias': s => { s.steamAccount.alias = '../x'; }, 'empty alias': s => { s.steamAccount.alias = ''; },
   'unknown alg': s => { s.steamAccount.fingerprint.alg = 'md5'; }, 'short salt': s => { s.steamAccount.fingerprint.salt = b64uEncode(new Uint8Array(15)); }, 'padded salt': s => { s.steamAccount.fingerprint.salt = SALT + '=='; },
+  'array fingerprint value': s => { s.steamAccount.fingerprint.value = [VECTOR]; }, 'array alias': s => { s.steamAccount.alias = ['my-steam']; }, 'array salt': s => { s.steamAccount.fingerprint.salt = [SALT]; }, 'array time': s => { s.steamAccount.approvedAt = ['2026-11-26T00:00:00Z']; }, 'array alg': s => { s.steamAccount.fingerprint.alg = [BINDING_ALG]; },
   'uppercase value': s => { s.steamAccount.fingerprint.value = VECTOR.toUpperCase(); }, 'short value': s => { s.steamAccount.fingerprint.value = VECTOR.slice(1); }, 'bad time': s => { s.steamAccount.approvedAt = 'yesterday'; }, 'missing time': s => { delete s.steamAccount.approvedAt; },
 })) { const s = clone(); mutate(s); assert.throws(() => parseSettings(s), /invalid/, name); assert.throws(() => parseCacheSettings(s), /invalid/, `${name} fails closed for consent too`); }
 assert.ok(!JSON.stringify(parseSettings(goodV2())).includes(ID_A), 'no identifier in the parsed record');

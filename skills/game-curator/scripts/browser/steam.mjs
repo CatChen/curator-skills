@@ -228,5 +228,5 @@ export async function collectIdentity(tab, {salt, candidate} = {}) {
   const options = salt !== undefined ? {salt} : {candidate: candidate === true};
   const page = new Function(`${fns.map(f => f.toString()).join('\n')}\nreturn observeIdentity(${JSON.stringify(options)});`);
   try { return {available: true, ...(await tab.playwright.evaluate(page))}; }
-  catch (e) { return {available: false, reason: 'identity extraction was refused or failed: ' + String(e?.message ?? e).slice(0, 120)}; }
+  catch { return {available: false, reason: 'page evaluation was refused or failed'}; } // a fixed code: arbitrary runtime exception text is never returned
 }

@@ -26,7 +26,7 @@ export function parseSteamAccount(a) {
   if (!isPlain(a) || !keysAre(a, ['alias', 'fingerprint', 'approvedAt'])) throw new Error('invalid steamAccount record');
   const f = a.fingerprint;
   if (typeof a.alias !== 'string' || !ALIAS.test(a.alias) || !isIso(a.approvedAt)) throw new Error('invalid steamAccount alias or timestamp');
-  if (!isPlain(f) || !keysAre(f, ['alg', 'salt', 'value']) || f.alg !== BINDING_ALG || !/^[0-9a-f]{64}$/.test(f.value)) throw new Error('invalid steamAccount fingerprint');
+  if (!isPlain(f) || !keysAre(f, ['alg', 'salt', 'value']) || f.alg !== BINDING_ALG || typeof f.value !== 'string' || !/^[0-9a-f]{64}$/.test(f.value)) throw new Error('invalid steamAccount fingerprint');
   const salt = b64uDecode(f.salt);
   if (!salt || salt.length !== 16) throw new Error('invalid steamAccount salt');
   return {alias: a.alias, approvedAt: a.approvedAt, fingerprint: {alg: f.alg, salt: f.salt, value: f.value}};
