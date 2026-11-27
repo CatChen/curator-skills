@@ -10,7 +10,7 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {b64uDecode} from './browser/identity-probe.mjs';
 import {BINDING_ALG, bindingKey, newSalt, readSettingsFile, saltCheckOf} from './settings.mjs';
-import {resolveCuratorHome, assertWithinSelectedHome} from './curator-home.mjs';
+import {resolveCuratorHome, assertWithinSelectedHome, guardSelectedHome} from './curator-home.mjs';
 
 const ALIAS = /^[A-Za-z0-9_-]{1,64}$/;
 const isPlain = o => !!o && typeof o === 'object' && !Array.isArray(o);
@@ -43,6 +43,7 @@ export function checkBindProbe(p) {
 // Writes go only to a regular file the user named: a symbolic link is refused (the plan pins the bytes, not which file a link points at), and the
 // user is asked to choose the real file explicitly.
 function assertRegular(file) {
+  guardSelectedHome({settings: file}); // the selected-home boundary also holds for direct planBinding/planPersistence callers
   let st; try { st = fs.lstatSync(file); } catch (e) { throw new Error(`settings not usable (nothing changed): ${e.code ?? e.message}`); }
   if (st.isSymbolicLink()) throw new Error('refused: settings.json is a symbolic link; nothing was changed. Pass the real settings file path explicitly.');
 }

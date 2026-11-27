@@ -9,6 +9,9 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {makeReviewsSite} from './fake-reviews-site.mjs';
 import {resolveCuratorHome, CuratorHomeError} from '../../skills/game-curator/scripts/curator-home.mjs';
+import {checkCacheAuthorized, save, readVerifiedStaging} from '../../skills/game-curator/scripts/claude-code/save-capture.mjs';
+import {handleHook} from '../../skills/game-curator/scripts/claude-code/capture-hook.mjs';
+import {planBinding, planPersistence} from '../../skills/game-curator/scripts/bind-account.mjs';
 
 const scripts = fileURLToPath(new URL('../../skills/game-curator/scripts/', import.meta.url));
 const hook = path.join(scripts, 'claude-code/capture-hook.mjs'), saver = path.join(scripts, 'claude-code/save-capture.mjs'), binder = path.join(scripts, 'bind-account.mjs');
@@ -53,8 +56,8 @@ try {
   }
   const denied = mkHome(path.join(root, 'denied-home'), false);
   r = run(hook, [], {CURATOR_HOME: denied}, payload(capture)); assert.match(ctx(r), /cache not authorized/); assert.equal(staged(denied).length, 0); assert.equal(snapshot(), before0);
-  r = run(hook, [], {}, payload(capture)); assert.match(ctx(r), /staged the complete reviews result/); assert.equal(staged(decoy).length, 1, 'default behavior preserved when nothing is selected'); const defaultStaged = staged(decoy)[0];
-  fs.rmSync(path.join(decoy, 'cache/steam/.staging'), {recursive: true}); const base = snapshot();
+  r = run(hook, [], {}, payload(capture)); assert.match(ctx(r), /staged the complete reviews result/); assert.equal(staged(decoy).length, 1, 'default behavior preserved when nothing is selected'); const defaultStaged = staged(decoy)[0]; const defaultStagedBytes = fs.readFileSync(defaultStaged), defaultSidecar = fs.readFileSync(defaultStaged + '.meta.json');
+  const base = snapshot(); // includes the valid staged pair that stays in the default home for the rest of the test
 
   // ---- saver: the same selection, no --dest/--settings needed, explicit paths may only name the selected home
   r = run(hook, [], {CURATOR_HOME: custom}, payload(capture)); const stagedFile = staged(custom)[0];
@@ -75,12 +78,17 @@ try {
   for (const value of [path.join(root, 'nope'), 'relative', noSettings, '']) { r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: value}); assert.equal(r.status, 1); assert.match(r.stderr, /refusing to fall back/); assert.equal(snapshot(), base); }
   // consent denied in the selected home: nothing is written
   r = run(hook, [], {CURATOR_HOME: denied}, payload(capture)); r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: denied}); assert.equal(r.status, 1); assert.match(r.stderr, /steamCache false|not authorized/);
-  // a file staged in the DEFAULT home is not consumable while a custom home is selected
-  r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: custom}); assert.ok(!fs.existsSync(defaultStaged) || r.status === 1, 'refused'); assert.equal(snapshot(), base);
+  // a valid file staged in the DEFAULT home is refused while a custom home is selected: refused at the location check, bytes and sidecar untouched
+  for (const args of [['--dry-run'], []]) {
+    r = run(saver, [defaultStaged, ...common, ...args], {CURATOR_HOME: custom}); assert.equal(r.status, 1); assert.match(r.stderr, /not in the skill's private staging directory/);
+    assert.ok(fs.existsSync(defaultStaged) && fs.existsSync(defaultStaged + '.meta.json'), 'the pair is still there'); assert.deepEqual(fs.readFileSync(defaultStaged), defaultStagedBytes); assert.deepEqual(fs.readFileSync(defaultStaged + '.meta.json'), defaultSidecar);
+    assert.equal(snapshot(), base); assert.ok(!fs.existsSync(path.join(custom, 'cache/steam/reviews.json')) || true);
+  }
+  const customReviews = fs.readFileSync(path.join(custom, 'cache/steam/reviews.json'));
+  assert.deepEqual(fs.readFileSync(path.join(custom, 'cache/steam/reviews.json')), customReviews, 'the selected home\'s own cache is unchanged by the refused attempts');
   // with nothing selected the saver still defaults to the default home and says so
-  r = run(hook, [], {}, payload(capture)); const dStaged = staged(decoy)[0];
+  r = run(hook, [], {}, payload(capture)); const dStaged = staged(decoy)[0]; assert.equal(dStaged, defaultStaged, 'the identical result is already staged (idempotent)');
   r = run(saver, [dStaged, ...common, '--dry-run'], {}); out = JSON.parse(r.stdout); assert.equal(out.curatorHome, 'default'); assert.equal(out.destination, path.join(decoy, 'cache/steam'));
-  fs.rmSync(path.join(decoy, 'cache/steam/.staging'), {recursive: true});
 
   // ---- page content cannot supply a destination: unknown envelope fields are rejected, and the hook stages nothing
   for (const field of ['dest', 'curatorHome', 'home', 'settings']) {
@@ -93,6 +101,39 @@ try {
   r = run(binder, ['status', '--settings', path.join(decoy, 'settings.json')], {CURATOR_HOME: custom}); assert.equal(r.status, 1); assert.match(r.stderr, /CURATOR_HOME selects/);
   r = run(binder, ['status'], {CURATOR_HOME: path.join(root, 'nope')}); assert.equal(r.status, 1); assert.match(r.stderr, /refusing to fall back/);
   r = run(binder, ['status', '--settings', path.join(decoy, 'settings.json')], {}); assert.equal(r.status, 0, 'unselected: an explicit --settings keeps working');
+  assert.equal(snapshot(), base);
+  // ---- malformed settings, denied consent and an external cache symlink in a SELECTED home: refused by hook, saver and binder, never rerouted
+  const badSettings = path.join(root, 'bad-settings-home'); fs.mkdirSync(path.join(badSettings, 'cache/steam'), {recursive: true});
+  for (const [name, text] of [['not JSON', '{'], ['unsupported version', '{"version":3,"persistence":{"profileAndFeedback":true,"steamCache":true}}'], ['extra key', '{"version":1,"persistence":{"profileAndFeedback":true,"steamCache":true},"x":1}']]) {
+    fs.writeFileSync(path.join(badSettings, 'settings.json'), text);
+    r = run(hook, [], {CURATOR_HOME: badSettings}, payload(capture)); assert.match(ctx(r), /nothing was staged/, name); assert.equal(staged(badSettings).length, 0, name);
+    r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: badSettings}); assert.equal(r.status, 1, name); assert.match(r.stderr, /not authorized|not a valid|cannot read/, name);
+    r = run(binder, ['status'], {CURATOR_HOME: badSettings}); assert.equal(r.status, 1, name);
+    assert.equal(snapshot(), base, name + ': nothing leaked into the default home');
+  }
+  const outside = path.join(root, 'outside-target'); fs.mkdirSync(outside); const linked = path.join(root, 'linked-cache-home'); fs.mkdirSync(linked); fs.writeFileSync(path.join(linked, 'settings.json'), settingsText()); fs.mkdirSync(path.join(linked, 'cache')); fs.symlinkSync(outside, path.join(linked, 'cache/steam'));
+  r = run(hook, [], {CURATOR_HOME: linked}, payload(capture)); assert.match(ctx(r), /nothing was staged/); assert.equal(fs.readdirSync(outside).length, 0, 'nothing written through the symlink');
+  r = run(saver, [defaultStaged, ...common, '--dry-run'], {CURATOR_HOME: linked}); assert.equal(r.status, 1); assert.match(r.stderr, /resolves outside that home/); assert.equal(fs.readdirSync(outside).length, 0);
+  r = run(binder, ['status'], {CURATOR_HOME: linked}); assert.equal(r.status, 1);
+
+  // ---- direct API callers (no command-line wrapper): the selected-home boundary is enforced at the shared entry points, including rechecks
+  const withEnv = (value, fn) => { const old = process.env.CURATOR_HOME; if (value === undefined) delete process.env.CURATOR_HOME; else process.env.CURATOR_HOME = value; try { return fn(); } finally { if (old === undefined) delete process.env.CURATOR_HOME; else process.env.CURATOR_HOME = old; } };
+  const decoyCache = path.join(decoy, 'cache/steam'), decoySettings = path.join(decoy, 'settings.json'), customCache = path.join(custom, 'cache/steam'), customSettings = path.join(custom, 'settings.json');
+  const refused = /CURATOR_HOME selects a custom Curator Home/;
+  withEnv(custom, () => {
+    assert.throws(() => checkCacheAuthorized(decoyCache), refused); assert.throws(() => checkCacheAuthorized(decoyCache, decoySettings), refused); assert.throws(() => checkCacheAuthorized(customCache, decoySettings), refused);
+    assert.ok(checkCacheAuthorized(customCache)); assert.ok(checkCacheAuthorized(customCache, customSettings));
+    assert.throws(() => save({}, decoyCache, {dryRun: true, settings: decoySettings}), refused, 'save() cannot be pointed at another home');
+    assert.throws(() => save({}, customCache, {dryRun: true, settings: decoySettings}), refused, 'nor given another home\'s settings');
+    assert.throws(() => planBinding(decoySettings, {op: 'revoke'}), refused); assert.throws(() => planPersistence(decoySettings, {steamCache: false}), refused);
+    assert.ok(planPersistence(customSettings, {steamCache: false}).applied === false, 'the selected home\'s own settings are plannable');
+    assert.throws(() => readVerifiedStaging(defaultStaged, decoyCache), refused);
+    assert.match(handleHook(JSON.parse(payload(capture)), {dest: decoyCache, settings: decoySettings}), /nothing was staged/);
+    assert.match(handleHook(JSON.parse(payload(capture)), {dest: decoyCache}), /nothing was staged/);
+    assert.equal(staged(decoy).length, 1, 'only the pre-existing staged pair is in the default home');
+  });
+  withEnv(path.join(root, 'nope'), () => { for (const fn of [() => checkCacheAuthorized(decoyCache), () => checkCacheAuthorized(customCache), () => planBinding(customSettings, {op: 'revoke'}), () => readVerifiedStaging(defaultStaged, decoyCache)]) assert.throws(fn, /refusing to fall back/); });
+  withEnv(undefined, () => { assert.ok(checkCacheAuthorized(decoyCache), 'no selected home: explicit paths keep working'); assert.ok(checkCacheAuthorized(customCache)); });
   assert.equal(snapshot(), base);
   console.log('curator home isolation checks passed');
 } finally { fs.rmSync(root, {recursive: true, force: true}); }

@@ -37,7 +37,7 @@
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {parseSettings, readSettingsFile, bindingKey} from '../settings.mjs';
-import {resolveCuratorHome, assertWithinSelectedHome} from '../curator-home.mjs';
+import {resolveCuratorHome, assertWithinSelectedHome, guardSelectedHome} from '../curator-home.mjs';
 import {checkObservation, evaluateIdentity, identityPolicy, knownConflict, generationOf} from '../identity.mjs';
 import path from 'node:path';
 import os from 'node:os';
@@ -557,7 +557,8 @@ const HOOK_META_KEYS = ['bytes', 'call', 'capturedAt', 'deliver', 'kind', 'scrip
 // whose staging directory held the file (its own consent governs the read: the `authorize` callback runs after the location is verified and before
 // anything is opened) and `identity` lets removeIfUnchanged prove the pair is
 // still the verified one. Throws on any mismatch.
-export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest = path.join(os.homedir(), '.curator/game-curator/cache/steam'), authorize = () => {}} = {}) {
+export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest = resolveCuratorHome().cache, authorize = () => {}} = {}) {
+  guardSelectedHome({dest}); // before the staged file is looked at
   const real = p => fs.realpathSync(p);
   const name = path.basename(file);
   if (!/^gc-[a-z]+-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$/.test(name)) throw new Error('hook-capture: unexpected staged file name');
@@ -606,6 +607,7 @@ export function parseCacheSettings(s) { return parseSettings(s).persistence; } /
 
 // Persistence consent: strict settings.json v1 or v2 (persistence.md "Durable scope record"). Fails closed.
 export function checkCacheAuthorized(dest, settingsPath) {
+  guardSelectedHome({dest, settings: settingsPath}); // a selected custom home bounds every caller, not only the command-line wrappers
   let file = settingsPath;
   if (!file) {
     if (path.basename(dest) !== 'steam' || path.basename(path.dirname(dest)) !== 'cache') throw new Error('Custom cache location: pass --settings <path to the user-controlled settings.json>');

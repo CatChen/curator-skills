@@ -2,6 +2,8 @@
 
 ## Location, discovery and consent
 
+**Step 0 of every persistence workflow: discover the Curator Home before any profile, feedback, settings or cache access.** Run `node <skill>/scripts/curator-home.mjs`; it prints the selected home (`CURATOR_HOME` when set, otherwise the default `~/.curator/game-curator`) with its `settings.json` and `cache/steam`, and exits with an error if a selected home is unusable, in which case stop and tell the user (never fall back to the default). Use only that printed home for `settings.json`, `profile.md`, `feedback.md` and the Steam cache, and for the hook, saver and binder. `CURATOR_HOME` covers all of them; if the user names a different location in conversation while it is set, ask which to use rather than mixing. See [Selecting a custom Curator Home](#selecting-a-custom-curator-home); that Claude Code's `env` setting reaches the hook has not yet been verified live.
+
 `~/.curator/` is the preferred convention only when `~` is the user's real, user-controlled home and persists across sessions. It is not a required path; a runtime's cloud or isolated home may be ephemeral or inaccessible to other clients. Do not infer durability or shared Codex/Claude access from a path name. Keep this data outside the installed skill and public repository.
 
 ```text

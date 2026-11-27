@@ -145,7 +145,7 @@ export function handleHook(payload, {dest, settings, skillDir = here, now = Date
   const saver = path.join(skillDir, 'save-capture.mjs');
   return `Game Curator hook: staged the complete ${env.source} result (${env.records.length} records, ${bytes.length} bytes, sha256 ${digest.slice(0, 16)}...) privately at ${file}. `
     + `Provenance is hook-capture: the runtime-processed tool response as the hook received it, not a native tool-result file and not a browser download. Validate and save it with `
-    + `node ${saver} ${file} --provenance hook-capture --account <alias> --access-scope <scope> [--view unfiltered] --dry-run, then without --dry-run; the saver removes the staged pair after a successful save. Do not retype the data.`;
+    + `node ${saver} ${file} --provenance hook-capture [--view unfiltered] --dry-run (the selected Curator Home needs no --dest/--settings; read curatorHome and destination in the output; add --account <alias> --access-scope <scope> only as the manual fallback when no account is bound or identity was unobservable), then without --dry-run; the saver removes the staged pair after a successful save. Do not retype the data.`;
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

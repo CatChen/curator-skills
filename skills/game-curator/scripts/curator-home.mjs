@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 export class CuratorHomeError extends Error {}
 
@@ -29,10 +30,27 @@ export function resolveCuratorHome({env = process.env, homedir = os.homedir()} =
   return {source: 'env', home: real, settings, cache: path.join(real, 'cache/steam')};
 }
 
-// For explicit --dest/--settings arguments: while a custom home is selected they may only name that home's own paths.
+// For explicit --dest/--settings arguments: while a custom home is selected they may only name that home's own paths, and the cache directory may not
+// resolve (through a symbolic link) to somewhere outside the home.
 export function assertWithinSelectedHome(selected, {dest, settings} = {}) {
   if (selected.source !== 'env') return;
   const real = p => { let q = path.resolve(p); const tail = []; while (!fs.existsSync(q)) { tail.unshift(path.basename(q)); q = path.dirname(q); } return path.join(fs.realpathSync(q), ...tail); };
-  if (dest !== undefined && real(dest) !== real(selected.cache)) throw new CuratorHomeError('CURATOR_HOME selects a custom Curator Home: --dest must be omitted or be that home\'s own cache/steam directory');
+  const homeReal = real(selected.home), cacheReal = real(selected.cache);
+  if (cacheReal !== homeReal && !cacheReal.startsWith(homeReal + path.sep)) throw new CuratorHomeError('the selected Curator Home\'s cache directory resolves outside that home (a symbolic link); refusing to use it');
+  if (dest !== undefined && real(dest) !== cacheReal) throw new CuratorHomeError('CURATOR_HOME selects a custom Curator Home: --dest must be omitted or be that home\'s own cache/steam directory');
   if (settings !== undefined && real(settings) !== real(selected.settings)) throw new CuratorHomeError('CURATOR_HOME selects a custom Curator Home: --settings must be omitted or be that home\'s own settings.json');
+}
+
+// The shared authorization entry points (checkCacheAuthorized, the binder's plans, the hook, staged-file reading) call this FIRST, so the selected-home
+// boundary holds for direct API callers as well as for the command-line wrappers. With no CURATOR_HOME it only validates nothing and changes nothing.
+export function guardSelectedHome(paths = {}, {env = process.env, homedir} = {}) {
+  const selected = resolveCuratorHome({env, ...(homedir ? {homedir} : {})}); // throws CuratorHomeError when a selected home is unusable
+  assertWithinSelectedHome(selected, paths);
+  return selected;
+}
+
+// One explicit discovery step for the whole persistence workflow (profile, feedback, settings and cache): prints the Curator Home this environment selects.
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { const s = resolveCuratorHome(); console.log(JSON.stringify({source: s.source === 'env' ? 'CURATOR_HOME' : 'default', home: s.home, settings: s.settings, cache: s.cache}, null, 2)); }
+  catch (e) { console.error(String(e.message ?? e)); process.exit(1); }
 }
