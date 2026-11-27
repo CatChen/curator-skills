@@ -36,6 +36,7 @@
 // Separate captures are bounded and never evicted to admit a different observation.
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
+import {parseSettings} from '../settings.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -575,16 +576,9 @@ export function removeIfUnchanged(identity) {
 }
 
 // Dispatch by version without inferring authorization for unknown versions.
-export function parseCacheSettings(s) {
-  if (!s || typeof s !== 'object' || Array.isArray(s) || s.version !== 1) throw new Error('unsupported or invalid settings version');
-  const ok = Object.keys(s).sort().join() === 'persistence,version' && s.persistence && typeof s.persistence === 'object' && !Array.isArray(s.persistence)
-    && Object.keys(s.persistence).sort().join() === 'profileAndFeedback,steamCache'
-    && typeof s.persistence.profileAndFeedback === 'boolean' && typeof s.persistence.steamCache === 'boolean';
-  if (!ok) throw new Error('invalid version 1 settings record');
-  return s.persistence;
-}
+export function parseCacheSettings(s) { return parseSettings(s).persistence; } // v1 and v2; the binding is read with parseSettings
 
-// Persistence consent: strict settings.json v1 (persistence.md "Durable scope record"). Fails closed.
+// Persistence consent: strict settings.json v1 or v2 (persistence.md "Durable scope record"). Fails closed.
 export function checkCacheAuthorized(dest, settingsPath) {
   let file = settingsPath;
   if (!file) {
@@ -597,7 +591,7 @@ export function checkCacheAuthorized(dest, settingsPath) {
   const home = real(path.dirname(file)), target = real(dest);
   if (target !== home && !target.startsWith(home + path.sep)) throw new Error(`Cache not authorized: ${file} does not govern ${dest} (the destination must be inside the settings record's directory)`);
   let scopes;
-  try { scopes = parseCacheSettings(s); } catch { throw new Error(`Cache not authorized: ${file} is not a valid version 1 settings record`); }
+  try { scopes = parseCacheSettings(s); } catch { throw new Error(`Cache not authorized: ${file} is not a valid version 1 or 2 settings record`); }
   if (!scopes.steamCache) throw new Error('Cache not authorized: settings.json has steamCache false');
   return file;
 }

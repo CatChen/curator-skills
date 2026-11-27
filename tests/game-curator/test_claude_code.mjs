@@ -142,7 +142,7 @@ const home = path.join(tmp, 'game-curator'), dest = path.join(home, 'cache', 'st
 fs.mkdirSync(dest, {recursive: true});
 const settings = path.join(home, 'settings.json');
 assert.throws(() => checkCacheAuthorized(dest), /cannot read/);
-for (const bad of ['{', '{"version":2,"persistence":{"profileAndFeedback":true,"steamCache":true}}', '{"version":1,"persistence":{"profileAndFeedback":true,"steamCache":"yes"}}',
+for (const bad of ['{', '{"version":3,"persistence":{"profileAndFeedback":true,"steamCache":true}}', '{"version":2,"persistence":{"profileAndFeedback":true,"steamCache":true},"extra":1}', '{"version":1,"persistence":{"profileAndFeedback":true,"steamCache":"yes"}}',
   '{"version":1,"persistence":{"profileAndFeedback":true,"steamCache":true},"extra":1}', '{"version":1,"persistence":{"steamCache":true}}']) {
   fs.writeFileSync(settings, bad); assert.throws(() => checkCacheAuthorized(dest), /not authorized/);
 }
