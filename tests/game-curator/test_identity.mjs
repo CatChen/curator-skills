@@ -9,6 +9,7 @@ import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprin
 import {parseSettings, fingerprintSync, newSalt, saltCheckOf, BINDING_ALG} from '../../skills/game-curator/scripts/settings.mjs';
 import {parseCacheSettings, checkCacheAuthorized} from '../../skills/game-curator/scripts/cache.mjs';
 import {collectIdentity} from '../../skills/game-curator/scripts/browser/steam.mjs';
+import {makeWishlistPage} from './fake-wishlist-dom.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
 const ID_A = '76561197960278073', ACC_A = 12345, ID_B = '76561197960320049', ACC_B = 54321; // synthetic
@@ -167,6 +168,19 @@ const leak = o => { const s = JSON.stringify(o); for (const v of [...Object.valu
   assert.equal(refused.available, false); assert.ok(!('sessionFingerprint' in refused)); assert.equal(refused.reason, 'page evaluation was refused or failed'); assert.ok(!JSON.stringify(refused).includes('SECRET'), 'runtime exception text is never returned');
   const nosalt = j(await collectIdentity({playwright: {evaluate: async fn => { const ctx = vm.createContext({crypto: globalThis.crypto, TextEncoder, btoa, atob, window: {}, document: e.doc, location: e.loc, Error, Promise, JSON}); return j(await vm.runInContext('(' + fn.toString() + ')()', ctx)); }}}, {}));
   assert.equal(nosalt.available, false, 'neither salt nor candidate: refused, never a guess');
+}
+
+// ---- the identity option of a collector page script embeds only fingerprints and never loses the capture (fixture page)
+{
+  const withBase64 = p => { p.ctx.btoa = btoa; p.ctx.atob = atob; return p; }; // real pages have these; the fake DOM does not
+  const p = withBase64(makeWishlistPage({n: 5}));
+  p.ctx.window.UserConfig = uc(ID_A, ACC_A);
+  const e = j(await p.run({identity: {salt: SALT}}));
+  assert.equal(e.records.length, 5); assert.equal(e.diagnostics.identity.sessionFingerprint, VECTOR); assert.equal(e.diagnostics.identity.loggedIn, true); leak(e.diagnostics.identity);
+  assert.equal(e.accessScope, 'unknown', 'the page never claims scope or account'); assert.ok(!('account' in e));
+  const plain = j(await makeWishlistPage({n: 5}).run({})); assert.ok(!('identity' in plain.diagnostics), 'no identity option, no observation');
+  const bad = j(await withBase64(makeWishlistPage({n: 5})).run({identity: {candidate: true}})); assert.equal(bad.records.length, 5); assert.equal(bad.diagnostics.identity.error, 'observation-failed'); assert.equal(bad.diagnostics.identity.sessionFingerprint, null);
+  const nosalt = j(await withBase64(makeWishlistPage({n: 5})).run({identity: {}})); assert.equal(nosalt.diagnostics.identity.error, 'observation-failed');
 }
 
 // ---- D. settings v1 / v2 reader (fixtures; no production file is read)

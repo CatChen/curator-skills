@@ -45,7 +45,7 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     if (!snap.records.length) {
       if (expected !== 0) throw new Error('No library rows rendered; the page may still be loading, signed out or private, or its layout changed. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, got: new Map(), stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, retainMs: opts.retainMs});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, got: new Map(), stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, identity: opts.identity, retainMs: opts.retainMs});
     }
 
     const fresh = () => ({sig, startedAt, got: new Map(), activeMs: 0, opts: {}, warnings: [], stats: {steps: 0, waits: 0, calls: 0, restarts: 0}, scrollStalls: 0, quietSince: Date.now()});
@@ -115,7 +115,7 @@ await (window.__gcLibraryRun = async (opts = {}) => {
     const viewAtStop = stopReason === 'view-changed' ? {view: viewInfo(), expected: snapshotLibrary().expected} : null;
     S.activeMs += Date.now() - callStart;
     const c = {startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, got, stopReason, view, stats, activeMs: S.activeMs, calls: stats.calls,
-      warnings: S.warnings, deliver: opts.deliver, retainMs: S.opts.retainMs, viewAtStop};
+      warnings: S.warnings, deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, viewAtStop};
     cleanup();
     return envelopeOf(c);
   } catch (error) { cleanup(); throw error; }
@@ -154,6 +154,6 @@ await (window.__gcLibraryRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: c.deliver, retainMs: c.retainMs, filePrefix: 'gc-library'});
+    return deliverEnvelope(envelope, {deliver: c.deliver, identity: c.identity, retainMs: c.retainMs, filePrefix: 'gc-library'});
   }
 })({})

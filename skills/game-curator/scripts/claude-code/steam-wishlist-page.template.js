@@ -51,7 +51,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     if (!snap.rows.length) {
       if (expected0 !== 0) throw new Error('No wishlist rows rendered; the page may still be loading, signed out, or filtered. Verify sign-in and view, then retry');
       cleanup();
-      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, retainMs: opts.retainMs});
+      return envelopeOf({startedAt, finishedAt: new Date().toISOString(), expected: 0, records: [], stopReason: 'empty-observed', view, stats: {}, activeMs: 0, calls: 1, warnings: [], deliver: opts.deliver, identity: opts.identity, retainMs: opts.retainMs});
     }
     const first = document.querySelector('[data-rfd-drag-handle-draggable-id^="WishlistItem-"]');
     let box = first.parentElement;
@@ -135,7 +135,7 @@ await (window.__gcWishlistRun = async (opts = {}) => {
     const records = toWishlistRecords(got), skipped = [...S.skipped];
     cleanup();
     return envelopeOf({startedAt: S.startedAt, finishedAt: new Date().toISOString(), expected, records, stopReason, view, stats, activeMs: S.activeMs,
-      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
+      calls: stats.calls, warnings: S.warnings, skipped, deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, incomplete: [...got.values()].filter(r => !r.complete).length});
   } catch (error) { cleanup(); throw error; }
 
   // Build the game-curator-steam-export v1 envelope from collected rows (hash over the exact record JSON).
@@ -168,6 +168,6 @@ await (window.__gcWishlistRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records: c.records,
     };
-    return deliverEnvelope(envelope, {deliver: c.deliver, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
+    return deliverEnvelope(envelope, {deliver: c.deliver, identity: c.identity, retainMs: c.retainMs, filePrefix: 'gc-wishlist'});
   }
 })({})

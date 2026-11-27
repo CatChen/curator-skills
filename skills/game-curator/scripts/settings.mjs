@@ -49,6 +49,9 @@ export function parseSettings(s) {
   throw new Error('unsupported or invalid settings version');
 }
 
+// Identity of a binding for change detection (alias and fingerprint; null when unbound).
+export const bindingKey = b => JSON.stringify(b ? [b.alias, b.fingerprint] : null);
+
 export function readSettingsFile(file) {
   const bytes = fs.readFileSync(file);
   return {bytes, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), settings: parseSettings(JSON.parse(bytes.toString('utf8')))};

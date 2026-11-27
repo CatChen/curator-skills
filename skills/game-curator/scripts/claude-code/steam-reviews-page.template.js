@@ -166,6 +166,6 @@ await (window.__gcReviewsRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-reviews'});
   }
 })({})

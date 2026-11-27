@@ -177,6 +177,6 @@ await (window.__gcReplayRun = async (opts = {}) => {
       accessScope: 'unknown', // the caller sets signed-in/account only after verifying them
       records,
     };
-    return deliverEnvelope(envelope, {deliver: opts.deliver, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
+    return deliverEnvelope(envelope, {deliver: opts.deliver, identity: opts.identity, retainMs: S.opts.retainMs, filePrefix: 'gc-replay'});
   }
 })({})

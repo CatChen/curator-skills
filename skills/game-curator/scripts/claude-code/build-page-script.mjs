@@ -18,16 +18,17 @@ export const PAGES = {
   library: {functions: [snapshotLibrary, libraryLabelCount, libraryFieldsKey, mergeLibraryRow, normalizeLibraryRecord]},
   reviews: {functions: [snapshotReviews, reviewPageKey, queueReviewPages]},
   replay: {functions: [snapshotReplay, dedupeReplayApps, replayYears]},
-  identity: {functions: [b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity]},
+  identity: {functions: []}, // standalone probe: only the identity functions (see buildPageScript)
 };
-const COMMON = [sha256Hex, makeWaiter, deliverEnvelope];
+const IDENTITY = [b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity];
+const COMMON = [...IDENTITY, sha256Hex, makeWaiter, deliverEnvelope];
 const inline = fns => fns.map(f => '  ' + f.toString().replace(/\n/g, '\n  ')).join('\n').trimStart();
 
 export function buildPageScript(name = 'wishlist') {
   if (!PAGES[name]) throw new Error(`unknown page script: ${name}`);
   const template = fs.readFileSync(new URL(`steam-${name}-page.template.js`, dir), 'utf8');
   for (const marker of ['/*@@SHARED@@*/', '/*@@COMMON@@*/']) if (!template.includes(marker)) throw new Error(`template marker missing: ${marker}`);
-  return template.replace('/*@@SHARED@@*/', () => inline(PAGES[name].functions)).replace('/*@@COMMON@@*/', () => inline(COMMON));
+  return template.replace('/*@@SHARED@@*/', () => inline(PAGES[name].functions)).replace('/*@@COMMON@@*/', () => inline(name === 'identity' ? IDENTITY : COMMON));
 }
 
 // True only when this file is the process entry point, including when invoked through a symlink or a path

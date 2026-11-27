@@ -31,6 +31,16 @@ export function makeWaiter(callBudget) {
 // expiry, since background timers can be delayed) and window.__gcRelease() discards it. A new delivery releases the
 // previous one. o = {deliver, retainMs, filePrefix}.
 export async function deliverEnvelope(envelope, o) {
+  // Optional identity observation ({salt} of the approved binding, stated on the finishing call like deliver): fingerprints only, never an identifier.
+  // A failed observation is recorded as unobserved rather than losing the capture; the saver, not this script, decides what it means.
+  if (o.identity) {
+    let observed;
+    try {
+      if (o.identity.candidate !== undefined) throw new Error('candidate salts belong to the standalone probe');
+      observed = await observeIdentity({salt: o.identity.salt});
+    } catch { observed = {version: 1, sources: [], loggedIn: null, consistent: false, saltCheck: null, sessionFingerprint: null, pathFingerprint: null, error: 'observation-failed'}; }
+    envelope.diagnostics = {...envelope.diagnostics, identity: observed};
+  }
   if (o.deliver !== 'download') return envelope;
   const text = JSON.stringify(envelope, null, 2) + '\n', bytes = new TextEncoder().encode(text).length;
   const file = `${o.filePrefix}-${envelope.capturedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`;
