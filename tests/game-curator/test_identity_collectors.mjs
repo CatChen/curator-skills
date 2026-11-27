@@ -226,17 +226,23 @@ try {
     site.navigate(first.next); let r = j(await site.runFile({identity: {salt: h.salt}}));
     for (let i = 0; r.status === 'continue' && i < 10; i++) { site.navigate(r.next); r = j(await site.runFile({})); }
     assert.equal(r.diagnostics.identity.continuity.covered, false); const s = saveNative(h, r);
-    assert.equal(s.json.action, 'separate'); assert.match(s.json.reason, /not observed|not confirmed/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')), 'B\'s rows were not promoted as the bound account');
+    assert.equal(s.json.action, 'separate'); assert.match(s.json.reason, /ambiguous/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')), 'B\'s rows were not promoted as the bound account');
+    // the capture is otherwise eligible (owner evidence, complete): a manual confirmation still cannot promote it
+    const m = saveNative(h, r, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m.status, 1); assert.match(m.err, /cannot override a known observation/); assert.ok(!fs.existsSync(path.join(h.dest, 'reviews.json')));
   }
   {
     const h = home(), p = makeWishlistPage({n: 30}); setUser(p.state, B);
     let r = j(await p.run({callBudgetMs: 1})); assert.ok(r.inProgress, 'a long first call hands control back without identity');
     setUser(p.state, A); r = j(await p.run({identity: {salt: h.salt}})); for (let i = 0; i < 400 && !r.format; i++) r = j(await p.run({}));
     assert.equal(r.diagnostics.identity.continuity.covered, false); assert.equal(saveNative(h, r).json.action, 'separate');
+    { const m = saveNative(h, r, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m.status, 1); assert.match(m.err, /cannot override a known observation/); assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json'))); }
     const h2 = home(), p2 = makeWishlistPage({n: 30}); setUser(p2.state, A); // a different salt on resume restarts continuity as not covered
     let r2 = j(await p2.run({callBudgetMs: 1, identity: {salt: h2.salt}})); assert.ok(r2.inProgress);
     r2 = j(await p2.run({identity: {salt: newSalt()}})); for (let i = 0; i < 400 && !r2.format; i++) r2 = j(await p2.run({}));
     assert.equal(r2.diagnostics.identity.continuity.covered, false);
+    assert.equal(r2.diagnostics.stopReason, 'complete', 'the capture is otherwise complete and eligible');
+    const m2 = saveNative(h2, r2, ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(m2.status, 1, 're-salted: manual confirmation cannot promote it'); assert.match(m2.err, /cannot override a known observation/);
+    assert.ok(!fs.existsSync(path.join(h2.dest, 'wishlist.json')));
   }
 
   // ======== bound review-name enrichment: both captures must be verified under the SAME binding generation

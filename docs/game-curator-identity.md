@@ -70,3 +70,7 @@ The Codex DOM collectors (`scripts/browser/steam.mjs`: `collectWishlist`, `colle
 5. **Replay settling:** partial renders (a `LOADING...` line) are possible; the Claude script settles and flags them.
 
 A focused follow-up, "Codex collector evidence parity", should add the owner, view and completeness diagnostics to the Codex collectors by reusing the shared row modules, and define how a Codex run proves transfer provenance. It needs a live Codex runtime and is intentionally not part of the identity work. Until then, Codex captures stay separate snapshots and an identity match does not promote them.
+
+## Privacy audit notes (existing fields, tracked narrowly)
+
+Navigation targets are not persisted identifiers. Replay's `next` navigation URL carries the numeric account path so the run can continue; it is used inside the run and is never written to a capture. Separately, existing collectors persist a page path in `diagnostics.urlPath` and review URLs, which contain the public profile vanity name; that is existing behavior, not part of this change, and a candidate for a focused scrub or opt-out. Public reports from tests and acceptance stay sanitized (no vanity names, persona names or numeric IDs).

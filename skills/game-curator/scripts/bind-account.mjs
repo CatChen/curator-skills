@@ -39,19 +39,26 @@ export function checkBindProbe(p) {
   return bad;
 }
 
+// Writes go only to a regular file the user named: a symbolic link is refused (the plan pins the bytes, not which file a link points at), and the
+// user is asked to choose the real file explicitly.
+function assertRegular(file) {
+  let st; try { st = fs.lstatSync(file); } catch (e) { throw new Error(`settings not usable (nothing changed): ${e.code ?? e.message}`); }
+  if (st.isSymbolicLink()) throw new Error('refused: settings.json is a symbolic link; nothing was changed. Pass the real settings file path explicitly.');
+}
+
 function commit(file, current, text, check, {apply, expect, plan, hooks}) {
   const settingsSha256 = current.sha256;
   const full = {...plan, settingsSha256};
   if (!apply) return {...full, applied: false, next: 'Show this plan to the user. Only after their explicit approval run again with --apply --expect-settings <settingsSha256> --expect-candidate <candidateSha256>.'};
   if (!expect || expect.settingsSha256 !== settingsSha256 || expect.candidateSha256 !== plan.candidateSha256) throw new Error('refused: --apply needs the settings revision and candidate digests of the plan the user approved, and they differ from the current ones (the settings file or the candidate changed)');
   // Atomic replacement: private temp file in the same directory, refuse if the file changed since it was read, rename, read back.
-  const target = fs.realpathSync(file); // a symlinked settings.json is edited in place of its target, never replaced by a regular file
-  const dir = path.dirname(target), tmp = path.join(dir, `.settings.${process.pid}.tmp`);
+  assertRegular(file); // again at apply time: the link may have been introduced since the plan
+  const dir = path.dirname(file), tmp = path.join(dir, `.settings.${process.pid}.tmp`);
   fs.writeFileSync(tmp, text, {flag: 'wx', mode: 0o600});
   try {
     hooks.beforeCommit?.(); // test seam for the read-to-rename window
     if (readSettingsFile(file).sha256 !== settingsSha256) throw new Error('settings.json changed while the change was prepared; nothing was written');
-    fs.renameSync(tmp, target);
+    fs.renameSync(tmp, file);
   } catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
   const back = readSettingsFile(file);
   if (!back.bytes.equals(Buffer.from(text)) || !check(back.settings)) throw new Error('read-back of settings.json did not match the intended record');
@@ -61,6 +68,7 @@ function commit(file, current, text, check, {apply, expect, plan, hooks}) {
 // op: 'bind' (no current binding), 'change' (replace the current one), 'revoke' (remove it). Nothing is written unless apply.
 export function planBinding(file, {op, probe, alias, apply = false, expect, now = new Date(), hooks = {}}) {
   if (!['bind', 'change', 'revoke'].includes(op)) throw new Error('op must be bind, change or revoke');
+  assertRegular(file);
   let current;
   try { current = readSettingsFile(file); } catch (e) { throw new Error(`settings not usable (nothing changed): ${e.code ?? e.message}`); }
   const {settings} = current;
@@ -91,6 +99,7 @@ export function planBinding(file, {op, probe, alias, apply = false, expect, now 
 
 // Edit the persistence choices of an existing settings file. A binding and the file's version are preserved exactly.
 export function planPersistence(file, changes, {apply = false, expect, hooks = {}} = {}) {
+  assertRegular(file);
   let current;
   try { current = readSettingsFile(file); } catch (e) { throw new Error(`settings not usable (nothing changed): ${e.code ?? e.message}`); }
   const keys = Object.keys(changes ?? {});

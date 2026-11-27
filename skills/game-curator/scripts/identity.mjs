@@ -56,6 +56,9 @@ export function evaluateIdentity({binding, observation, ownerEvidence = false, i
   if (checkObservation(observation).length) return identityChanged ? changed : un(unobservedNote.malformed);
   const source = observation.sources[0] ?? null, base = {source, ownership: 'unverified'}, c = observation.continuity;
   if (identityChanged || c?.broke === true) return {...changed, source};
+  // A partially instrumented run (identity added or re-salted on a resume call) can contain earlier batches nobody observed, possibly another account's.
+  // This is decided before anything that could downgrade it (salt, errors, unavailable markers): it is never current evidence and no manual alias can fix it.
+  if (c?.covered === false) return {result: 'ambiguous', ownership: 'unverified', source, note: 'identity was observed only for part of the run (it was added or changed on a resume call); the earlier batches are not attested and may belong to another account'};
   if (observation.error) return un('the page could not read its identity');
   // Extraction unavailable (nothing was read) is different from evidence that is present but unusable or contradictory.
   if (observation.problems.length === 1 && observation.problems[0] === 'unsupported-origin') return un('the page is not a supported Steam origin, so no identity was read');
@@ -67,8 +70,8 @@ export function evaluateIdentity({binding, observation, ownerEvidence = false, i
   const path = observation.pathFingerprint, foreignPath = path !== null && path !== observation.sessionFingerprint;
   if (foreignPath && ownerEvidence) return {...base, result: 'ambiguous', ownership: 'contradicted', note: 'owner controls are shown but the page URL names a different account'};
   // Continuity: the account must have been the same, from the FIRST batch of the run, at the start, at every checked boundary and at the end.
+  if (foreignPath && (!c || c.checks < 2)) return {...base, result: 'ambiguous', note: 'the page URL names another account and continuity across the run is not established'}; // known foreign evidence is never downgraded to unobserved
   if (!c || c.checks < 2) return un('identity was not checked at the start and end of the run, so continuity across the collection is not established');
-  if (c.covered === false) return un('identity was observed only for part of the run (earlier batches were collected without it), so it is not attested for them');
   if (c.stable !== true) return {...base, result: 'ambiguous', note: 'the signed-in identity was not the same at every check of the run'};
   if (foreignPath) return {...base, result: 'match', ownership: 'unverified', note: 'signed in as the bound account, but the page viewed belongs to another account'};
   const owned = ownerEvidence === true && observation.owner === true;

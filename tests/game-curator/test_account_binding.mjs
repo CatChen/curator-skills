@@ -309,15 +309,38 @@ try {
     assert.equal(evaluateIdentity({binding, observation: undefined, ownerEvidence: true, identityChanged: true}).result, 'ambiguous');
     assert.equal(runSaver(h, stopped, ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1, 'stopReason identity-changed without any observation is not a manual fallback');
     const late = mk({continuity: {checks: 3, stable: true, broke: false, covered: false}});
-    assert.equal(evaluateIdentity({binding, observation: late, ownerEvidence: true}).result, 'unobserved', 'identity added on a resume call is not attested for earlier batches');
-    assert.match(runSaver(h, capture('2026-03-04T00:00:00Z', {identity: late}), []).json.reason, /not observed|not confirmed/);
+    assert.equal(evaluateIdentity({binding, observation: late, ownerEvidence: true}).result, 'ambiguous', 'identity added on a resume call is never current evidence');
+    const resalted = mk({continuity: {checks: 3, stable: true, broke: false, covered: false}, saltCheck: '00000000'});
+    assert.equal(evaluateIdentity({binding, observation: resalted, ownerEvidence: true}).result, 'ambiguous', 're-salted: covered is judged before the salt, so it cannot be downgraded');
+    const failedFinal = mk({continuity: {checks: 3, stable: false, broke: false, covered: false}, error: 'observation-failed', loggedIn: null, sessionFingerprint: null, consistent: false, owner: null});
+    assert.equal(evaluateIdentity({binding, observation: failedFinal, ownerEvidence: true}).result, 'ambiguous');
+    for (const [name, identity] of [['late', late], ['re-salted', resalted], ['late with a failed final observation', failedFinal]]) {
+      const r = runSaver(h, capture(`2026-03-04T0${['late', 're-salted'].indexOf(name) + 1}:00:00Z`, {identity}), []); assert.equal(r.json.action, 'separate', name); assert.match(r.json.reason, /ambiguous/, name);
+      const manual = runSaver(h, capture('2026-03-06T00:00:00Z', {identity}), ['--account', 'my-steam', '--access-scope', 'signed-in']); assert.equal(manual.status, 1, name + ': manual confirmation cannot override'); assert.match(manual.err, /cannot override a known observation/, name);
+      assert.ok(!fs.existsSync(path.join(h.dest, 'wishlist.json')), name + ': nothing promoted');
+    }
+    // known foreign URL evidence is never downgraded to unobserved by missing continuity
+    const foreign = noCont(ID_A); foreign.pathFingerprint = fingerprintSync(salt, ID_B); foreign.owner = false;
+    assert.equal(evaluateIdentity({binding, observation: foreign, ownerEvidence: false}).result, 'ambiguous');
+    assert.equal(runSaver(h, capture('2026-03-07T00:00:00Z', {identity: foreign, handles: false}), ['--account', 'my-steam', '--access-scope', 'signed-in']).status, 1, 'no manual override of a foreign URL');
     // a malformed observation is rejected before it is consumed: never downgraded to unobserved and then confirmed manually
     const bad = {...obs(b, ID_A), sessionFingerprint: [obs(b, ID_A).sessionFingerprint]};
     assert.throws(() => save(Object.assign(capture('2026-03-05T00:00:00Z', {identity: bad}), {accessScope: 'signed-in'}), h.dest, {dryRun: true, transferVerified: true, manualAccount: 'my-steam'}), /Invalid capture/);
     // a probe without an origin is not a binding candidate; a symlinked settings.json is edited through the link
     assert.throws(() => planBinding(h.file, {op: 'change', probe: {...probeFor(ID_B), origin: undefined}, alias: 'x'}), /supported Steam origin/);
+    // a symlinked settings.json is refused for writes (the plan pins bytes, not which file a link points at); the real file path works
     const h2 = home(), real = path.join(h2.root, 'real-settings.json'); fs.renameSync(h2.file, real); fs.symlinkSync(real, h2.file);
-    approve(h2.file, {op: 'bind', probe: probeFor(ID_A), alias: 'a'}); assert.ok(fs.lstatSync(h2.file).isSymbolicLink(), 'the link survives'); assert.equal(readSettingsFile(real).settings.steamAccount.alias, 'a');
+    const realBefore = fs.readFileSync(real, 'utf8');
+    assert.throws(() => planBinding(h2.file, {op: 'bind', probe: probeFor(ID_A), alias: 'a'}), /symbolic link/);
+    assert.throws(() => planPersistence(h2.file, {steamCache: false}), /symbolic link/);
+    assert.equal(fs.readFileSync(real, 'utf8'), realBefore); assert.ok(fs.lstatSync(h2.file).isSymbolicLink());
+    { // a link introduced between the plan and the apply is refused too, and the other target is untouched
+      const probeX = probeFor(ID_A), plan = planBinding(real, {op: 'bind', probe: probeX, alias: 'a'}), decoy = path.join(h2.root, 'decoy.json'); fs.copyFileSync(real, decoy);
+      const link = path.join(h2.root, 'via-link.json'); fs.symlinkSync(decoy, link);
+      assert.throws(() => planBinding(link, {op: 'bind', probe: probeX, alias: 'a', apply: true, expect: {settingsSha256: plan.settingsSha256, candidateSha256: plan.candidateSha256}}), /symbolic link/);
+      assert.equal(fs.readFileSync(decoy, 'utf8'), realBefore, 'a same-bytes target behind a link is never modified');
+    }
+    approve(real, {op: 'bind', probe: probeFor(ID_A), alias: 'a'}); assert.equal(readSettingsFile(real).settings.steamAccount.alias, 'a'); assert.ok(fs.lstatSync(h2.file).isSymbolicLink(), 'the real path was written, the link is untouched');
   }
 
   // ---- policy unit checks
