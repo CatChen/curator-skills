@@ -126,11 +126,11 @@ assert.match(reason({...old, method: ''}, next), /not a valid wishlist/);
 {
   const a = make(0, {account: 'me', at: '2026-11-25T00:00:00Z', records: [row(1), row(2, {labels: ['RELEASE DATE:']})]});
   const b = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [row(1, {labels: ['USER TAGS:', 'ENGLISH REVIEWS:', 'MY CATEGORIES:']}), row(2, {labels: ['RELEASE DATE:', 'USER TAGS:', 'ENGLISH REVIEWS:', 'MY CATEGORIES:']})]});
-  assert.deepEqual(fieldLosses(a, b), {releaseDate: 1});
+  assert.deepEqual(fieldLosses(a, b), {releaseDate: 1, pageText: 1});
   assert.match(reason(a, b), /lose fields/); // aggregate label count would have gone up
   const c = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [row(1), row(2, {labels: ['RELEASE DATE:'], base: 5000})]}); // dropped AppID, new AppID: not a loss
   assert.equal(decide(a, c).action, 'replace');
-  const reviews = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [{...row(1), pageText: 'Game 1\nRELEASE DATE:\nx\nOVERALL REVIEWS:\nx\nUSER TAGS:\nx\nMY CATEGORIES:\nx'}, row(2, {labels: ['RELEASE DATE:']})]});
+  const reviews = make(0, {account: 'me', at: '2026-11-26T00:00:00Z', records: [{...row(1), pageText: 'Game 1\nRELEASE DATE:\nx\nOVERALL REVIEWS:\nx\nUSER TAGS:\nx\nMY CATEGORIES:\nx\n$9.99'}, row(2, {labels: ['RELEASE DATE:']})]});
   assert.equal(decide(a, reviews).action, 'replace'); // English vs overall reviews wording is not a loss
 }
 assert.equal(decide(old, next, {backupCount: MAX_BACKUPS}).action, 'replace');
@@ -424,7 +424,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
   // field loss: playtime, last played and achievements that existed must not vanish for a retained game
   { const a = lib(0, {account: 'me', at: '2026-11-26T00:00:00.000Z', records: [lrow(1, 'TOTAL PLAYED\n9 hours\nLAST PLAYED\nMay 1, 2025\nACHIEVEMENTS\n1/2\n'), lrow(2)]});
     const b = lib(0, {account: 'me', at: '2026-11-27T00:00:00.000Z', records: [lrow(1, 'TOTAL PLAYED\n9 hours\n'), lrow(2, 'TOTAL PLAYED\n1 hours\nLAST PLAYED\nMay 2, 2025\nACHIEVEMENTS\n1/2\n')]});
-    assert.deepEqual(fieldLosses(a, b), {lastPlayedDisplay: 1, achievements: 1}); assert.match(reason(a, b), /lose fields/); // a gained field on another game does not offset them
+    assert.deepEqual(fieldLosses(a, b), {lastPlayedDisplay: 1, achievements: 1, pageText: 1}); assert.match(reason(a, b), /lose fields/); // a gained field on another game does not offset them
     assert.equal(decide(b, a).action !== undefined, true); }
   // files: each source has its own cache file, snapshots and lock; a library save never touches wishlist.json
   const rootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-lib-')), dest2 = path.join(rootTmp, 'game-curator', 'cache', 'steam');

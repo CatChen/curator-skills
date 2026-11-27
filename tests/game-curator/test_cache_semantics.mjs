@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {equivalentRecords} from '../../skills/game-curator/scripts/cache-semantics.mjs';
+import {equivalentRecords, textCoverageLost} from '../../skills/game-curator/scripts/cache-semantics.mjs';
 const capture = (source, records) => ({source, records});
 const library = capture('library', [{appid: 1, name: 'A', hours: 2, achievements: {unlocked: 1, total: 5}, pageText: 'A\nTOTAL PLAYED\n2 hours\nDOWNLOAD\n12 GB'}]);
 const other = structuredClone(library); other.records[0].pageText = 'A\nTOTAL PLAYED\n2 hours\nUNINSTALL\n8 GB';
@@ -21,3 +21,7 @@ for (const [source, record, field, changed] of [
 assert.equal(equivalentRecords(capture('library', [{appid: 1}, {appid: 2}]), capture('library', [{appid: 2}, {appid: 1}])), true);
 assert.equal(equivalentRecords(capture('unknown', []), capture('unknown', [])), false);
 console.log('cache semantics tests passed');
+
+assert.equal(textCoverageLost('wishlist', 'Game\nDetailed description and price $20', 'Game'), true);
+assert.equal(textCoverageLost('wishlist', 'Game\nPrice $20', 'Game\nPrice $21'), false);
+assert.equal(textCoverageLost('replay', 'Games played: 4\nAnnual achievements: 12', 'Games played: 4'), true);

@@ -40,7 +40,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import {normalizeLibraryRecord} from '../browser/library-rows.mjs';
-import {equivalentRecords} from '../cache-semantics.mjs';
+import {equivalentRecords, textCoverageLost} from '../cache-semantics.mjs';
 
 export const MAX_BACKUPS = 2; // Only backups created under the managed-v1 namespace are rotated.
 export const MAX_SEPARATE = 5;
@@ -81,6 +81,7 @@ const SOURCES = {
         if (!now) continue;
         for (const [group, re] of Object.entries(FIELD_GROUPS)) if (re.test(old.pageText) && !re.test(now.pageText)) losses[group] = (losses[group] ?? 0) + 1;
         if (old.name && !now.name) losses.name = (losses.name ?? 0) + 1;
+        if (textCoverageLost('wishlist', old.pageText, now.pageText)) losses.pageText = (losses.pageText ?? 0) + 1;
       }
       return losses;
     },
@@ -110,6 +111,7 @@ const SOURCES = {
         if (!now) continue;
         for (const k of ['hours', 'lastPlayedDisplay', 'achievements']) if (old[k] != null && now[k] == null) losses[k] = (losses[k] ?? 0) + 1;
         if (old.name && !now.name) losses.name = (losses.name ?? 0) + 1;
+        if (textCoverageLost('library', old.pageText, now.pageText)) losses.pageText = (losses.pageText ?? 0) + 1;
       }
       return losses;
     },
@@ -203,6 +205,8 @@ const SOURCES = {
     viewMessage: 'annual Replay reports (the annual-report view)',
     fieldLosses(existing, next) { // one record per file: a retained game reference must not lose a name it had
       const losses = {}, now = new Map((next.records[0]?.apps ?? []).map(a => [a.appid, a]));
+      if (textCoverageLost('replay', existing.records[0]?.semanticText, next.records[0]?.semanticText)) losses.semanticText = 1;
+      if ((existing.records[0]?.apps ?? []).some(a => !now.has(a.appid))) losses.appReferences = 1;
       for (const old of existing.records[0]?.apps ?? []) if (now.has(old.appid) && old.name && !now.get(old.appid).name) losses.name = (losses.name ?? 0) + 1;
       return losses;
     },
@@ -663,6 +667,7 @@ export function save(env, destDir, {dryRun = false, incomplete = [], hooks = {},
           if (!st.isFile() || st.isSymbolicLink()) continue;
           const bytes = fs.readFileSync(file), digest = sha256(bytes), snapshot = JSON.parse(bytes);
           if (!name.endsWith(`-${digest.slice(0, 12)}.json`) || !validExisting(snapshot, env.source)) continue;
+          if (snapshot.account !== existing.account || snapshot.accessScope !== existing.accessScope || snapshot.coverage !== existing.coverage || !cfgOf(snapshot).viewOk(snapshot) || JSON.stringify(snapshot.diagnostics.view) !== JSON.stringify(existing.diagnostics.view) || snapshot.diagnostics.attestations?.filters !== existing.diagnostics.attestations?.filters) continue;
           managed.push({file, digest, time: Date.parse(snapshot.capturedAt)});
         } catch { /* Unreadable or edited files are user evidence; leave them alone. */ }
       }

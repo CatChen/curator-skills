@@ -8,7 +8,7 @@ const stable = value => {
 
 // The library client can add or remove these installation controls independently
 // of library membership and activity. Do not remove other unrecognized text.
-function libraryText(text) {
+export function libraryText(text) {
   if (typeof text !== 'string') return text;
   const lines = text.split('\n');
   const control = line => /^\s*(?:DOWNLOAD|UNINSTALL|UPDATE|INSTALL)\s*$/i.test(line ?? '');
@@ -16,7 +16,7 @@ function libraryText(text) {
   return lines.filter((line, i) => !control(line) && !(size(line) && (control(lines[i - 1]) || control(lines[i + 1])))).join('\n');
 }
 
-function wishlistText(text) {
+export function wishlistText(text) {
   return typeof text === 'string' ? text.split('\n').filter(line => !/^\s*(?:ADD TO CART|IN CART|REMOVE FROM WISHLIST)\s*$/i.test(line)).join('\n') : text;
 }
 
@@ -41,4 +41,18 @@ export function equivalentRecords(a, b) {
   if (!a || !b || a.source !== b.source) return false;
   const left = meaningfulRecords(a), right = meaningfulRecords(b);
   return left !== null && left === right;
+}
+
+// Detect evidence that disappeared, rather than ordinary substitutions. Unknown
+// text is never ignored; uncertain one-for-one edits remain meaningful changes.
+export function textCoverageLost(source, oldText, newText) {
+  const clean = source === 'library' ? libraryText : source === 'wishlist' ? wishlistText : x => x;
+  const oldLines = String(clean(oldText) ?? '').split('\n').map(x => x.trim()).filter(Boolean);
+  const newLines = String(clean(newText) ?? '').split('\n').map(x => x.trim()).filter(Boolean);
+  const remaining = [...newLines];
+  const removed = [];
+  for (const line of oldLines) { const i = remaining.indexOf(line); if (i < 0) removed.push(line); else remaining.splice(i, 1); }
+  if (removed.length > remaining.length) return true;
+  // A shortened section that is plainly contained in its predecessor is also loss.
+  return removed.some(line => line.length >= 24 && remaining.some(next => next.length >= 4 && next.length * 2 < line.length && line.includes(next)));
 }

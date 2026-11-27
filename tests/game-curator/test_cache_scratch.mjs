@@ -44,11 +44,18 @@ try {
   assert.ok(replacement.backup);
   const legacy = path.join(dest, 'wishlist.superseded.20200101T000000Z.json');
   fs.writeFileSync(legacy, 'legacy evidence');
+  const otherAccount = JSON.parse(fs.readFileSync(path.join(dest, 'wishlist.json'), 'utf8'));
+  otherAccount.account = 'other-synthetic'; otherAccount.capturedAt = '2025-01-01T00:00:00Z';
+  const otherBytes = JSON.stringify(otherAccount, null, 2) + '\n';
+  const otherHash = crypto.createHash('sha256').update(otherBytes).digest('hex').slice(0, 12);
+  const otherPath = path.join(dest, `wishlist.managed-v1.superseded.20250101T000000Z-${otherHash}.json`);
+  fs.writeFileSync(otherPath, otherBytes, {flag: 'wx', mode: 0o600});
   for (let i = 4; i <= 7; i++) {
     const nextRows = [{...records[0], pageText: `Synthetic game\nRELEASE DATE:\n20${i}`}];
     run(`2026-01-0${i}T00:00:00Z`, nextRows, 'replace');
   }
-  const backups = fs.readdirSync(dest).filter(n => n.startsWith('wishlist.managed-v1.superseded.')).sort();
+  const backups = fs.readdirSync(dest).filter(n => n.startsWith('wishlist.managed-v1.superseded.') && !n.startsWith('wishlist.managed-v1.superseded.20250101')).sort();
+  assert.equal(fs.readFileSync(otherPath, 'utf8'), otherBytes);
   assert.equal(backups.length, 2);
   assert.match(backups[0], /^wishlist\.managed-v1\.superseded\.20260105T000000Z-[a-f0-9]{12}\.json$/);
   assert.match(backups[1], /^wishlist\.managed-v1\.superseded\.20260106T000000Z-[a-f0-9]{12}\.json$/);
