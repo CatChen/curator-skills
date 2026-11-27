@@ -37,6 +37,7 @@
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {parseSettings, readSettingsFile, bindingKey} from '../settings.mjs';
+import {resolveCuratorHome, assertWithinSelectedHome} from '../curator-home.mjs';
 import {checkObservation, evaluateIdentity, identityPolicy, knownConflict, generationOf} from '../identity.mjs';
 import path from 'node:path';
 import os from 'node:os';
@@ -826,9 +827,12 @@ if (isMain()) {
     const dryRun = args.includes('--dry-run');
     if (opt('--existing-account') !== undefined || opt('--existing-view') !== undefined) throw new Error('Legacy account or view cannot be retroactively asserted for promotion');
     let hookRoot = null, sourceConsent = null;
-    const defaultCache = path.join(os.homedir(), '.curator/game-curator/cache/steam'), realOrSelf = p => { try { return fs.realpathSync(p); } catch { return p; } };
-    const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
-    const settingsFile = checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
+    // The Curator Home: the default (~/.curator/game-curator) or the one CURATOR_HOME selects. A selected home that is unusable throws here (never a fallback),
+    // and explicit --dest/--settings may only name the selected home's own paths, so the saver, the hook and the binder always agree.
+    const selectedHome = resolveCuratorHome(), defaultCache = selectedHome.cache, realOrSelf = p => { try { return fs.realpathSync(p); } catch { return p; } };
+    assertWithinSelectedHome(selectedHome, {dest: opt('--dest'), settings: opt('--settings')});
+    const dest = path.resolve(opt('--dest') ?? selectedHome.cache), settingsArg = opt('--settings') ?? (selectedHome.source === 'env' ? selectedHome.settings : undefined);
+    const settingsFile = checkCacheAuthorized(dest, settingsArg); // before any cache read or write
     const sourceSha = opt('--source-sha256'), expectBytes = opt('--expect-bytes'), provenanceArg = opt('--provenance'), summaryArg = opt('--page-summary');
     if (provenanceArg !== undefined && !['tool-result', 'download', 'hook-capture', 'host-result'].includes(provenanceArg)) throw new Error('--provenance must be tool-result, download, hook-capture or host-result');
     let hookMeta = null, hookIdentity = null, rawBytes;
@@ -897,7 +901,7 @@ if (isMain()) {
       try {
         const cacheRoot = fs.realpathSync(dest), parent = fs.realpathSync(path.dirname(path.resolve(namesFrom)));
         if (parent !== cacheRoot && !parent.startsWith(cacheRoot + path.sep)) throw new Error('names source must be within the authorized cache');
-        checkCacheAuthorized(dest, opt('--settings'));
+        checkCacheAuthorized(dest, settingsArg);
         libBytes = readIfExists(namesFrom);
         if (!libBytes) throw new Error('names source does not exist');
         library = JSON.parse(libBytes.toString('utf8'));
@@ -911,9 +915,9 @@ if (isMain()) {
     env = toSave;
     env.diagnostics = {...env.diagnostics, attestations};
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
-    const policy = {dryRun, incomplete, transferVerified, settings: opt('--settings'), existingAccount: opt('--existing-account'),
+    const policy = {dryRun, incomplete, transferVerified, settings: settingsArg, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'), manualAccount: accountArg,
-      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null) sourceConsent(hookRoot); }}; // the binding recheck is intrinsic to save()
+      recheckConsent: () => { checkCacheAuthorized(dest, settingsArg); if (hookRoot !== null) sourceConsent(hookRoot); }}; // the binding recheck is intrinsic to save()
     if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {
@@ -921,11 +925,11 @@ if (isMain()) {
         try { const r = save(annual, dest, {...policy, incomplete: [...incomplete, ...replayYearIncomplete(annual, annual.records[0])]}); outcomes.push({year, action: r.action, reason: r.reason, notes: r.notes, target: r.target, backup: r.backup, bytes: r.bytes, sha256: r.sha256}); }
         catch (e) { outcomes.push({year, error: String(e.message ?? e)}); }
       }
-      console.log(JSON.stringify({source: 'replay', capturedAt: env.capturedAt, records: env.records.length, years: outcomes, dryRun}, null, 2));
+      console.log(JSON.stringify({source: 'replay', capturedAt: env.capturedAt, records: env.records.length, years: outcomes, dryRun, curatorHome: selectedHome.source, destination: dest}, null, 2));
       if (outcomes.some(o => o.error)) process.exit(1);
     } else {
       const result = save(canonicalize(env), dest, policy);
-      console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun}, null, 2));
+      console.log(JSON.stringify({...result, records: env.records.length, capturedAt: env.capturedAt, dryRun, curatorHome: selectedHome.source, destination: dest}, null, 2));
     }
     if (hookMeta && !dryRun) { // saved (kept or separate included): remove the staged pair only if it is still the verified one
       console.error(removeIfUnchanged(hookIdentity) ? 'removed the staged hook capture' : 'the staged files changed after verification: left in place, not removed');

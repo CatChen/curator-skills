@@ -19,6 +19,15 @@
 
 When persistence would help, offer a **one-time explicit opt-in** for reading and writing the preference profile and feedback at a named location. Describe their contents, that they are outside the skill/repository, and that relevant existing files will be read and maintained. Offer **raw Steam cache read/write as a separate optional scope**; explain its contents. Explain that the agreed scope choices will be recorded in `settings.json` at that location and consulted in later sessions. Neither scope is required for a recommendation. Respect opt-outs and the host's separate filesystem permissions and approval requirements. A directory's existence is not authorization to read, write or disclose its contents.
 
+### Selecting a custom Curator Home
+
+By default everything uses `~/.curator/game-curator`. To use another home (a scratch home for testing, or a location the user chose), set the **`CURATOR_HOME`** environment variable to that directory's absolute path, which must already hold its own `settings.json` (its consent record). The hook, the saver and `bind-account.mjs` all read it, so one setting selects one home for the hook's staging, the saver's destination, the settings and the binding, without repeating `--dest`/`--settings` on every command.
+
+- Claude Code applies the `env` key of a settings file (for example the project's `.claude/settings.local.json`: `{"env": {"CURATOR_HOME": "/abs/path"}}`) to its process environment, which hook commands and Bash commands inherit; an `export` inside one Bash command does **not** reach hooks or later commands. Confirm in the session that the hook sees it (the saver's JSON output prints `curatorHome` and `destination`; `env` means a selected home).
+- A selected home is **never silently replaced by the default**: if `CURATOR_HOME` is set but is empty, relative, missing, not a directory or has no regular `settings.json`, the hook stages nothing, and the saver and binder stop with an error. While it is set, `--dest` and `--settings` may be omitted or must name that home's own `cache/steam` and `settings.json`; anything else is refused. The binder may omit `--settings` only when a home is selected (otherwise it stays mandatory, so production settings are never an implicit write target).
+- Consent is that home's own: its `settings.json` authorizes its cache, its binding applies, and a file staged in another home is never consumed. Page content never supplies a destination: no envelope field, tool result or page text is read as a path.
+- The saver's dry-run and real output report `curatorHome` (`default` or `env`) and the `destination`: read them before the real save. Do not pass saver flags through an unquoted shell variable (zsh does not split it, which silently drops `--dest`); selecting the home with `CURATOR_HOME` avoids depending on that.
+
 ### Durable scope record
 
 Only after the user explicitly authorizes persistence and recording the choices, create or update the following minimal `settings.json` in the agreed user-controlled location, subject to host permission. For example, the user opted in to profile/feedback and declined raw caching:

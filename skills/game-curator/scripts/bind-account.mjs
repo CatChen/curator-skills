@@ -10,6 +10,7 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {b64uDecode} from './browser/identity-probe.mjs';
 import {BINDING_ALG, bindingKey, newSalt, readSettingsFile, saltCheckOf} from './settings.mjs';
+import {resolveCuratorHome, assertWithinSelectedHome} from './curator-home.mjs';
 
 const ALIAS = /^[A-Za-z0-9_-]{1,64}$/;
 const isPlain = o => !!o && typeof o === 'object' && !Array.isArray(o);
@@ -126,7 +127,11 @@ if (isMain()) {
   const bool = n => { const v = opt(n); if (v === undefined) return undefined; if (v !== 'true' && v !== 'false') throw new Error(`${n} must be true or false`); return v === 'true'; };
   const op = args.find((a, i) => !a.startsWith('--') && !valued.includes(args[i - 1]));
   try {
-    const settings = opt('--settings');
+    // --settings may be omitted ONLY when CURATOR_HOME selects a custom Curator Home (then its own settings.json is used, and no other file may be named);
+    // without a selected home the production settings are never an implicit default for a write.
+    const selectedHome = resolveCuratorHome();
+    assertWithinSelectedHome(selectedHome, {settings: opt('--settings')});
+    const settings = opt('--settings') ?? (selectedHome.source === 'env' ? selectedHome.settings : undefined);
     if (!['status', 'bind', 'change', 'revoke', 'persistence'].includes(op) || !settings) { console.error('usage: bind-account.mjs <status|bind|change|revoke|persistence> --settings <settings.json> [--probe <file|->] [--alias <alias>] [--profile-and-feedback true|false] [--steam-cache true|false] [--apply --expect-settings <sha> --expect-candidate <sha>]'); process.exit(2); }
     const apply = args.includes('--apply'), expect = apply ? {settingsSha256: opt('--expect-settings'), candidateSha256: opt('--expect-candidate')} : undefined;
     if (op === 'status') {
