@@ -46,7 +46,8 @@ try {
   assert.equal(result.selected, verified); assert.equal(result.supporting.length, 0); assert.equal(result.rejected.length, 2);
   const contradictory = structuredClone(verified); contradictory.diagnostics.attestations.transfer.provenance = 'host-result';
   assert.equal(save(contradictory, dest, {dryRun:true, transferVerified:true}).action, 'separate');
-  assert.equal(selectSnapshots([contradictory], {source:'wishlist',account:'test',accessScope:'signed-in'}).selected, null);
+  const conflicting = selectSnapshots([contradictory], {source:'wishlist',account:'test',accessScope:'signed-in'});
+  assert.equal(conflicting.selected, null); assert.equal(conflicting.rejected.length, 1);
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-outside-'));
   try {
     const external = path.join(outside, 'external.json'); fs.writeFileSync(external, 'outside');

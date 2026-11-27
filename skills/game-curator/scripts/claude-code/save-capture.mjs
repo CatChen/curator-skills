@@ -493,8 +493,9 @@ export function selectSnapshots(captures, {source, account, accessScope, year} =
     if (source === 'replay' && (!Array.isArray(capture.records) || capture.records.length !== 1)) { rejected.push({capture, reasons: ['Replay selection requires one annual record']}); continue; }
     if (source === 'replay' && capture.records[0]?.year !== year) continue;
     const v = validate(capture, {account: capture.account, accessScope: capture.accessScope ?? 'unknown'});
-    if (v.errors.length || (capture.account && capture.account !== account) || (capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope)) {
-      rejected.push({capture, reasons: [...v.errors, ...(capture.account && capture.account !== account ? ['different account'] : []), ...(capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope ? ['different scope'] : [])]});
+    const inconsistentTransfer = VERIFIED_TRANSFER_LEVELS.has(capture.diagnostics?.attestations?.transfer?.level) && !verifiedTransfer(capture);
+    if (v.errors.length || inconsistentTransfer || (capture.account && capture.account !== account) || (capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope)) {
+      rejected.push({capture, reasons: [...v.errors, ...(inconsistentTransfer ? ['inconsistent transfer evidence'] : []), ...(capture.account && capture.account !== account ? ['different account'] : []), ...(capture.accessScope && capture.accessScope !== 'unknown' && capture.accessScope !== accessScope ? ['different scope'] : [])]});
       continue;
     }
     const reasons = [...v.incomplete, ...(source === 'replay' ? SOURCES.replay.yearIncomplete(capture.diagnostics, capture.records[0]) : [])];
