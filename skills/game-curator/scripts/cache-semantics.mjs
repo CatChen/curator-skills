@@ -54,5 +54,5 @@ export function textCoverageLost(source, oldText, newText) {
   for (const line of oldLines) { const i = remaining.indexOf(line); if (i < 0) removed.push(line); else remaining.splice(i, 1); }
   if (removed.length > remaining.length) return true;
   // A shortened section that is plainly contained in its predecessor is also loss.
-  return removed.some(line => line.length >= 24 && remaining.some(next => next.length >= 4 && next.length * 2 < line.length && line.includes(next)));
+  return removed.some(line => remaining.some(next => next.length > 0 && next.length < line.length && line.includes(next)));
 }

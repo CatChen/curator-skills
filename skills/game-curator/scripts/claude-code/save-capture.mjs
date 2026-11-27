@@ -154,6 +154,7 @@ const SOURCES = {
         const now = newer.get(old.appid);
         if (!now) continue;
         for (const k of ['review', 'recommended', 'playtimeDisplay', 'postedDate', 'name']) if (old[k] != null && now[k] == null) losses[k] = (losses[k] ?? 0) + 1;
+        if (old.review != null && now.review != null && textCoverageLost('reviews', old.review, now.review)) losses.reviewText = (losses.reviewText ?? 0) + 1;
       }
       return losses;
     },
