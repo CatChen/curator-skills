@@ -207,8 +207,8 @@ export async function collectLibrary(tab, {maxScrolls=40, identity=null} = {}) {
       if (identityTracker && !await identityTracker.step()) { stopReason = 'identity-changed'; break; }
       const data = await batch();
       if (pathGuard) await pathGuard();
-      const ownerNow = data.records.some(r=>/\b(DOWNLOAD|UNINSTALL|UPDATE)\b|My Game Content/.test(r.pageText ?? ''));
-      if (identityTracker && !await identityTracker.step(ownerNow)) { stopReason = 'identity-changed'; break; }
+      // Row text can contain game titles or descriptions; it is not proof of owner-only controls.
+      if (identityTracker && !await identityTracker.step()) { stopReason = 'identity-changed'; break; }
       if (view !== null && (!data.view || JSON.stringify(view) !== JSON.stringify(data.view))) { stopReason = 'view-changed'; break; }
       view ??= data.view ?? null;
       if (expected !== null && expected !== data.expected) { stopReason = 'view-changed'; break; }
@@ -241,7 +241,7 @@ export async function collectLibrary(tab, {maxScrolls=40, identity=null} = {}) {
   if (expected !== null && expected !== records.size) warnings.push(`Displayed ${expected} items; collected ${records.size} unique AppIDs.`);
   const normalized = [...records.values()].map(normalizeLibraryRecord);
   for (const row of normalized) if (row.achievements && row.achievements.unlocked > row.achievements.total) warnings.push(`AppID ${row.appid}: achievement counts are inconsistent.`);
-  return envelope('library',normalized,warnings,{expectedCount:expected,uniqueCount:records.size,scrollSteps:steps,stopReason:stopReason ?? 'partial',complete:stopReason === 'complete',pathChecked:!!pathGuard && stopReason !== 'path-changed',view,ownerControls:normalized.some(r=>/\b(DOWNLOAD|UNINSTALL|UPDATE)\b|My Game Content/.test(r.pageText ?? '')), ...(identityTracker?.result() ? {identity:identityTracker.result()} : {})});
+  return envelope('library',normalized,warnings,{expectedCount:expected,uniqueCount:records.size,scrollSteps:steps,stopReason:stopReason ?? 'partial',complete:stopReason === 'complete',pathChecked:!!pathGuard && stopReason !== 'path-changed',view,ownerControls:null, ...(identityTracker?.result() ? {identity:identityTracker.result()} : {})});
 }
 
 export async function collectReviews(tab, {maxPages=20, library=null, verifiedSameAccount=false, identity=null} = {}) {
@@ -362,7 +362,7 @@ export async function collectReplay(tab, {maxYears=20, settleMs=1200, settleCapM
   if (pending.length || missedYear) warnings.push('Year discovery stopped with unvisited reports.');
   warnings.push('Image-asset AppIDs are possible game references, not proof of annual play; semantic text is unstructured. Verify metrics and do not convert percentages to hours.');
   const complete = !stopReason && records.length > 0 && pending.length+missedYear === 0 && unsettledYears.length === 0;
-  return envelope('replay',records,warnings,{years:records.map(r=>r.year),uniqueCount:records.length,expectedCount:records.length+pending.length+missedYear,yearsPending:pending.length+missedYear,yearAttempts:attempts,unsettledYears,truncatedYears:[],ownerControls:records.length > 0 && ownerControls,ownerYears,view:{kind:'annual-report',language:null},complete,stopReason:stopReason ?? (complete ? 'complete' : 'partial'),...(identityTracker?.result() ? {identity:identityTracker.result(),identityYears} : {})});
+  return envelope('replay',records,warnings,{years:records.map(r=>r.year),uniqueCount:records.length,expectedCount:records.length+pending.length+missedYear,yearsPending:pending.length+missedYear,yearAttempts:attempts,unsettledYears,ownerControls:records.length > 0 && ownerControls,ownerYears,view:{kind:'annual-report',language:null},complete,stopReason:stopReason ?? (complete ? 'complete' : 'partial'),...(identityTracker?.result() ? {identity:identityTracker.result(),identityYears} : {})});
 }
 
 // Narrow, read-only identity observation (logged_in, steamid and accountid from Steam's page data, returned only as salted fingerprints).

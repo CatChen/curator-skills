@@ -291,7 +291,7 @@ function validateCodex(env, {account, accessScope, incoming}) {
   }
   if (account !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(account)) errors.push('unsafe account alias');
   if (!['signed-in', 'public', 'unknown'].includes(accessScope)) errors.push('invalid access scope');
-  if (accessScope === 'signed-in' && (d.recordsChecksum === undefined || rules?.ownerEvidence?.(d) !== true)) errors.push('signed-in scope cannot be established from this Codex capture without host checksum and owner evidence');
+  if (accessScope === 'signed-in' && (d.recordsChecksum === undefined || rules?.ownerEvidence?.(d) !== true)) (incoming ? errors : incomplete).push('signed-in scope cannot be established from this Codex capture without host checksum and owner evidence');
   if (incoming && env.diagnostics?.attestations) errors.push('a page transfer must not carry diagnostics.attestations');
   const hostChecksum = env.diagnostics?.recordsChecksum;
   if (hostChecksum !== undefined) {
@@ -347,8 +347,8 @@ export function validate(env, {account, accessScope, incoming = false} = {}) {
   const known = new Set(ENVELOPE_ORDER);
   if (!isPlainObject(env)) return {errors: ['not an object'], incomplete};
   if (env.diagnostics?.recordsChecksum !== undefined && env.method !== 'browser-dom') return {errors: ['host records checksum is incompatible with the capture method'], incomplete};
-  if (env.method === 'browser-dom' && env.diagnostics?.recordsChecksum !== undefined && env.diagnostics?.recordsSha256 !== undefined) return {errors: ['host and page records checksums cannot be combined'], incomplete};
-  if (env.method === 'browser-dom' && !env.diagnostics?.recordsSha256) return validateCodex(env, {account, accessScope, incoming});
+  if (env.method === 'browser-dom' && env.diagnostics?.recordsSha256 !== undefined) return {errors: ['page records checksum is incompatible with browser-dom captures'], incomplete};
+  if (env.method === 'browser-dom') return validateCodex(env, {account, accessScope, incoming});
   for (const k of Object.keys(env)) if (!known.has(k)) errors.push(`unexpected envelope field: ${k}`);
   if (env.format !== 'game-curator-steam-export' || env.version !== 1) errors.push('unsupported format/version');
   const cfg = SOURCES[env.source];

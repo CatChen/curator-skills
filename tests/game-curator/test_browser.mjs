@@ -6,6 +6,7 @@ import {collectWishlist as rawWishlist, collectLibrary as rawLibrary, collectRev
 import {pagePathFingerprint} from '../../skills/game-curator/scripts/browser/path-fingerprint.mjs';
 import {codexIdentityPage} from '../../skills/game-curator/scripts/browser/codex-identity-page.mjs';
 import {evaluateIdentity} from '../../skills/game-curator/scripts/identity.mjs';
+import {validate} from '../../skills/game-curator/scripts/cache.mjs';
 const testTab = (tab, view) => ({...tab, playwright:{...tab.playwright, evaluate:async (fn,arg) => {
   if (fn === pagePathFingerprint) return 'a'.repeat(64);
   const data = await tab.playwright.evaluate(fn,arg);
@@ -163,6 +164,9 @@ assert.equal(typeof evaluated,'function');
 assert.match(evaluated.toString(),/WishlistItem-/);
 const settledLibrary=await collectLibrary(tabWith([{expected:1,view:{tab:'all',search:'empty',language:'en'},records:[{appid:1,name:'One',pageText:'One'}]}]));
 assert.equal(settledLibrary.diagnostics.complete,true);
+const titleOnlyLibrary=await collectLibrary(tabWith([{expected:1,view:{tab:'all',search:'empty',language:'en'},records:[{appid:1,name:'DOWNLOAD',pageText:'DOWNLOAD UPDATE UNINSTALL My Game Content'}]}]));
+assert.equal(titleOnlyLibrary.diagnostics.ownerControls,null, 'row text is not owner-control evidence');
+assert.match(validate(titleOnlyLibrary,{account:'test',accessScope:'signed-in',incoming:true}).errors.join(' '),/owner evidence/);
 // A retained row may stay unchanged while its current observed fields change.
 let observationReads=0;
 {

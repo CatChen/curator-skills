@@ -64,8 +64,8 @@ try {
   const legacyCapture = {...current, method: 'browser-dom', account: undefined, diagnostics: {expectedCount: 1, uniqueCount: 1}};
   const selection = selectSnapshots([legacyCapture, current], {source: 'wishlist', account: 'synthetic', accessScope: 'signed-in'});
   assert.equal(selection.selected.capturedAt, current.capturedAt);
-  assert.equal(selection.rejected.length, 1);
-  assert.match(selection.rejected[0].reasons.join(' '), /signed-in/);
+  assert.equal(selection.rejected.length, 0);
+  assert.match(selection.supporting[0].reasons.join(' '), /signed-in/);
   const poorer = structuredClone(current);
   poorer.capturedAt = '2026-01-09T00:00:00Z';
   poorer.records[0].pageText = 'Synthetic game';

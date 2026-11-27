@@ -9,7 +9,7 @@ import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprin
 import {parseSettings, fingerprintSync, newSalt, saltCheckOf, BINDING_ALG} from '../../skills/game-curator/scripts/settings.mjs';
 import {parseCacheSettings, checkCacheAuthorized} from '../../skills/game-curator/scripts/cache.mjs';
 import {collectIdentity} from '../../skills/game-curator/scripts/browser/steam.mjs';
-import {buildCodexIdentity} from '../../skills/game-curator/scripts/browser/build-codex-identity.mjs';
+import {buildCodexIdentity, buildPathFingerprint} from '../../skills/game-curator/scripts/browser/build-codex-identity.mjs';
 import {checkBindProbe} from '../../skills/game-curator/scripts/bind-account.mjs';
 import {buildPageScript} from '../../skills/game-curator/scripts/claude-code/build-page-script.mjs';
 
@@ -240,3 +240,4 @@ assert.ok(!JSON.stringify(parseSettings(goodV2())).includes(ID_A), 'no identifie
 console.log('identity core fixture checks passed');
 
 assert.equal(fs.readFileSync(new URL('../../skills/game-curator/scripts/browser/codex-identity-page.mjs',import.meta.url),'utf8'),buildCodexIdentity(),'generated Codex identity callback is current');
+assert.equal(fs.readFileSync(new URL('../../skills/game-curator/scripts/browser/path-fingerprint.mjs',import.meta.url),'utf8'),buildPathFingerprint(),'generated Codex path callback is current');

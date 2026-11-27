@@ -30,6 +30,12 @@ try {
   host.diagnostics = {recordsChecksum:{scope:'host-records',sha256:crypto.createHash('sha256').update(JSON.stringify([{appid:1,membershipSource:'wishlist-row',name:'Test',pageText:'Test',rank:1}])).digest('hex')}};
   assert.deepEqual(validate(host,{accessScope:'unknown'}).errors, []);
   assert.equal(save(host,dest,{dryRun:true,transferVerified:true}).action,'separate');
+  const legacy = structuredClone(host); legacy.account='test'; legacy.accessScope='signed-in'; delete legacy.diagnostics.recordsChecksum;
+  assert.match(validate(legacy,{account:'test',accessScope:'signed-in',incoming:true}).errors.join(' '),/owner evidence/);
+  const legacySelection = selectSnapshots([legacy],{source:'wishlist',account:'test',accessScope:'signed-in'});
+  assert.equal(legacySelection.selected,null);
+  assert.equal(legacySelection.rejected.length,0);
+  assert.match(legacySelection.supporting[0].reasons.join(' '),/owner evidence/);
   const corrupted = structuredClone(host); corrupted.records[0].name = 'Changed';
   assert.match(validate(corrupted,{accessScope:'unknown'}).errors.join(' '),/host records checksum/);
   assert.throws(()=>save(corrupted,dest,{dryRun:true}),/host records checksum/);
@@ -40,7 +46,9 @@ try {
   completeHost.diagnostics.attestations={transfer:{level:'runtime-tool-result',provenance:'tool-result',receivedBytes:1,localSha256Fingerprint:'a'.repeat(64),sourceDigest:'unavailable'}};
   assert.equal(save(completeHost,dest,{dryRun:true,transferVerified:true}).action,'separate');
   const bothChecksums = structuredClone(completeHost); bothChecksums.diagnostics.recordsSha256 = env.diagnostics.recordsSha256;
-  assert.match(validate(bothChecksums,{account:'test',accessScope:'signed-in'}).errors.join(' '),/checksums cannot be combined/);
+  assert.match(validate(bothChecksums,{account:'test',accessScope:'signed-in'}).errors.join(' '),/page records checksum is incompatible/);
+  const pageOnly = structuredClone(bothChecksums); delete pageOnly.diagnostics.recordsChecksum;
+  assert.match(validate(pageOnly,{account:'test',accessScope:'signed-in'}).errors.join(' '),/page records checksum is incompatible/);
   const relabeled = structuredClone(bothChecksums); relabeled.method = 'browser-dom-claude-code';
   assert.match(validate(relabeled,{account:'test',accessScope:'signed-in'}).errors.join(' '),/incompatible with the capture method/);
   assert.throws(()=>save(relabeled,dest,{dryRun:true,transferVerified:true}),/incompatible with the capture method/);
