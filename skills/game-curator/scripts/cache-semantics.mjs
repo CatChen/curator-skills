@@ -1,6 +1,6 @@
 // Conservative comparison of observed records. Unknown text remains significant.
 // This module never changes a capture or infers identity, completeness or consent.
-const stable = value => {
+export const stable = value => {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])]));
   return value;
