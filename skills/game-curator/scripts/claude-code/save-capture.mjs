@@ -436,9 +436,10 @@ const HOOK_META_KEYS = ['bytes', 'call', 'capturedAt', 'deliver', 'kind', 'scrip
 // and never reread the path. The location is checked before anything is read (the staging directory of this cache, or of the skill's default
 // cache, private and owned by the user); the files are opened without following links and checked on the open descriptor (regular, owned by
 // the user, not readable by others); the sidecar must describe exactly these bytes. Returns {meta, bytes, root, identity}: `root` is the cache
-// whose staging directory held the file (its own consent governs the read, see the CLI) and `identity` lets removeIfUnchanged prove the pair is
+// whose staging directory held the file (its own consent governs the read: the `authorize` callback runs after the location is verified and before
+// anything is opened) and `identity` lets removeIfUnchanged prove the pair is
 // still the verified one. Throws on any mismatch.
-export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest = path.join(os.homedir(), '.curator/game-curator/cache/steam')} = {}) {
+export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest = path.join(os.homedir(), '.curator/game-curator/cache/steam'), authorize = () => {}} = {}) {
   const real = p => fs.realpathSync(p);
   const name = path.basename(file);
   if (!/^gc-[a-z]+-\d{8}T\d{6}Z-[0-9a-f]{8}\.json$/.test(name)) throw new Error('hook-capture: unexpected staged file name');
@@ -449,6 +450,7 @@ export function readVerifiedStaging(file, dest, {now = Date.now(), defaultDest =
   if (root === undefined) throw new Error('hook-capture: the file is not in the skill\'s private staging directory');
   const sd = fs.lstatSync(dir);
   if (!sd.isDirectory() || sd.isSymbolicLink() || sd.uid !== process.getuid() || (sd.mode & 0o077)) throw new Error('hook-capture: the staging directory is not private');
+  authorize(root); // the consent that governs this staging directory is checked BEFORE either file is opened, so a revoked consent prevents the read itself
   const open = (f, what) => {
     let fd; try { fd = fs.openSync(f, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch (e) { throw new Error(`hook-capture: cannot open ${what} (${e.code ?? e.message})`); }
     try {
@@ -582,7 +584,8 @@ if (isMain()) {
   if (!file) { console.error('usage: save-capture.mjs <file | -> --account <alias> --access-scope <scope> [options]'); process.exit(2); }
   try {
     const dryRun = args.includes('--dry-run');
-    let hookRoot = null;
+    let hookRoot = null, sourceConsent = null;
+    const defaultCache = path.join(os.homedir(), '.curator/game-curator/cache/steam'), realOrSelf = p => { try { return fs.realpathSync(p); } catch { return p; } };
     const dest = path.resolve(opt('--dest') ?? path.join(os.homedir(), '.curator/game-curator/cache/steam'));
     checkCacheAuthorized(dest, opt('--settings')); // before any cache read or write
     const sourceSha = opt('--source-sha256'), expectBytes = opt('--expect-bytes'), provenanceArg = opt('--provenance'), summaryArg = opt('--page-summary');
@@ -591,10 +594,15 @@ if (isMain()) {
     if (provenanceArg === 'hook-capture') {
       // Verify the location and the sidecar BEFORE reading, read the file once, and use only those verified bytes from here on.
       if (file === '-') throw new Error('--provenance hook-capture needs the staged file path, not stdin');
-      const verified = readVerifiedStaging(path.resolve(file), dest);
-      // A staged file is data the skill retained under the cache consent of the home that staged it: that consent must hold now (and again
-      // before the commit), as well as the destination's own, so a revoked default home cannot be bypassed by saving elsewhere.
-      if (path.resolve(verified.root) !== dest) checkCacheAuthorized(path.resolve(verified.root));
+      // A staged file is data the skill retained under the cache consent of the home that staged it. That home's OWN settings.json must authorize
+      // it before either file is opened (and again before the commit), in addition to the destination's: neither `--settings` nor a destination that
+      // is another spelling of the standard home can stand in for it.
+      sourceConsent = root => {
+        const r = path.resolve(root);
+        if (realOrSelf(r) === realOrSelf(defaultCache)) checkCacheAuthorized(defaultCache); // the standard home: its own settings.json, never --settings
+        else if (r !== dest) checkCacheAuthorized(r);
+      };
+      const verified = readVerifiedStaging(path.resolve(file), dest, {defaultDest: defaultCache, authorize: sourceConsent});
       hookMeta = verified.meta; hookIdentity = verified.identity; rawBytes = verified.bytes; hookRoot = path.resolve(verified.root);
     } else rawBytes = file === '-' ? fs.readFileSync(0) : fs.readFileSync(file); // Buffer: hash the exact received bytes, before decoding
     if (sourceSha !== undefined && !/^[0-9a-fA-F]{64}$/.test(sourceSha)) throw new Error('--source-sha256 must be exactly 64 hexadecimal characters');
@@ -651,7 +659,7 @@ if (isMain()) {
     { const final = validate(canonicalize(env), {account, accessScope}); if (final.errors.length) throw new Error('The envelope to save failed validation after enrichment:\n- ' + final.errors.join('\n- ')); }
     const policy = {dryRun, incomplete, transferVerified, existingAccount: opt('--existing-account'),
       existingViewUnfiltered: opt('--existing-view') === 'unfiltered', keepSeparate: args.includes('--keep-separate'),
-      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null && hookRoot !== dest) checkCacheAuthorized(hookRoot); }};
+      recheckConsent: () => { checkCacheAuthorized(dest, opt('--settings')); if (hookRoot !== null) sourceConsent(hookRoot); }};
     if (env.source === 'replay') { // one file per verified year under <cache>/replay/, each decided on its own; nothing is merged or migrated
       const outcomes = [];
       for (const annual of splitReplay(canonicalize(env))) {

@@ -320,4 +320,46 @@ for (const s of ['wishlist', 'library', 'reviews', 'replay']) {
   const unsupported = run(JSON.stringify(payload('reviews', ENV.reviews)), {HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'gc-hook-elsewhere-'))}); assert.equal(unsupported.status, 0); assert.equal(unsupported.stdout, '', 'an undocumented install layout is a silent no-op');
 }
 
+// 12. Review follow-up: the staging home's own consent must prevent the READ of staged personal data, not just the save, and neither an alias of that home nor
+// another settings file can stand in for it.
+{
+  const mk = () => { const f = fixture(); handleHook(payload('reviews', ENV.reviews), f.opts); const file = path.join(f.dest, STAGING_DIR, f.staged().find(n => !n.endsWith('.meta.json'))); return {f, file}; };
+  const revoke = f => fs.writeFileSync(f.settings, JSON.stringify({version: 1, persistence: {profileAndFeedback: false, steamCache: false}}));
+  const grant = {version: 1, persistence: {profileAndFeedback: false, steamCache: true}};
+  { // (a) function level, proven with a spy: when authorize refuses, neither the staged file nor its sidecar is opened or read.
+    const {f, file} = mk(), opened = [], realOpen = fs.openSync, realRead = fs.readFileSync;
+    fs.openSync = (p, ...rest) => { opened.push(String(p)); return realOpen(p, ...rest); };
+    fs.readFileSync = (p, ...rest) => { if (typeof p === 'string') opened.push(String(p)); return realRead(p, ...rest); };
+    try {
+      const staged = () => opened.filter(x => x.includes(STAGING_DIR) && x.includes('gc-reviews-'));
+      assert.throws(() => readVerifiedStaging(file, f.dest, {authorize: () => { throw new Error('consent refused'); }}), /consent refused/);
+      assert.deepEqual(staged(), [], 'no staged payload or sidecar is opened or read when source consent is refused');
+      let calledWith = null; readVerifiedStaging(file, f.dest, {authorize: root => { calledWith = root; assert.deepEqual(staged(), [], 'authorize runs before anything is opened'); }});
+      assert.equal(path.resolve(calledWith), path.resolve(f.dest)); assert.ok(staged().length >= 2, 'control: with consent the files are read');
+    } finally { fs.openSync = realOpen; fs.readFileSync = realRead; }
+  }
+  { // (b) CLI level: with the standard home's consent revoked or absent, an UNREADABLE staged file still yields the consent refusal (the saver never got as far as opening it).
+    for (const [label, change, expected] of [['revoked', revoke, /steamCache false/], ['absent', f => fs.rmSync(f.settings), /Cache not authorized/]]) {
+      const {f, file} = mk(), scratch = fixture(); fs.chmodSync(file, 0o000); fs.chmodSync(file + '.meta.json', 0o000); change(f);
+      const r = spawnSync(process.execPath, [saver, file, '--dest', scratch.dest, '--settings', scratch.settings, '--account', 'scratch', '--access-scope', 'signed-in', '--provenance', 'hook-capture', '--dry-run'], {encoding: 'utf8', env: {...process.env, HOME: f.home}});
+      assert.equal(r.status, 1, label); assert.match(r.stderr, expected, `${label}: refused by consent, not by a failed read`); assert.doesNotMatch(r.stderr, /cannot open|EACCES|readable by others/, label);
+      fs.chmodSync(file, 0o600); fs.chmodSync(file + '.meta.json', 0o600); assert.equal(f.staged().length, 2); assert.deepEqual(fs.readdirSync(scratch.dest), [], `${label}: nothing written to the destination`);
+    }
+  }
+  { // (c) aliases and alternate settings: a destination that is another spelling of the standard home, with a settings file that grants consent, cannot replace the standard home's revoked consent.
+    const {f, file} = mk(); revoke(f);
+    const alias = path.join(f.dir, 'cache', 'steam-alias'); fs.symlinkSync(f.dest, alias);
+    const alt = path.join(f.dir, 'cache', 'settings.json'); fs.writeFileSync(alt, JSON.stringify(grant)); // a record that governs the destination and says yes
+    for (const [label, dest] of [['symlink alias of the standard home', alias], ['the standard home itself', f.dest]]) {
+      const r = spawnSync(process.execPath, [saver, file, '--dest', dest, '--settings', alt, '--account', 'scratch', '--access-scope', 'signed-in', '--provenance', 'hook-capture'], {encoding: 'utf8', env: {...process.env, HOME: f.home}});
+      assert.equal(r.status, 1, label); assert.match(r.stderr, /steamCache false/, `${label}: the standard home's own settings.json governs`);
+      assert.equal(f.staged().length, 2, label); assert.ok(!fs.existsSync(path.join(f.dest, 'reviews.json')), `${label}: nothing saved`);
+    }
+    // control: with the standard home's consent in place the same alias works
+    fs.writeFileSync(f.settings, JSON.stringify(grant));
+    const ok = spawnSync(process.execPath, [saver, file, '--dest', alias, '--settings', alt, '--account', 'scratch', '--access-scope', 'signed-in', '--provenance', 'hook-capture'], {encoding: 'utf8', env: {...process.env, HOME: f.home}});
+    assert.equal(ok.status, 0, ok.stderr); assert.ok(fs.existsSync(path.join(f.dest, 'reviews.json')));
+  }
+}
+
 console.log('Claude Code hook capture checks passed');

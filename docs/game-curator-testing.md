@@ -59,3 +59,5 @@ Run these in genuinely fresh sessions with the activation gate passed. Use synth
 4. **No-op and conflicts:** Give an unrelated follow-up and repeat existing feedback; verify no unnecessary writes. Independently simulate concurrent edits and denied approval; verify edits survive, no success is claimed, and the user is told what remains unsaved. Test unknown playtime or achievements and confirm they are not described as zero or unplayed.
 
 For each case also verify the exact files the agent read or wrote, the agreed consent scope, and whether it preserved unrelated user edits. Do not add a database, background process, or persistence script to make these tests pass.
+
+For scratch-cache tests, pass the saver's arguments as an explicit array (never an unquoted shell variable that may not split) and check that every `--dry-run` `target` lies inside the intended scratch directory before running the real save; a production cache is never a test destination.
