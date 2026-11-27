@@ -576,7 +576,7 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
     let r = JSON.parse(JSON.stringify(await site.runFile({deliver: 'download'})));
     while (r.status === 'continue') { site.navigate(r.next); r = JSON.parse(JSON.stringify(await site.runFile({deliver: 'download'}))); } // every page re-runs the trusted file
     const dlText = await site.downloads[0].blob.text(), dlPath = path.join(home5, r.file); fs.writeFileSync(dlPath, dlText);
-    const libFile = path.join(home5, 'library.json'); fs.writeFileSync(libFile, JSON.stringify(libAccount('me', 'signed-in', {records: Array.from({length: 25}, (_, i) => ({appid: 4000 + i, name: `Lib Game ${i}`, pageText: 'x', membershipSource: 'all-games-row'})).slice(0, 20)})));
+    const libFile = path.join(cache5, 'library.json'); fs.writeFileSync(libFile, JSON.stringify(libAccount('me', 'signed-in', {records: Array.from({length: 25}, (_, i) => ({appid: 4000 + i, name: `Lib Game ${i}`, pageText: 'x', membershipSource: 'all-games-row'})).slice(0, 20)})));
     const run5 = (...a) => spawnSync(process.execPath, [cli, dlPath, '--dest', cache5, '--account', 'me', '--access-scope', 'signed-in', '--provenance', 'download', '--page-summary', JSON.stringify(r), ...a], {encoding: 'utf8'});
     let o = run5('--dry-run'); assert.equal(o.status, 0, o.stderr); assert.equal(JSON.parse(o.stdout).action, 'create');
     o = run5('--names-from', libFile); assert.equal(o.status, 0, o.stderr);
@@ -584,6 +584,10 @@ const generated = fs.readFileSync(new URL('../../skills/game-curator/scripts/cla
     assert.equal(saved5.records.length, 25); assert.equal(saved5.records.filter(x => x.nameSource === 'verified-library-capture').length, 20);
     assert.equal(saved5.diagnostics.attestations.enrichment.namedRecords, 20); assert.equal(saved5.diagnostics.attestations.enrichment.librarySha256, crypto.createHash('sha256').update(fs.readFileSync(libFile)).digest('hex'), 'enrichment is bound to the exact snapshot bytes'); assert.equal(saved5.diagnostics.attestations.transfer.level, 'download-summary-verified');
     assert.deepEqual(validate(canonicalize(saved5), {account: 'me', accessScope: 'signed-in'}), {errors: [], incomplete: []});
+    const outsideLibrary = path.join(home5, 'outside-library.json'); fs.writeFileSync(outsideLibrary, JSON.stringify(libAccount('me')));
+    const linkedLibrary = path.join(cache5, 'linked-library.json'); fs.symlinkSync(outsideLibrary, linkedLibrary);
+    o = run5('--names-from', linkedLibrary, '--dry-run'); assert.notEqual(o.status, 0); assert.match(o.stderr, /ELOOP|symbolic link/i);
+    o = run5('--names-from', outsideLibrary, '--dry-run'); assert.notEqual(o.status, 0); assert.match(o.stderr, /within the authorized cache/);
     o = run5('--library-account', 'me'); assert.notEqual(o.status, 0); assert.match(o.stderr, /applies only with --names-from/);
     fs.writeFileSync(libFile, JSON.stringify(libAccount('other'))); o = run5('--names-from', libFile, '--dry-run'); assert.notEqual(o.status, 0); assert.match(o.stderr, /same account/);
     assert.equal(run5('--view', 'unfiltered', '--dry-run').status === 0, false); // no attestation exists for reviews

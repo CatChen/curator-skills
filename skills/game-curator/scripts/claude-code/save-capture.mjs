@@ -832,7 +832,15 @@ if (isMain()) {
     if (namesFrom !== undefined && env.source !== 'reviews') throw new Error('--names-from applies only to a reviews capture');
     if (namesFrom !== undefined) { // read-only use of the user's library cache, inside the same consent scope; the file is never modified
       if (libraryAccount !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(libraryAccount)) throw new Error('unsafe --library-account alias');
-      let libBytes, library; try { libBytes = fs.readFileSync(namesFrom); library = JSON.parse(libBytes.toString('utf8')); } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
+      let libBytes, library;
+      try {
+        const cacheRoot = fs.realpathSync(dest), parent = fs.realpathSync(path.dirname(path.resolve(namesFrom)));
+        if (parent !== cacheRoot && !parent.startsWith(cacheRoot + path.sep)) throw new Error('names source must be within the authorized cache');
+        checkCacheAuthorized(dest, opt('--settings'));
+        libBytes = readIfExists(namesFrom);
+        if (!libBytes) throw new Error('names source does not exist');
+        library = JSON.parse(libBytes.toString('utf8'));
+      } catch (e) { throw new Error(`cannot read the names source: ${e.code ?? e.message}`); }
       const result = enrichReviewNames(env, library, {libraryAccount, librarySha256: sha256(libBytes)});
       const bad = verifyNameAttribution(result.env, library);
       if (bad.length) throw new Error(`name attribution failed verification:\n- ${bad.join('\n- ')}`);
