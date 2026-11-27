@@ -3,6 +3,7 @@
 import {snapshotWishlist, mergeWishlistRow, toWishlistRecords} from './wishlist-rows.mjs';
 import {snapshotLibrary, mergeLibraryRow, normalizeLibraryRecord} from './library-rows.mjs';
 import {snapshotReviews} from './review-rows.mjs';
+import {b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity} from './identity-probe.mjs';
 import {snapshotReplay, replayLoading, dedupeReplayApps, replayYears} from './replay-rows.mjs';
 
 const LIMIT = 80;
@@ -214,4 +215,18 @@ export async function collectReplay(tab, {maxYears=20, settleMs=1200, settleCapM
   if (pending.length || missedYear) warnings.push('Year discovery stopped with unvisited reports.');
   warnings.push('Image-asset AppIDs are possible game references, not proof of annual play; semantic text is unstructured. Verify metrics and do not convert percentages to hours.');
   return envelope('replay',records,warnings,{years:records.map(r=>r.year),yearsPending:pending.length+missedYear,yearAttempts:attempts,unsettledYears});
+}
+
+// Narrow, read-only identity observation (logged_in, steamid and accountid from Steam's page data, returned only as salted fingerprints).
+// The page function is one self-contained text built from the shared identity-probe functions, so the canonicalization and fingerprint
+// bytes are exactly those of the Claude page script and the saver. Respects the runtime: if page evaluation is unavailable or refused
+// the result is {available:false}, which a caller must treat as "unobserved" and fall back to manual account confirmation; it is never
+// reported as a match. Pass {salt} to check a binding or {candidate:true} for a first binding. Observation only: it approves nothing.
+export async function collectIdentity(tab, {salt, candidate} = {}) {
+  if (!tab?.playwright?.evaluate) return {available: false, reason: 'no read-only page evaluation in this runtime'};
+  const fns = [b64uEncode, b64uDecode, canonicalSteamId64, accountIdMatches, fingerprintBytes, sha256HexOf, readSessionSources, observeIdentity];
+  const options = salt !== undefined ? {salt} : {candidate: candidate === true};
+  const page = new Function(`${fns.map(f => f.toString()).join('\n')}\nreturn observeIdentity(${JSON.stringify(options)});`);
+  try { return {available: true, ...(await tab.playwright.evaluate(page))}; }
+  catch { return {available: false, reason: 'page evaluation was refused or failed'}; } // a fixed code: arbitrary runtime exception text is never returned
 }
