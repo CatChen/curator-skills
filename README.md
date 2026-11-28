@@ -81,7 +81,7 @@ Both skills work conversationally with Codex and Claude Code. You can also provi
 
 **Goodreads:** Request and download your CSV from Goodreads' [Import/Export page](https://www.goodreads.com/review/import), then give your AI the file. The optional importer uses Python 3. See the [Goodreads workflow](skills/book-curator/references/goodreads.md). Amazon Kindle and Audible are not automated integrations. A Goodreads to-read shelf indicates interest, not necessarily ownership.
 
-For prices, historical discounts and public promotions such as Kindle First Reads, your AI can research accessible public sources when its tools allow. SteamDB and third-party book lists are examples, not dedicated integrations. If reliable information is unavailable, you can provide a list or other relevant details.
+Your curator can also research current prices, past discounts and book promotions using accessible public sources when needed.
 
 ## A curator that learns with you
 
@@ -93,7 +93,7 @@ If Codex and Claude Code can access the same authorized persistent directory, th
 
 ## Privacy and data ownership
 
-Your personal data belongs to you. By default, optional persistent files live in `~/.curator/game-curator/` and `~/.curator/book-curator/` when the runtime can access your real, user-controlled home. You can inspect or edit them, decline storage, revoke permission, or ask to remove your data.
+Your personal data belongs to you. By default, optional persistent files live in `~/.curator/` when the runtime can access your real, user-controlled home. You can inspect or edit them, decline storage, revoke permission, or ask to remove your data.
 
 - Profile and feedback persistence and raw data caching are separate opt-ins.
 - Collection is read-only; the skills never ask for your passwords, cookies or tokens.
@@ -117,10 +117,10 @@ Curator Skills starts with Steam and Goodreads, but your interests aren't limite
 - [x] Goodreads
 - [ ] Amazon Kindle
 - [ ] Audible
-- [ ] Explore NeoDB support
 
 ### Across all curators
 
+- [ ] Explore [NeoDB](https://neodb.net/) support across media types.
 - [ ] Support more AI runtimes.
 - [ ] Make data collection more reliable and require less manual intervention.
 - [ ] Improve recommendations through continued learning, including more helpful follow-up questions.
