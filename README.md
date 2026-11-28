@@ -89,6 +89,8 @@ Your curator can also research current prices, past discounts and book promotion
 
 Tell your AI why a recommendation worked or didn't, which games you finished or abandoned, which books you reread, or how much time you have. Your own reactions are more useful than popularity alone. The curator distinguishes what you've actually said from tentative inferences and adapts when you correct it.
 
+When a moment is worth it — a surprising reaction, a contrast between two experiences, or a recommendation you tried — your curator may ask one specific question after helping you, and sometimes follow up on something you were about to try, at most once. After it has learned from your Steam or Goodreads history, it may offer an optional deeper conversation about your tastes. Quick questions stay quick, and you can always decline or move on.
+
 With your permission, each skill keeps a human-readable preference profile and feedback history in your own files. You can also separately choose to cache source data so future conversations don't have to start over or import everything again. Neither is required.
 
 If Codex and Claude Code can access the same authorized persistent directory, they can use the same profile, feedback and cache. Switch AI clients without starting from scratch. There is no automatic cloud sync.
