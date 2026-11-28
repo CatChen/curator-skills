@@ -2,68 +2,133 @@
 
 > Life is short. Spend your time on things you'll love.
 
-Curator Skills is a collection of personal AI curator skills to help you discover what is worth your time, based on what you have actually experienced, what you enjoy, and what matters to you.
+Bought more games than you have time to play? Have a shelf full of books and no idea what to read next?
 
-Most recommendation systems have incentives to increase engagement, consumption, or purchases. Your curator should serve you instead: it might suggest a game you already own, a particularly relevant book, skipping a popular title, stopping an unrewarding experience, or consuming nothing new. Time already spent, popularity, ratings, and discounts alone are not reasons to continue or buy.
+Curator Skills gives your AI a way to learn what you enjoy and help you decide how to spend your limited free time. Unlike a storefront or a recommendation feed, your curator serves you — not engagement, sales, or consumption. Sometimes the best recommendation is something you already own, something worth revisiting, or nothing new at all.
 
-## Skills
+## Quick start
 
-| Skill | Intended purpose | Status |
-| --- | --- | --- |
-| Game Curator (`game-curator`) | Decide what games to play, purchase, continue, or skip using personal gaming history and preferences. | Available for conversational use; experimental partial Steam collectors have limited live verification. |
-| Book Curator (`book-curator`) | Decide what books to read, revisit, purchase, continue, or skip using personal reading history and preferences. It is export-first: it uses conversation, Goodreads' official export and files you provide; it does not automate Amazon or Kindle. | Available for conversational use in Codex and Claude Code; Goodreads CSV import tested against an authenticated export; existing Amazon snapshots are read as historical evidence only. |
+[Install](#installation) Game Curator, Book Curator, or both, then try one of these conversations. You can start with what you tell your AI; importing a library is optional.
 
-Steam collector reliability and completeness need further live verification. Book Curator does not require an import. Amazon showed a notice that unauthorized AI-agent access violates its Conditions of Use, so its browser collectors were removed and Amazon is not accessed.
+### 🎮 Game Curator
 
-## How they work
+**Play what you already own.** Your next favorite game might already be in your Steam library.
 
-With your permission, a skill will use relevant information you provide or make available, such as history, reviews, and conversation feedback. It will distinguish observations from inferred preferences, explain its reasoning and uncertainty, and learn from your corrections. A long playtime or an unfinished book can have many explanations; neither proves enjoyment or dislike. Useful advice should still be possible with partial information.
+> I bought way too many games during Steam sales. Look at my library and gaming history. I have a few hours this weekend — what should I play next?
 
-Skills are independently installable packages following the [Agent Skills specification](https://agentskills.io/specification). See the [architecture](docs/architecture.md) and [philosophy](docs/philosophy.md) for the design.
+**Make your next purchase count.** A great discount is only a good deal if you'll actually enjoy the game.
 
-## Install and try Game Curator
+> Which game on my Steam wishlist is most worth buying next? Consider my tastes, what I already own, current discounts and historical sale prices where you can verify them. Tell me if I'd be better off waiting.
 
-For a published version, the optional [skills CLI](https://github.com/vercel-labs/skills) requires Node.js 22.20 or later and npm for installation, not for ordinary conversational use. It is interactive by default. Choose the intended agent:
+**Discover your own gaming tastes.** Talk about actual experiences, not just ratings or hours played.
+
+> Let's talk about the games I've played recently. Ask me what I loved, what frustrated me, and why I stopped playing some of them. Help me figure out what kinds of games I really enjoy.
+
+### 📚 Book Curator
+
+**Read something you already have.** Make progress on your backlog instead of adding to it.
+
+> What should I read next from my backlog? I'd prefer a book I already own but haven't read.
+
+**Choose among new books and promotions.** Even a free book costs reading time.
+
+> Which of this month's Kindle First Reads books should I pick, based on what I've enjoyed reading before?
+
+**Learn from your reading experiences.** Understand what keeps you turning the pages.
+
+> Let's talk about the last few books I read. Ask me what kept me reading, what didn't work for me, and what I'd like to read more of. Help me understand my reading preferences.
+
+## Installation
+
+The two skills are independent [Agent Skills](https://agentskills.io/specification). Install the ones you want with the [skills CLI](https://github.com/vercel-labs/skills) (requires Node.js 22.20+ and npm). Game Curator also uses Node.js for its data tools. No build step is needed.
+
+**Codex**
 
 ```sh
 npx skills add CatChen/curator-skills --skill game-curator --global --agent codex
-npx skills add CatChen/curator-skills --skill game-curator --global --agent claude-code
+npx skills add CatChen/curator-skills --skill book-curator --global --agent codex
 ```
 
-The default repository branch does not include unmerged pull requests. To evaluate a particular revision, use a checkout pinned to its full commit and install from that local checkout using the CLI's documented local-path support, or use a pinned copy as described below. Review the [CLI commands and options](https://github.com/vercel-labs/skills/blob/main/docs/commands.md), [Codex skills](https://developers.openai.com/codex/skills), and [Claude Code skills](https://code.claude.com/docs/en/skills).
-
-For development, from the desired repository checkout, a maintainer can link the source to the user-level skill directory:
+**Claude Code**
 
 ```sh
-mkdir -p "$HOME/.agents/skills"
-ln -s "$(pwd)/skills/game-curator" "$HOME/.agents/skills/game-curator"
-# Alternatively, for Claude Code:
-mkdir -p "$HOME/.claude/skills"
-ln -s "$(pwd)/skills/game-curator" "$HOME/.claude/skills/game-curator"
+npx skills add CatChen/curator-skills --skill game-curator --global --agent claude-code
+npx skills add CatChen/curator-skills --skill book-curator --global --agent claude-code
 ```
 
-Inspect an existing destination first, including a dangling symlink; do not replace another installation without understanding it. A link follows subsequent source changes. For an independent evaluation, use a clean checkout at the full commit or copy its complete `game-curator` directory to an empty destination, checking that `SKILL.md`, `references/` and `scripts/` are present and no stale files remain. Do not merge a copy into an older installation.
+Start a fresh session in your AI client. Ask one of the questions above, or explicitly invoke `$game-curator` or `$book-curator` in Codex, or `/game-curator` or `/book-curator` in Claude Code.
 
-The repository's `skills/game-curator` is source; a project-level `.agents/skills/game-curator` and user-level `~/.agents/skills/game-curator` are separate discovery locations. In a fresh Codex session outside this repository, check that `$game-curator` is available and selected, then verify the loaded path and its symlink target or revision and supporting files. Reading the checkout manually is not proof of installation. If absent, restart and check discovery and project-level masking. For Claude Code, start a fresh session and check `/game-curator` and its loaded path. Installation does not itself grant browser or filesystem access and should not alter `~/.curator`.
+## Make your first recommendation more personal
 
-For Claude Cowork, package separately from the repository root with `(cd skills && zip -r /tmp/game-curator.zip game-curator)` and upload through Customize → Skills → + → Create skill → Upload a skill, subject to account capabilities. The ZIP must contain `game-curator/` at its root; Cowork upload is separate from Claude Code installation. Verify actual discovery in the target runtime.
+You can start with a simple question. No import or account is required. If you'd like your curator to use more of your history, try:
 
-Try “My favorite games are Portal 2, Fez, and Outer Wilds. What should I play next?”, “Review my wishlist,” or “Should I continue this game?” No import is required. For browser discovery ask: “Diagnose Game Curator's Steam data acquisition capabilities in this session.”
+> Get to know my gaming tastes using my Steam library, wishlist and reviews.
 
-The skill includes experimental browser-runtime collectors for Steam library, wishlist, reviews, and Replay. They use read-only DOM evaluation and browser controls, return partial data, and do not need Python or browser-console access. Initial authenticated Chrome and IAB tests exercised all four; complete coverage and structured Replay metrics remain unverified. See [collector instructions](skills/game-curator/references/acquisition.md), [Claude Code](skills/game-curator/references/claude-code.md) and [Codex](skills/game-curator/references/codex.md) runtime guides, and [manual test procedures](docs/game-curator-testing.md). Run the optional development-only synthetic tests from the repository root with `node tests/game-curator/test_browser.mjs`.
+> Help me get started with my Goodreads reading history.
 
-## Install and try Book Curator
+For automatic Steam data collection, use Codex Desktop or Claude Code in the Claude desktop app. The Goodreads workflow guides you through downloading your own export. You can also just talk about your favorite games or books.
 
-Install the independent skill from a published revision with `npx skills add CatChen/curator-skills --skill book-curator --global --agent codex`, or link `skills/book-curator` from a chosen checkout into `~/.agents/skills/book-curator` (Codex) or `~/.claude/skills/book-curator` (Claude Code). The default branch does not include unmerged pull requests; verify the installed revision and discovery in a fresh session outside this repository. Inspect the destination first, including dangling links, and do not replace an existing installation without understanding it. Install the complete directory, including references and scripts; do not merge a copy into an older installation. A link follows changes in its source checkout. When upgrading an older installation, replace the whole directory (or relink) so no removed `scripts/amazon/` collector files remain active, and never touch your cache directories while doing so. Installation does not grant access to reading accounts or personal files. It needs no dependency beyond Python 3 for the optional scripts.
+## Supported platforms and data sources
 
-Try “I liked these books for their explanations, but I only have a few hours. What should I read next?” The skill can use conversation alone, normalize a user-supplied Goodreads CSV with Python 3, or read other reading-history files you provide. The importer is synthetic-tested and was exercised against one authenticated Goodreads export; its shelf totals matched the visible counts, while broader export coverage remains unverified. See the [Goodreads export workflow](skills/book-curator/references/goodreads.md), [Amazon snapshots](skills/book-curator/references/amazon.md) (historical evidence only), and [persistence](skills/book-curator/SKILL.md#persistence). Run synthetic tests with `python3 -m unittest discover -s tests/book-curator`.
+Both skills work conversationally with Codex and Claude Code. You can also provide your own lists, notes or reading-history files. Other Agent Skills-compatible clients may also work.
 
-Book Curator's optional profile and feedback, and separately authorized raw caches, use their own user-controlled home. Measured so far: a maintainer's report of worktree-based reuse, then fresh Claude Code sessions that discovered the linked skill, reused Codex-written data and, on a scratch copy, appended a new uniquely identified feedback entry without altering earlier entries. Fresh first-use consent, separate opt-in and cleanup flows, and Codex reading Claude-written data are not yet measured. Persistence is instruction-driven. Neither persistence nor an account is required.
+| Skill | Data sources |
+| --- | --- |
+| [Game Curator](skills/game-curator/SKILL.md) | Steam library, wishlist, reviews and annual Replay reports; your own gaming history and feedback. |
+| [Book Curator](skills/book-curator/SKILL.md) | Goodreads CSV exports; your own reading lists, files and feedback. |
 
-## Privacy and contributions
+**Steam:** Game Curator collects data read-only using compatible browser tools in Codex Desktop or Claude Code in the Claude desktop app (built-in browsers or Chrome integrations). Sign in yourself when needed. Collection can be partial. Other runtimes, including standalone CLI sessions, may lack browser access; you can still use existing data or your own gaming history.
 
-Personal data should stay under your control. Collection is intended to be read-only and limited to what your task needs; this project does not introduce telemetry or a hosted data store by default. Local storage is not local processing: your chosen agent runtime, its AI provider and connected services receive whatever the agent reads in a session, under their own terms. Read the [privacy principles](docs/privacy.md) for details.
+**Goodreads:** Request and download your CSV from Goodreads' [Import/Export page](https://www.goodreads.com/review/import), then give your AI the file. The optional importer uses Python 3. See the [Goodreads workflow](skills/book-curator/references/goodreads.md). Amazon Kindle and Audible are not automated integrations. A Goodreads to-read shelf indicates interest, not necessarily ownership.
 
-Game Curator can optionally remember your preferences and feedback in a user-controlled Curator Home, conventionally `~/.curator/game-curator/` if your runtime can access your real persistent home. Caching raw Steam data is a separate opt-in. With your permission, a minimal settings file records your choices for future sessions, subject to runtime access. You can use the skill without either; inspect and manage any saved files yourself. Persistence is instruction-driven and has not yet been independently verified across sessions or runtimes. See [persistence and cache details](skills/game-curator/SKILL.md#persistence).
+Your curator can also research current prices, past discounts and book promotions using accessible public sources when needed.
 
-Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) and the [agent instructions](AGENTS.md). This repository is licensed under the [MIT License](LICENSE).
+## A curator that learns with you
+
+Tell your AI why a recommendation worked or didn't, which games you finished or abandoned, which books you reread, or how much time you have. Your own reactions are more useful than popularity alone. The curator distinguishes what you've actually said from tentative inferences and adapts when you correct it.
+
+With your permission, each skill keeps a human-readable preference profile and feedback history in your own files. You can also separately choose to cache source data so future conversations don't have to start over or import everything again. Neither is required.
+
+If Codex and Claude Code can access the same authorized persistent directory, they can use the same profile, feedback and cache. Switch AI clients without starting from scratch. There is no automatic cloud sync.
+
+## Privacy and data ownership
+
+Your personal data belongs to you. By default, optional persistent files live in `~/.curator/` when the runtime can access your real, user-controlled home. You can inspect or edit them, decline storage, revoke permission, or ask to remove your data.
+
+- Profile and feedback persistence and raw data caching are separate opt-ins.
+- Collection is read-only; the skills never ask for your passwords, cookies or tokens.
+- This project adds no telemetry or hosted personal-data backend.
+- Local storage does **not** mean local processing. Your AI runtime, provider and connected tools may process the information you share or authorize them to read.
+
+See the [privacy principles](docs/privacy.md) for details and limitations.
+
+## Roadmap
+
+Curator Skills starts with Steam and Goodreads, but your interests aren't limited to a single platform.
+
+### Game Curator
+
+- [x] Steam
+- [ ] Epic Games Store
+- [ ] GOG
+
+### Book Curator
+
+- [x] Goodreads
+- [ ] Amazon Kindle
+- [ ] Audible
+
+### Across all curators
+
+- [ ] Explore [NeoDB](https://neodb.net/) support across media types.
+- [ ] Support more AI runtimes.
+- [ ] Make data collection more reliable and require less manual intervention.
+- [ ] Improve recommendations through continued learning, including more helpful follow-up questions.
+
+Future support depends on platform capabilities, access permissions and feasibility. We'd love to hear what you use and what you'd like your curator to help you with — [open an issue](https://github.com/CatChen/curator-skills/issues).
+
+## Contributing and license
+
+Contributions and real-world feedback are welcome. See [contribution guidance](CONTRIBUTING.md), [architecture](docs/architecture.md) and [product philosophy](docs/philosophy.md).
+
+[MIT License](LICENSE).
