@@ -1,6 +1,8 @@
 ---
 name: game-curator
 description: Curate games from personal gaming history and feedback. Use for what to play next, library or wishlist reviews, purchases, whether to continue or skip a game, and to record or update gaming preferences and feedback (a game finished, stopped, liked or disliked; time, device or budget changes). Also for Steam data import, refresh and acquisition diagnostics.
+metadata:
+  version: "1.0.0"
 hooks:
   PostToolUse:
     - matcher: "mcp__Claude_Browser__javascript_tool|mcp__claude-in-chrome__javascript_tool"

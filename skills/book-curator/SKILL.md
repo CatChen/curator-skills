@@ -1,6 +1,8 @@
 ---
 name: book-curator
 description: Curate books from reading experiences and feedback. Use for what to read, revisit, buy, continue or skip, and to record or update reading preferences and feedback (a book finished, abandoned, liked or disliked; time or purpose changes). Also for Goodreads exports and user-provided reading-history or library files. Load it before any request involving a Kindle, Audible or Amazon library, because that access must not be automated.
+metadata:
+  version: "1.0.0"
 ---
 
 # Book Curator
