@@ -8,7 +8,7 @@ Curator Skills gives your AI a way to learn what you enjoy and help you decide h
 
 ## Quick start
 
-Install [Game Curator](#installation), [Book Curator](#installation), or both, then try one of these conversations. You can start with what you tell your AI; importing a library is optional.
+[Install](#installation) Game Curator, Book Curator, or both, then try one of these conversations. You can start with what you tell your AI; importing a library is optional.
 
 ### 🎮 Game Curator
 
@@ -34,13 +34,13 @@ Install [Game Curator](#installation), [Book Curator](#installation), or both, t
 
 > Which of this month's Kindle First Reads books should I pick, based on what I've enjoyed reading before?
 
-**Learn from your reading experiences.**
+**Learn from your reading experiences.** Understand what keeps you turning the pages.
 
 > Let's talk about the last few books I read. Ask me what kept me reading, what didn't work for me, and what I'd like to read more of. Help me understand my reading preferences.
 
 ## Installation
 
-The two skills are independent [Agent Skills](https://agentskills.io/specification). Install the ones you want with the [skills CLI](https://github.com/vercel-labs/skills) (requires Node.js and npm for installation). No build step is needed.
+The two skills are independent [Agent Skills](https://agentskills.io/specification). Install the ones you want with the [skills CLI](https://github.com/vercel-labs/skills) (requires Node.js 22.20+ and npm). Game Curator also uses Node.js for its data tools. No build step is needed.
 
 **Codex**
 
@@ -58,7 +58,7 @@ npx skills add CatChen/curator-skills --skill book-curator --global --agent clau
 
 Start a fresh session in your AI client. Ask one of the questions above, or explicitly invoke `$game-curator` or `$book-curator` in Codex, or `/game-curator` or `/book-curator` in Claude Code.
 
-### Make your first recommendation more personal
+## Make your first recommendation more personal
 
 You can start with a simple question. No import or account is required. If you'd like your curator to use more of your history, try:
 
@@ -66,18 +66,18 @@ You can start with a simple question. No import or account is required. If you'd
 
 > Help me get started with my Goodreads reading history.
 
-The Steam workflow uses a supported browser; the Goodreads workflow guides you through downloading your own export. You can also just talk about your favorite games or books.
+For automatic Steam data collection, use Codex Desktop or Claude Code in the Claude desktop app. The Goodreads workflow guides you through downloading your own export. You can also just talk about your favorite games or books.
 
 ## Supported platforms and data sources
 
-Both skills work conversationally with Codex and Claude Code. You can also provide your own lists, notes or reading-history files. Other Agent Skills-compatible clients may work, depending on their capabilities.
+Both skills work conversationally with Codex and Claude Code. You can also provide your own lists, notes or reading-history files. Other Agent Skills-compatible clients may also work.
 
 | Skill | Data sources |
 | --- | --- |
 | [Game Curator](skills/game-curator/SKILL.md) | Steam library, wishlist, reviews and annual Replay reports; your own gaming history and feedback. |
 | [Book Curator](skills/book-curator/SKILL.md) | Goodreads CSV exports; your own reading lists, files and feedback. |
 
-**Steam:** Game Curator includes read-only browser collectors for Codex Desktop and Claude Desktop's Claude Code, with compatible browser tools (including their built-in browsers or Chrome integrations). Sign in yourself when needed. Collection can be partial; available fields and delivery depend on the runtime, account and page. If browser access is unavailable, use existing data or provide your own information.
+**Steam:** Game Curator collects data read-only using compatible browser tools in Codex Desktop or Claude Code in the Claude desktop app (built-in browsers or Chrome integrations). Sign in yourself when needed. Collection can be partial. Other runtimes, including standalone CLI sessions, may lack browser access; you can still use existing data or your own gaming history.
 
 **Goodreads:** Request and download your CSV from Goodreads' [Import/Export page](https://www.goodreads.com/review/import), then give your AI the file. The optional importer uses Python 3. See the [Goodreads workflow](skills/book-curator/references/goodreads.md). Amazon Kindle and Audible are not automated integrations. A Goodreads to-read shelf indicates interest, not necessarily ownership.
 
@@ -125,7 +125,7 @@ Curator Skills starts with Steam and Goodreads, but your interests aren't limite
 - [ ] Make data collection more reliable and require less manual intervention.
 - [ ] Improve recommendations through continued learning, including more helpful follow-up questions.
 
-These are planned or exploratory directions, not release commitments. Integration availability depends on platform capabilities, access permissions and technical feasibility. We'd love to hear what you use and what you'd like your curator to help you with — [open an issue](https://github.com/CatChen/curator-skills/issues).
+Future support depends on platform capabilities, access permissions and feasibility. We'd love to hear what you use and what you'd like your curator to help you with — [open an issue](https://github.com/CatChen/curator-skills/issues).
 
 ## Contributing and license
 
