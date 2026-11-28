@@ -28,17 +28,15 @@ Install [Game Curator](#installation), [Book Curator](#installation), or both, t
 
 **Read something you already have.** Make progress on your backlog instead of adding to it.
 
-> Help me choose my next book from the books I own but haven't read. I have a Goodreads to-read list and can tell you which books I actually own. What would be worth starting tonight?
+> What should I read next from my backlog? I'd prefer a book I already own but haven't read.
 
 **Choose among new books and promotions.** Even a free book costs reading time.
 
-> Here are this month's Kindle First Reads selections. Which one, if any, would I enjoy most given the books I've liked before? Tell me what makes it a good fit without spoiling the story.
+> Which of this month's Kindle First Reads books should I pick, based on what I've enjoyed reading before?
 
 **Learn from your reading experiences.**
 
 > Let's talk about the last few books I read. Ask me what kept me reading, what didn't work for me, and what I'd like to read more of. Help me understand my reading preferences.
-
-For live prices and historical discounts, the AI can consult accessible sources (such as SteamDB when available) or information you supply; there is no dedicated price-tracking integration. For Kindle First Reads or other promotions, provide the list, email or screenshot yourself. Book Curator does not automate Amazon access. A Goodreads to-read shelf expresses interest, not necessarily ownership.
 
 ## Installation
 
@@ -60,6 +58,16 @@ npx skills add CatChen/curator-skills --skill book-curator --global --agent clau
 
 Start a fresh session in your AI client. Ask one of the questions above, or explicitly invoke `$game-curator` or `$book-curator` in Codex, or `/game-curator` or `/book-curator` in Claude Code.
 
+### Make your first recommendation more personal
+
+You can start with a simple question. No import or account is required. If you'd like your curator to use more of your history, try:
+
+> Get to know my gaming tastes using my Steam library, wishlist and reviews.
+
+> Help me get started with my Goodreads reading history.
+
+The Steam workflow uses a supported browser; the Goodreads workflow guides you through downloading your own export. You can also just talk about your favorite games or books.
+
 ## Supported platforms and data sources
 
 Both skills work conversationally with Codex and Claude Code. You can also provide your own lists, notes or reading-history files. Other Agent Skills-compatible clients may work, depending on their capabilities.
@@ -71,7 +79,9 @@ Both skills work conversationally with Codex and Claude Code. You can also provi
 
 **Steam:** Game Curator includes read-only browser collectors for Codex Desktop and Claude Desktop's Claude Code, with compatible browser tools (including their built-in browsers or Chrome integrations). Sign in yourself when needed. Collection can be partial; available fields and delivery depend on the runtime, account and page. If browser access is unavailable, use existing data or provide your own information.
 
-**Goodreads:** Request and download your CSV from Goodreads' [Import/Export page](https://www.goodreads.com/review/import), then give your AI the file. The optional importer uses Python 3. See the [Goodreads workflow](skills/book-curator/references/goodreads.md). Amazon Kindle and Audible are not automated integrations; provide your own files or lists instead.
+**Goodreads:** Request and download your CSV from Goodreads' [Import/Export page](https://www.goodreads.com/review/import), then give your AI the file. The optional importer uses Python 3. See the [Goodreads workflow](skills/book-curator/references/goodreads.md). Amazon Kindle and Audible are not automated integrations. A Goodreads to-read shelf indicates interest, not necessarily ownership.
+
+For prices, historical discounts and public promotions such as Kindle First Reads, your AI can research accessible public sources when its tools allow. SteamDB and third-party book lists are examples, not dedicated integrations. If reliable information is unavailable, you can provide a list or other relevant details.
 
 ## A curator that learns with you
 
