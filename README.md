@@ -1,5 +1,7 @@
 # Curator Skills
 
+> English | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md)
+
 > Life is short. Spend your time on things you'll love.
 
 Bought more games than you have time to play? Have a shelf full of books and no idea what to read next?
