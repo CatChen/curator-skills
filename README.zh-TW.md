@@ -1,6 +1,6 @@
 # Curator Skills
 
-> [English](README.md) | [简体中文](README.zh-CN.md) | 繁體中文
+[English](README.md) | [简体中文](README.zh-CN.md) | 繁體中文
 
 > 人生苦短，把時間留給自己真正熱愛的事物。
 
